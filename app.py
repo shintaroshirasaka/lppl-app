@@ -360,31 +360,32 @@ def main():
     st.write("### バブル度スコア（現在の期間設定）")
     st.metric("Bubble Score (0–100)", score)
 
-    # ----------------------------
-    # 信号機カラー表示
-    # ----------------------------
-    if score >= 80:
-        icon = "🔴"
-        title = "危険"
-        note = ""
-    elif score >= 60:
-        icon = "🟡"
-        title = "注意"
-        note = ""
-    else:
-        icon = "🟢"
-        title = "安全"
-        note = ""
+st.write("### バブル度スコア（現在の期間設定）")
+st.caption("Bubble Score (0–100)")   # ラベルだけ残したい場合
 
-    st.markdown(
-        f"""
-        <div style="margin-top:10px;">
-            <div style="font-size:42px; font-weight:bold;">{score}</div>
-            <div style="font-size:36px; font-weight:bold;">{icon} {title}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+# ----------------------------
+# 信号機カラー表示（ここでスコアを1回だけ大きく表示）
+# ----------------------------
+if score >= 80:
+    icon = "🔴"
+    title = "危険"
+elif score >= 60:
+    icon = "🟡"
+    title = "注意"
+else:
+    icon = "🟢"
+    title = "安全"
+
+st.markdown(
+    f"""
+    <div style="margin-top:10px;">
+        <div style="font-size:42px; font-weight:bold;">{score}</div>
+        <div style="font-size:36px; font-weight:bold;">{icon} {title}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
     # --------------------------------------------------
     # 上昇倍率（参考情報）
