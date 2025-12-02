@@ -286,7 +286,7 @@ def main():
         today = date.today()
         default_end = today
         # ★ デフォルト開始日は「今日から150日前」
-        default_start = today - timedelta(days=150)
+        default_start = today - timedelta(days=220)
 
         # 開始日・終了日は2カラムで横並び
         col1, col2 = st.columns(2)
