@@ -9,7 +9,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 # -------------------------------------------------------
-# 数理モデル（LPPL）本体  ※内部名はそのまま利用
+# 数理モデル本体（内部では LPPL 形だが外には出さない）
 # -------------------------------------------------------
 
 
@@ -18,7 +18,7 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
     dt = tc - t
     dt = np.maximum(dt, 1e-6)  # log(0) 回避
-    return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
+    return A + B * (dt**m) + C * (dt**m) * np.cos(omega * np.log(dt) + phi)
 
 
 def fit_lppl_bubble(price_series):
@@ -205,18 +205,18 @@ def main():
     with st.form("input_form"):
         st.write("### 入力パラメータ")
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            ticker = st.text_input(
-                "ティッカー / 証券コード（例: AMD, PLTR, AVGO, 7203.T, 9988.HK）",
-                value="AMD",
-            )
+        # ティッカーは1列で表示
+        ticker = st.text_input(
+            "ティッカー / 証券コード（例: AMD, PLTR, AVGO, 7203.T, 9988.HK）",
+            value="AMD",
+        )
 
         today = date.today()
         default_end = today
         default_start = today - timedelta(days=250)
 
+        # 開始日・終了日は2カラムで横並び
+        col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("開始日", value=default_start)
         with col2:
@@ -307,7 +307,7 @@ def main():
         price_series.index,
         bubble_res["price_fit"],
         color="orange",
-        label="構造モデル（上昇局面）",
+        label="Model (uptrend)",
     )
 
     # 内部崩壊候補日（赤）
@@ -315,7 +315,7 @@ def main():
         bubble_res["tc_date"],
         color="red",
         linestyle="--",
-        label=f"内部崩壊候補日 ({bubble_res['tc_date'].date()})",
+        label=f"Internal collapse ({bubble_res['tc_date'].date()})",
     )
 
     # 最高値（黒）
@@ -323,7 +323,7 @@ def main():
         peak_date,
         color="black",
         linestyle=":",
-        label=f"価格の最高値日 ({peak_date.date()})",
+        label=f"Price peak ({peak_date.date()})",
     )
 
     # 下落局面（あれば）
@@ -333,20 +333,20 @@ def main():
             down_series.index,
             down_series.values,
             color="blue",
-            label=f"{ticker} 下落局面",
+            label=f"{ticker} downtrend",
         )
         ax.plot(
             down_series.index,
             neg_res["price_fit_down"],
             "--",
             color="green",
-            label="構造モデル（下落局面）",
+            label="Model (downtrend)",
         )
         ax.axvline(
             neg_res["tc_date"],
             color="green",
             linestyle="--",
-            label=f"内部底候補日 ({neg_res['tc_date'].date()})",
+            label=f"Bottom candidate ({neg_res['tc_date'].date()})",
         )
 
     ax.set_title(f"{ticker} — Bubble → Collapse → Negative Bubble")
@@ -383,4 +383,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
