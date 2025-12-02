@@ -162,6 +162,58 @@ def fit_lppl_negative_bubble(
 
 
 # -------------------------------------------------------
+# Bubble Score（0〜100）を計算する関数
+# -------------------------------------------------------
+
+
+def bubble_score(r2_up: float, m: float, tc_index: float, last_index: float):
+    """
+    バブル度スコア（0〜100）を計算する簡易指標。
+    - r2_up : 上昇局面フィットの R²
+    - m     : 形状パラメータ（0 < m < 1）
+    - tc_index : t_c のインデックス（0,1,2,...）
+    - last_index : 観測区間の最後のインデックス（N-1）
+
+    考え方：
+      1) R² が高いほどスコア↑
+      2) m が 0.5 付近ほど「典型的バブル」 → スコア↑
+      3) t_c が近いほど危険 → スコア↑（遠いと安全）
+    """
+
+    # 1) R² 成分：0.5 以下は 0 点、1.0 で 1 点になるようにクリップ
+    r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
+
+    # 2) m 成分：m=0.5 で 1 点、m=0 や 1 で 0 点
+    m_score = max(0.0, 1.0 - 2.0 * abs(m - 0.5))
+
+    # 3) t_c の近さ成分
+    gap = tc_index - last_index  # 何日「先」に t_c があるか
+
+    if gap <= 0:
+        # 既に t_c を過ぎている（いつ崩れてもおかしくない）→ 最大リスク
+        tc_score = 1.0
+    elif gap <= 30:
+        # 30 日以内に t_c → 1 点
+        tc_score = 1.0
+    elif gap >= 120:
+        # 4 ヶ月以上先なら 0 点
+        tc_score = 0.0
+    else:
+        # 30→1, 120→0 の線形補間
+        tc_score = 1.0 - (gap - 30) / (120 - 30)
+
+    # 重みづけ合成（合計 1 になるように）
+    score_0_1 = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
+    score_0_1 = max(0.0, min(1.0, score_0_1))
+
+    return int(round(100 * score_0_1)), {
+        "r_component": r_score,
+        "m_component": m_score,
+        "tc_component": tc_score,
+    }
+
+
+# -------------------------------------------------------
 # データ取得（yfinance）
 # -------------------------------------------------------
 
@@ -280,7 +332,27 @@ def main():
         neg_res = {"ok": False, "reason": "exception", "error": str(e)}
 
     # --------------------------------------------------
-    # サマリー表
+    # Bubble Score
+    # --------------------------------------------------
+    params_up = bubble_res["params"]
+    r2_up = bubble_res["r2"]
+    m_up = float(params_up[3])  # [A, B, C, m, tc, omega, phi]
+    tc_index = float(bubble_res["tc_days"])
+    last_index = float(len(price_series) - 1)
+
+    score, score_detail = bubble_score(r2_up, m_up, tc_index, last_index)
+
+    st.write("### バブル度スコア")
+    st.metric("Bubble Score (0–100)", score)
+    with st.expander("バブル度スコアの内訳"):
+        st.write(
+            f"- R² 成分: {score_detail['r_component']:.2f}\n"
+            f"- 形状パラメータ m 成分: {score_detail['m_component']:.2f}\n"
+            f"- t_c の近さ成分: {score_detail['tc_component']:.2f}"
+        )
+
+    # --------------------------------------------------
+    # 候補日サマリー
     # --------------------------------------------------
     st.write("### 候補日サマリー")
 
@@ -291,6 +363,7 @@ def main():
             round(bubble_res["r2"], 4),
         ],
         ["価格の最高値日", peak_date.date(), None],
+        ["バブル度スコア", f"{score} / 100", None],
     ]
 
     if neg_res is not None and neg_res.get("ok"):
@@ -304,7 +377,7 @@ def main():
     else:
         rows.append(["内部底候補日（下落局面）", "該当なし", None])
 
-    summary_df = pd.DataFrame(rows, columns=["イベント", "日付", "R² (参考)"])
+    summary_df = pd.DataFrame(rows, columns=["イベント", "日付 / スコア", "R² (参考)"])
     st.table(summary_df)
 
     # --------------------------------------------------
@@ -403,4 +476,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
