@@ -21,7 +21,7 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     return A + B * (dt**m) + C * (dt**m) * np.cos(omega * np.log(dt) + phi)
 
 
-def fit_lppl_bubble(price_series):
+def fit_lppl_bubble(price_series: pd.Series):
     """
     上昇局面に対して数理モデルをフィットする。
     price_series: pandas Series (index=DatetimeIndex, values=price)
@@ -77,7 +77,10 @@ def fit_lppl_bubble(price_series):
 
 
 def fit_lppl_negative_bubble(
-    price_series, peak_date, min_points=10, min_drop_ratio=0.03
+    price_series: pd.Series,
+    peak_date,
+    min_points: int = 10,
+    min_drop_ratio: float = 0.03,
 ):
     """
     価格ピーク以降の下落局面に対して、負のバブル（ネガティブバブル）をフィットする。
@@ -285,7 +288,7 @@ def main():
 
         today = date.today()
         default_end = today
-        # ★ デフォルト開始日は「今日から150日前」
+        # ★ デフォルト開始日は「今日から220日前」
         default_start = today - timedelta(days=220)
 
         # 開始日・終了日は2カラムで横並び
@@ -345,6 +348,22 @@ def main():
 
     st.write("### バブル度スコア（現在の期間設定）")
     st.metric("Bubble Score (0–100)", score)
+
+    # ----------------------------
+    # 信号機カラー表示
+    # ----------------------------
+    if score >= 80:
+        color = "🔴"
+        message = "最も危険：バブル崩壊が迫っている可能性があります。"
+    elif score >= 60:
+        color = "🟡"
+        message = "注意：バブル崩壊の可能性があります。"
+    else:
+        color = "🟢"
+        message = "比較的安全：まだバブルとは言えません。"
+
+    st.markdown(f"## {color} {message}")
+
     with st.expander("バブル度スコアの内訳"):
         st.write(
             f"- R² 成分: {score_detail['r_component']:.2f}\n"
@@ -477,4 +496,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
