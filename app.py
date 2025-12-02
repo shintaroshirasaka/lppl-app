@@ -288,7 +288,7 @@ def main():
 
         today = date.today()
         default_end = today
-        # ★ デフォルト開始日は「今日から220日前」
+        # デフォルト開始日は「今日から220日前」
         default_start = today - timedelta(days=220)
 
         # 開始日・終了日は2カラムで横並び
@@ -325,9 +325,20 @@ def main():
         st.error(f"上昇局面の解析でエラーが発生しました: {e}")
         st.stop()
 
-    # 最高値日
+    # 最高値日 & 開始日の価格
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
+    start_price = float(price_series.iloc[0])
+
+    # -----------------------------
+    # 開始日→最高値までの上昇倍率（参考情報）
+    # -----------------------------
+    if start_price > 0:
+        rise_ratio = peak_price / start_price
+        rise_percent = (rise_ratio - 1.0) * 100.0
+    else:
+        rise_ratio = float("nan")
+        rise_percent = float("nan")
 
     # 下落局面のモデルフィット（失敗しても致命的エラーにはしない）
     try:
@@ -353,17 +364,44 @@ def main():
     # 信号機カラー表示
     # ----------------------------
     if score >= 80:
-        color = "🔴"
-        message = "危険"
+        icon = "🔴"
+        title = "危険"
+        note = ""
     elif score >= 60:
-        color = "🟡"
-        message = "注意"
+        icon = "🟡"
+        title = "注意"
+        note = ""
     else:
-        color = "🟢"
-        message = "安全"
+        icon = "🟢"
+        title = "安全"
+        note = ""
 
-    st.markdown(f"## {color} {message}")
+    st.markdown(
+        f"""
+        <div style="margin-top:10px;">
+            <div style="font-size:42px; font-weight:bold;">{score}</div>
+            <div style="font-size:36px; font-weight:bold;">{icon} {title}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+    # --------------------------------------------------
+    # 上昇倍率（参考情報）
+    # --------------------------------------------------
+    st.write("### 上昇倍率（参考）")
+    if start_price > 0:
+        st.metric(
+            "開始日 → 最高値",
+            f"{rise_ratio:.2f}倍",
+            f"{rise_percent:+.1f}%",
+        )
+    else:
+        st.write("開始価格が 0 のため、上昇倍率を計算できません。")
+
+    # --------------------------------------------------
+    # バブル度スコア内訳
+    # --------------------------------------------------
     with st.expander("バブル度スコアの内訳"):
         st.write(
             f"- R² 成分: {score_detail['r_component']:.2f}\n"
@@ -384,6 +422,9 @@ def main():
         ],
         ["価格の最高値日", peak_date.date(), None],
         ["バブル度スコア（現在の期間）", f"{score} / 100", None],
+        ["開始日→最高値までの上昇倍率", f"{rise_ratio:.2f}倍", None]
+        if start_price > 0
+        else ["開始日→最高値までの上昇倍率", "計算不可", None],
     ]
 
     if neg_res is not None and neg_res.get("ok"):
@@ -397,7 +438,7 @@ def main():
     else:
         rows.append(["内部底候補日（下落局面）", "該当なし", None])
 
-    summary_df = pd.DataFrame(rows, columns=["イベント", "日付 / スコア", "R² (参考)"])
+    summary_df = pd.DataFrame(rows, columns=["イベント", "日付 / スコア / 倍率", "R² (参考)"])
     st.table(summary_df)
 
     # --------------------------------------------------
