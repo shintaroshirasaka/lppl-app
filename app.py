@@ -31,7 +31,7 @@ def fit_lppl_bubble(price_series: pd.Series):
 
     # 初期値
     A_init = np.mean(log_price)
-    B_init = -1
+    B_init = -1.0
     C_init = 0.1
     m_init = 0.5
     tc_init = N + 20
@@ -72,7 +72,12 @@ def fit_lppl_bubble(price_series: pd.Series):
     }
 
 
-def fit_lppl_negative_bubble(price_series, peak_date, min_points=10, min_drop_ratio=0.03):
+def fit_lppl_negative_bubble(
+    price_series: pd.Series,
+    peak_date,
+    min_points: int = 10,
+    min_drop_ratio: float = 0.03,
+):
     """下落局面の負バブル解析（成功しない場合は ok=False）"""
 
     down_series = price_series[price_series.index >= peak_date].copy()
@@ -94,7 +99,7 @@ def fit_lppl_negative_bubble(price_series, peak_date, min_points=10, min_drop_ra
 
     N_down = len(t_down)
     A_init = np.mean(neg_log_down)
-    B_init = -1
+    B_init = -1.0
     C_init = 0.1
     m_init = 0.5
     tc_init = N_down + 15
@@ -146,8 +151,8 @@ def fit_lppl_negative_bubble(price_series, peak_date, min_points=10, min_drop_ra
 
 def bubble_score(r2_up, m, tc_index, last_index):
     """Bubble Score（0〜100）"""
-    r_score = max(0, min(1, (r2_up - 0.5) / 0.5))
-    m_score = max(0, 1 - 2 * abs(m - 0.5))
+    r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
+    m_score = max(0.0, 1.0 - 2.0 * abs(m - 0.5))
 
     gap = tc_index - last_index
     if gap <= 0:
@@ -160,7 +165,8 @@ def bubble_score(r2_up, m, tc_index, last_index):
         tc_score = 1.0 - (gap - 30) / (120 - 30)
 
     score_0_1 = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
-    score = int(round(100 * max(0, min(1, score_0_1))))
+    score_0_1 = max(0.0, min(1.0, score_0_1))
+    score = int(round(100 * score_0_1))
 
     return score, {
         "r_component": r_score,
@@ -211,11 +217,11 @@ def main():
     with st.form("input_form"):
         st.write("### 入力パラメータ")
 
-        ticker = st.text_input("ティッカー（例: AMD, PLTR, 9988.HK）", "AMD")
+        ticker = st.text_input("ティッカー / 証券コード（例: AMD, PLTR, 9988.HK）", "AMD")
 
         today = date.today()
         default_end = today
-        default_start = today - timedelta(days=220)
+        default_start = today - timedelta(days=220)  # デフォルト220日
 
         col1, col2 = st.columns(2)
         with col1:
@@ -244,7 +250,7 @@ def main():
     peak_price = float(price_series.max())
 
     rise_ratio = peak_price / start_price
-    rise_percent = (rise_ratio - 1) * 100
+    rise_percent = (rise_ratio - 1.0) * 100.0
 
     # --- Bubble Score ---
     params_up = bubble_res["params"]
@@ -271,10 +277,15 @@ def main():
 
     st.markdown(
         f"""
-        <div style="margin-top:10px;">
-            <div style="font-size:42px; font-weight:bold;">{score}</div>
-            <div style="font-size:36px; font-weight:bold;">{icon} {title}</div>
+        <div style="margin-top:0px;">
+            <div style="font-size:42px; font-weight:bold; line-height:1;">
+                {score}
+            </div>
+            <div style="font-size:36px; font-weight:bold; line-height:1.1;">
+                {icon} {title}
+            </div>
         </div>
+        <div style="margin-bottom:25px;"></div>
         """,
         unsafe_allow_html=True,
     )
@@ -309,12 +320,14 @@ def main():
 
     if neg_res.get("ok"):
         rows.append(
-            ["内部底候補日（下落局面）", neg_res["tc_date"].date(), round(neg_res["r2"], 4)]
+            [
+                "内部底候補日（下落局面）",
+                neg_res["tc_date"].date(),
+                round(neg_res["r2"], 4),
+            ]
         )
     else:
-        rows.append(
-            ["内部底候補日（下落局面）", "該当なし", None]
-        )
+        rows.append(["内部底候補日（下落局面）", "該当なし", None])
 
     st.table(pd.DataFrame(rows, columns=["イベント", "日付 / スコア / 倍率", "R²"]))
 
@@ -322,16 +335,47 @@ def main():
     st.write("### 統合グラフ")
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(price_series.index, price_series.values, color="lightgray", label=f"{ticker} price (actual)")
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Model (uptrend)")
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"Internal collapse ({bubble_res['tc_date'].date()})")
-    ax.axvline(peak_date, color="black", linestyle=":", label=f"Price peak ({peak_date.date()})")
+    ax.plot(
+        price_series.index,
+        price_series.values,
+        color="lightgray",
+        label=f"{ticker} price (actual)",
+    )
+    ax.plot(
+        price_series.index,
+        bubble_res["price_fit"],
+        color="orange",
+        label="Model (uptrend)",
+    )
+    ax.axvline(
+        bubble_res["tc_date"],
+        color="red",
+        linestyle="--",
+        label=f"Internal collapse ({bubble_res['tc_date'].date()})",
+    )
+    ax.axvline(
+        peak_date,
+        color="black",
+        linestyle=":",
+        label=f"Price peak ({peak_date.date()})",
+    )
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="blue", label=f"{ticker} downtrend")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Model (downtrend)")
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"Bottom candidate ({neg_res['tc_date'].date()})")
+        ax.plot(
+            down.index,
+            neg_res["price_fit_down"],
+            "--",
+            color="green",
+            label="Model (downtrend)",
+        )
+        ax.axvline(
+            neg_res["tc_date"],
+            color="green",
+            linestyle="--",
+            label=f"Bottom candidate ({neg_res['tc_date'].date()})",
+        )
 
     ax.set_title(f"{ticker} — Bubble → Collapse → Negative Bubble")
     ax.set_xlabel("Date")
