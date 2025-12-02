@@ -285,7 +285,8 @@ def main():
 
         today = date.today()
         default_end = today
-        default_start = today - timedelta(days=250)
+        # ★ デフォルト開始日は「今日から150日前」
+        default_start = today - timedelta(days=150)
 
         # 開始日・終了日は2カラムで横並び
         col1, col2 = st.columns(2)
@@ -332,7 +333,7 @@ def main():
         neg_res = {"ok": False, "reason": "exception", "error": str(e)}
 
     # --------------------------------------------------
-    # Bubble Score（メイン期間）
+    # Bubble Score（現在期間のみ）
     # --------------------------------------------------
     params_up = bubble_res["params"]
     r2_up = bubble_res["r2"]
@@ -344,7 +345,7 @@ def main():
 
     st.write("### バブル度スコア（現在の期間設定）")
     st.metric("Bubble Score (0–100)", score)
-    with st.expander("バブル度スコアの内訳（現在の期間）"):
+    with st.expander("バブル度スコアの内訳"):
         st.write(
             f"- R² 成分: {score_detail['r_component']:.2f}\n"
             f"- 形状パラメータ m 成分: {score_detail['m_component']:.2f}\n"
@@ -381,52 +382,9 @@ def main():
     st.table(summary_df)
 
     # --------------------------------------------------
-    # バブル度スコア比較（150日 vs 250日）
+    # 統合グラフ（現在の期間設定）
     # --------------------------------------------------
-    st.write("### バブル度スコア比較（150日 vs 250日）")
-
-    comp_rows = []
-    for window in [150, 250]:
-        label = f"{window} 日"
-        if len(price_series) < window:
-            comp_rows.append([label, "データ不足", "", "", ""])
-            continue
-
-        sub = price_series.iloc[-window:]
-
-        try:
-            res_w = fit_lppl_bubble(sub)
-            params_w = res_w["params"]
-            r2_w = res_w["r2"]
-            m_w = float(params_w[3])
-            tc_idx_w = float(res_w["tc_days"])
-            last_idx_w = float(len(sub) - 1)
-            score_w, detail_w = bubble_score(r2_w, m_w, tc_idx_w, last_idx_w)
-
-            comp_rows.append(
-                [
-                    label,
-                    score_w,
-                    round(r2_w, 4),
-                    res_w["tc_date"].date(),
-                    f"{detail_w['r_component']:.2f} / "
-                    f"{detail_w['m_component']:.2f} / "
-                    f"{detail_w['tc_component']:.2f}",
-                ]
-            )
-        except Exception:
-            comp_rows.append([label, "計算失敗", "", "", ""])
-
-    comp_df = pd.DataFrame(
-        comp_rows,
-        columns=["期間", "Bubble Score", "R²", "内部崩壊候補日", "内訳 (R² / m / tc)"],
-    )
-    st.table(comp_df)
-
-    # --------------------------------------------------
-    # 統合グラフ（ユーザー指定期間）
-    # --------------------------------------------------
-    st.write("### 統合グラフ（現在の期間設定）")
+    st.write("### 統合グラフ")
 
     fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -519,3 +477,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
