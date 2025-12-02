@@ -59,8 +59,8 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
-    tc_days = params[4]
-    tc_date = first_date + timedelta(days=float(tc_days))
+    tc_days = float(params[4])
+    tc_date = first_date + timedelta(days=tc_days)
 
     return {
         "params": params,
@@ -128,8 +128,8 @@ def fit_lppl_negative_bubble(
     r2 = 1 - ss_res / ss_tot
 
     first_date = down.index[0]
-    tc_days = params[4]
-    tc_date = first_date + timedelta(days=float(tc_days))
+    tc_days = float(params[4])
+    tc_date = first_date + timedelta(days=tc_days)
 
     return {
         "ok": True,
@@ -239,8 +239,8 @@ def main():
     # --- 上昇バブル解析 ---
     bubble_res = fit_lppl_bubble(price_series)
 
-    # 最高値＆上昇倍率
-    peak_date = price_series[idx_max := price_series.values.argmax()]
+    # 最高値 & 上昇倍率
+    peak_date = price_series.idxmax()            # ★ ここを修正：idxmax() で日付を取得
     peak_price = float(price_series.max())
     start_price = float(price_series.iloc[0])
 
@@ -251,13 +251,13 @@ def main():
     params_up = bubble_res["params"]
     r2_up = bubble_res["r2"]
     m_up = params_up[3]
-    tc_index = bubble_res["tc_days"]
-    last_index = len(price_series) - 1
+    tc_index = float(bubble_res["tc_days"])
+    last_index = float(len(price_series) - 1)
 
     score, score_detail = bubble_score(r2_up, m_up, tc_index, last_index)
 
     # ------------------------------------------------
-    # バブル度スコア表示（シンプル版）
+    # バブル度スコア表示
     # ------------------------------------------------
     st.write("### バブル度スコア")
     st.caption("Bubble Score (0–100)")
