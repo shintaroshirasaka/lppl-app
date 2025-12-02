@@ -76,16 +76,36 @@ def fit_lppl_bubble(price_series):
     }
 
 
-def fit_lppl_negative_bubble(price_series, peak_date, min_points=10):
+def fit_lppl_negative_bubble(
+    price_series, peak_date, min_points=10, min_drop_ratio=0.03
+):
     """
     価格ピーク以降の下落局面に対して、負のバブル（ネガティブバブル）をフィットする。
-    - 条件を満たさない場合やフィットに失敗した場合は ok=False で返す。
+
+    - データ点数が少ない
+    - そもそも下落していない（まだ上昇トレンド）
+    - 数値的にフィットが不安定
+
+    などのケースでは ok=False を返し、「内部底候補日なし」として扱う。
     """
+
+    # ピーク以降のデータだけを取り出す
     down_series = price_series[price_series.index >= peak_date].copy()
 
+    # 1) データが少なすぎる場合
     if len(down_series) < min_points:
         return {"ok": False, "reason": "points_short"}
 
+    # 2) まだほとんど下落していない場合（上昇トレンド中）
+    peak_price = float(price_series.loc[peak_date])
+    last_price = float(down_series.iloc[-1])
+    drop_ratio = (peak_price - last_price) / peak_price  # どれくらい下がったか（割合）
+
+    if drop_ratio < min_drop_ratio:
+        # 例: 3% 未満しか下がっていなければ「下落局面が始まっていない」と判断
+        return {"ok": False, "reason": "not_dropping_enough"}
+
+    # ここから実際のフィット
     price_down = down_series.values.astype(float)
     t_down = np.arange(len(price_down), dtype=float)
 
@@ -383,3 +403,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
