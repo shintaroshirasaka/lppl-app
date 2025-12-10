@@ -9,34 +9,38 @@ import streamlit as st
 
 
 # -------------------------------------------------------
-# LPPL-like Model
+# LPPL-like model
 # -------------------------------------------------------
 
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
     dt = np.maximum(tc - t, 1e-6)
-    return A + B*(dt**m) + C*(dt**m)*np.cos(omega*np.log(dt) + phi)
+    return A + B * (dt**m) + C * (dt**m) * np.cos(omega * np.log(dt) + phi)
 
 
-def fit_lppl_bubble(series):
+def fit_lppl_bubble(series: pd.Series):
     price = series.values.astype(float)
-    t = np.arange(len(price))
+    t = np.arange(len(price), dtype=float)
     logp = np.log(price)
 
     N = len(t)
-    p0 = [np.mean(logp), -1.0, 0.1, 0.5, N+20, 8.0, 0]
-    lower = [-10, -10, -10, 0.01, N+1, 2.0, -np.pi]
-    upper = [10, 10, 10, 0.99, N+250, 25.0, np.pi]
+    p0 = [np.mean(logp), -1.0, 0.1, 0.5, N + 20, 8.0, 0.0]
+    lower = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
+    upper = [10, 10, 10, 0.99, N + 250, 25.0, np.pi]
 
-    params, _ = curve_fit(lppl, t, logp, p0=p0, bounds=(lower,upper), maxfev=20000)
-    log_fit = lppl(t,*params)
+    params, _ = curve_fit(
+        lppl, t, logp, p0=p0, bounds=(lower, upper), maxfev=20000
+    )
+
+    log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    ss_res = np.sum((logp-log_fit)**2)
-    ss_tot = np.sum((logp-np.mean(logp))**2)
-    r2 = 1 - ss_res/ss_tot
+    # R²（内部のみ使用）
+    ss_res = np.sum((logp - log_fit) ** 2)
+    ss_tot = np.sum((logp - np.mean(logp)) ** 2)
+    r2 = 1 - ss_res / ss_tot
 
-    tc_days = params[4]
+    tc_days = float(params[4])
     tc_date = series.index[0] + timedelta(days=tc_days)
 
     return {
@@ -44,189 +48,152 @@ def fit_lppl_bubble(series):
         "price_fit": price_fit,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_days
+        "tc_days": tc_days,
     }
 
 
-def fit_lppl_negative_bubble(series, peak_date, min_points=10, min_drop_ratio=0.03):
-
-    down = series[series.index >= peak_date]
+def fit_lppl_negative_bubble(
+    series: pd.Series,
+    peak_date,
+    min_points: int = 10,
+    min_drop_ratio: float = 0.03,
+):
+    down = series[series.index >= peak_date].copy()
     if len(down) < min_points:
         return {"ok": False}
 
     peak_price = float(series.loc[peak_date])
     last_price = float(down.iloc[-1])
-    if (peak_price - last_price)/peak_price < min_drop_ratio:
+    if (peak_price - last_price) / peak_price < min_drop_ratio:
         return {"ok": False}
 
-    price = down.values
-    t = np.arange(len(price))
+    price = down.values.astype(float)
+    t = np.arange(len(price), dtype=float)
     neg = -np.log(price)
 
     N = len(t)
-    p0 = [np.mean(neg), -1.0, 0.1, 0.5, N+15, 8.0, 0]
-    lower = [-10,-10,-10,0.01,N+1,2.0,-np.pi]
-    upper = [10,10,10,0.99,N+200,25.0,np.pi]
+    p0 = [np.mean(neg), -1.0, 0.1, 0.5, N + 15, 8.0, 0.0]
+    lower = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
+    upper = [10, 10, 10, 0.99, N + 200, 25.0, np.pi]
 
     try:
-        params,_ = curve_fit(lppl,t,neg,p0=p0,bounds=(lower,upper),maxfev=20000)
-    except:
+        params, _ = curve_fit(
+            lppl, t, neg, p0=p0, bounds=(lower, upper), maxfev=20000
+        )
+    except Exception:
         return {"ok": False}
 
-    neg_fit = lppl(t,*params)
+    neg_fit = lppl(t, *params)
     price_fit = np.exp(-neg_fit)
 
-    ss_res = np.sum((neg-neg_fit)**2)
-    ss_tot = np.sum((neg-np.mean(neg))**2)
-    r2 = 1 - ss_res/ss_tot
+    ss_res = np.sum((neg - neg_fit) ** 2)
+    ss_tot = np.sum((neg - np.mean(neg)) ** 2)
+    r2 = 1 - ss_res / ss_tot
 
-    tc_days = params[4]
+    tc_days = float(params[4])
     tc_date = down.index[0] + timedelta(days=tc_days)
 
     return {
-        "ok":True,
-        "down_series":down,
-        "price_fit_down":price_fit,
-        "r2":r2,
-        "tc_date":tc_date,
-        "tc_days":tc_days
+        "ok": True,
+        "down_series": down,
+        "price_fit_down": price_fit,
+        "r2": r2,
+        "tc_date": tc_date,
+        "tc_days": tc_days,
+        "params": params,
     }
 
 
 # -------------------------------------------------------
-# Bubble Score
+# Bubble Score (0–100)
 # -------------------------------------------------------
 
-def bubble_score(r2, m, tc_index, last_index):
+def bubble_score(r2_up, m, tc_index, last_index):
+    r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
+    m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
 
-    r_score = max(0,min(1,(r2-0.5)/0.5))
-    m_score = max(0,1-2*abs(m-0.5))
-
-    gap = tc_index-last_index
+    gap = tc_index - last_index
     if gap <= 0:
-        tc_score = 1
+        tc_score = 1.0
     elif gap <= 30:
-        tc_score = 1
+        tc_score = 1.0
     elif gap >= 120:
-        tc_score = 0
+        tc_score = 0.0
     else:
-        tc_score = 1-(gap-30)/90
+        tc_score = 1.0 - (gap - 30) / (120 - 30)
 
-    score = 0.4*r_score + 0.3*m_score + 0.3*tc_score
-    return int(round(100*max(0,min(1,score))))
+    raw = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
+    return int(round(100 * max(0.0, min(1.0, raw))))
 
 
 # -------------------------------------------------------
-# Fetch Price
+# Price Fetch
 # -------------------------------------------------------
 
-def fetch_price_series(ticker,start_date,end_date):
-    df = yf.download(ticker,
-                     start=start_date.strftime("%Y-%m-%d"),
-                     end=(end_date+timedelta(days=1)).strftime("%Y-%m-%d"),
-                     auto_adjust=False)
+def fetch_price_series(ticker: str, start_date: date, end_date: date):
+    df = yf.download(
+        ticker,
+        start=start_date.strftime("%Y-%m-%d"),
+        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=False,
+    )
     if df.empty:
-        raise ValueError("No data")
-    return df["Adj Close"].dropna()
+        raise ValueError("No price data.")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        s = df[("Adj Close", ticker)] if ("Adj Close", ticker) in df else df[("Close", ticker)]
+    else:
+        s = df["Adj Close"] if "Adj Close" in df else df["Close"]
+
+    return s.dropna()
 
 
 # -------------------------------------------------------
-# MAIN APP
+# Main App
 # -------------------------------------------------------
 
 def main():
-
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # =============================
-    # DARK THEME CSS（白枠完全除去）
-    # =============================
-    st.markdown("""
-    <style>
+    # ---- Simple dark theme ----
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAppViewContainer"] {
+            background-color: #0b0c0e !important;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(0,0,0,0) !important;
+        }
+        .stTextInput > div > div > input,
+        .stDateInput > div > div > input {
+            background-color: #1a1c1f !important;
+            color: #ffffff !important;
+            border: 1px solid #444 !important;
+        }
+        .stButton button {
+            background-color: #222428 !important;
+            color: #ffffff !important;
+            border-radius: 6px !important;
+            border: 1px solid #555 !important;
+        }
+        .stButton button:hover {
+            background-color: #333 !important;
+            border-color: #777 !important;
+        }
+        h1, h2, h3, h4 {
+            color: #f2f2f2 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    /* Main background */
-    [data-testid="stAppViewContainer"] {
-        background-color: #0b0c0e !important;
-    }
-
-    /* Header transparent */
-    [data-testid="stHeader"] {
-        background: rgba(0,0,0,0) !important;
-    }
-
-    /* Label */
-    label {
-        color: #d0d0d0 !important;
-    }
-
-    /* Input base styling */
-    input, textarea {
-        background-color: #1c1d1f !important;
-        color: white !important;
-        border-radius: 6px !important;
-        border: 1px solid #444 !important;
-        outline: none !important;
-        box-shadow: none !important;
-    }
-
-    /* Remove focus/hover outline */
-    input:focus, input:hover, input:active {
-        outline: none !important;
-        box-shadow: none !important;
-        border-color: #666 !important;
-    }
-
-    /* Streamlit wrapper border 強制黒化 */
-    div[data-baseweb="input"] {
-        border: 1px solid #444 !important;
-        background-color: #1c1d1f !important;
-        border-radius: 6px !important;
-    }
-    div[data-baseweb="input"]:hover {
-        border: 1px solid #666 !important;
-    }
-    div[data-baseweb="input"]:focus-within {
-        border: 1px solid #777 !important;
-        box-shadow: none !important;
-    }
-
-    /* Run button */
-    .stButton > button {
-        background-color: #222428 !important;
-        color: white !important;
-        border-radius: 6px !important;
-        border: 1px solid #555 !important;
-    }
-    .stButton > button:hover {
-        background-color: #333 !important;
-        border-color: #777 !important;
-    }
-    .stButton > button:disabled {
-        background-color: #1c1d1f !important;
-        color: #777 !important;
-        border-color: #444 !important;
-    }
-
-    /* Headings */
-    h1, h2, h3 {
-        color: #f2f2f2 !important;
-    }
-
-    /* Plot */
-    .stPyplotCanvas {
-        background-color: #0b0c0e !important;
-    }
-
-    </style>
-    """, unsafe_allow_html=True)
-
+    # ----- Title -----
     st.title("Out-stander")
 
-    # -----------------------------
-    # Input Form
-    # -----------------------------
+    # ----- Input Form -----
     with st.form("form"):
-
         ticker = st.text_input("Ticker", "TSM")
 
         today = date.today()
@@ -243,45 +210,38 @@ def main():
     if not submitted:
         st.stop()
 
-    # -----------------------------
-    # Data
-    # -----------------------------
+    # ----- Fetch Data -----
     series = fetch_price_series(ticker, start_date, end_date)
-
     if len(series) < 30:
         st.error("Insufficient data.")
         st.stop()
 
-    # -----------------------------
-    # Models
-    # -----------------------------
+    # ----- Uptrend Model -----
     up = fit_lppl_bubble(series)
 
     peak_date = series.idxmax()
     peak_price = float(series.max())
     start_price_v = float(series.iloc[0])
-    gain = peak_price/start_price_v
-    gain_pct = (gain-1)*100
+    gain = peak_price / start_price_v
+    gain_pct = (gain - 1.0) * 100.0
 
     params = up["params"]
     r2 = up["r2"]
     m = params[3]
     tc_index = up["tc_days"]
-    last_index = len(series)-1
-    score = bubble_score(r2,m,tc_index,last_index)
+    last_index = len(series) - 1
+    score = bubble_score(r2, m, tc_index, last_index)
 
+    # ----- Downtrend Model -----
     neg = fit_lppl_negative_bubble(series, peak_date)
 
-    # -----------------------------
-    # Plot
-    # -----------------------------
-    fig,ax = plt.subplots(figsize=(10,5))
+    # ----- Plot -----
+    fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
     ax.plot(series.index, series.values, color="gray", label=ticker)
     ax.plot(series.index, up["price_fit"], color="orange", label="Up model")
-
     ax.axvline(up["tc_date"], color="red", linestyle="--",
                label=f"Turn (up) {up['tc_date'].date()}")
     ax.axvline(peak_date, color="white", linestyle=":",
@@ -303,22 +263,86 @@ def main():
 
     st.pyplot(fig)
 
-    # -----------------------------
-    # UI Output
-    # -----------------------------
-    st.subheader("Score")
-    st.markdown(f"<h1>{score}</h1>", unsafe_allow_html=True)
-
+    # --------------------------------------------------
+    #  Score & Gain cards
+    # --------------------------------------------------
+    # Risk label & color
     if score >= 80:
-        st.write("🔴 High Risk")
+        risk_label = "High"
+        risk_color = "#ff4d4f"
     elif score >= 60:
-        st.write("🟡 Caution")
+        risk_label = "Caution"
+        risk_color = "#ffc53d"
     else:
-        st.write("🟢 Safe")
+        risk_label = "Safe"
+        risk_color = "#52c41a"
 
-    st.subheader("Gain")
-    st.metric("Start → Peak", f"{gain:.2f}x", f"{gain_pct:+.1f}%")
+    col_score, col_gain = st.columns(2)
 
+    # ----- Score Card -----
+    with col_score:
+        score_card_html = f"""
+        <div style="
+            background-color: #141518;
+            border: 1px solid #2a2c30;
+            border-radius: 12px;
+            padding: 18px 20px 16px 20px;
+        ">
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
+                Score
+            </div>
+            <div style="display: flex; align-items: baseline; gap: 12px;">
+                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">
+                    {score}
+                </div>
+                <div style="
+                    padding: 2px 10px;
+                    border-radius: 999px;
+                    background-color: {risk_color}33;
+                    color: {risk_color};
+                    font-size: 0.85rem;
+                    font-weight: 600;
+                ">
+                    {risk_label}
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(score_card_html, unsafe_allow_html=True)
+
+    # ----- Gain Card -----
+    with col_gain:
+        gain_card_html = f"""
+        <div style="
+            background-color: #141518;
+            border: 1px solid #2a2c30;
+            border-radius: 12px;
+            padding: 18px 20px 16px 20px;
+        ">
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
+                Gain
+            </div>
+            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">
+                {gain:.2f}x
+            </div>
+            <div style="font-size: 0.9rem; color: #a0a2a8; margin-top: 4px;">
+                Start → Peak
+            </div>
+            <div style="
+                margin-top: 6px;
+                display: inline-block;
+                padding: 2px 10px;
+                border-radius: 999px;
+                background-color: #102915;
+                color: #52c41a;
+                font-size: 0.85rem;
+                font-weight: 500;
+            ">
+                {gain_pct:+.1f}%
+            </div>
+        </div>
+        """
+        st.markdown(gain_card_html, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
