@@ -1,6 +1,6 @@
 # ここにさっき渡した app.py のコード全文を貼る
 import numpy as np
-import pandas as pd
+import pandas as np
 import yfinance as yf
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
@@ -56,7 +56,7 @@ def fit_lppl_bubble(price_series: pd.Series):
 
     # R² は内部でのみ利用（UIには出さない）
     ss_res = np.sum((log_price - log_fit) ** 2)
-    ss_tot = np.sum((log_price - log_price.mean()) ** 2)
+    ss_tot = np.sum((log_price - np.mean(log_price)) ** 2)
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
@@ -124,7 +124,7 @@ def fit_lppl_negative_bubble(
     neg_fit = lppl(t, *params)
     price_fit = np.exp(-neg_fit)
 
-    # 下落用の R² も内部でのみ利用可能
+    # 下落用の R² も内部でのみ利用
     ss_res = np.sum((neg - neg_fit) ** 2)
     ss_tot = np.sum((neg - neg.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -151,12 +151,9 @@ def fit_lppl_negative_bubble(
 
 def bubble_score(r2_up, m, tc_index, last_index):
     """バブル度スコア（0〜100）"""
-    # R² 成分
     r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
-    # m 成分
     m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
 
-    # t_c の近さ成分
     gap = tc_index - last_index
     if gap <= 0:
         tc_score = 1.0
@@ -169,6 +166,7 @@ def bubble_score(r2_up, m, tc_index, last_index):
 
     score_raw = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
     score = int(round(100 * max(0.0, min(1.0, score_raw))))
+
     return score
 
 
@@ -207,13 +205,13 @@ def main():
     st.set_page_config(page_title="アウトスタンダー（株価解析アプリ）", layout="wide")
 
     st.title("アウトスタンダー（株価解析アプリ）")
-    st.caption("※投資助言ではなく、数理モデルによるリサーチツールです。")
+    st.caption("※価格データから市場構造の変化を定量的に推定するリサーチツールです。")
 
     # ---------------- 入力フォーム ----------------
     with st.form("input_form"):
         st.write("### 入力パラメータ")
 
-        ticker = st.text_input("ティッカー（例: AMD, PLTR, TSM, 9988.HK）", "AMD")
+        ticker = st.text_input("ティッカー（例: AMD, PLTR, 9988.HK）", "AMD")
 
         today = date.today()
         default_start = today - timedelta(days=220)
@@ -240,7 +238,7 @@ def main():
     # ---------------- 上昇バブル解析 ----------------
     bubble_res = fit_lppl_bubble(price_series)
 
-    # 最高値＆上昇倍率
+    # 最高値 & 上昇倍率
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
     start_price = float(price_series.iloc[0])
@@ -266,7 +264,7 @@ def main():
     # ------------------------------------------------
     # ① 統合グラフ
     # ------------------------------------------------
-    st.write("### 統合グラフ")
+    st.write("### 構造解析グラフ")
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(
@@ -285,7 +283,7 @@ def main():
         bubble_res["tc_date"],
         color="red",
         linestyle="--",
-        label=f"Internal collapse {bubble_res['tc_date'].date()}",
+        label=f"Structural turning (up) {bubble_res['tc_date'].date()}",
     )
     ax.axvline(
         peak_date,
@@ -296,12 +294,7 @@ def main():
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(
-            down.index,
-            down.values,
-            color="blue",
-            label=f"{ticker} downtrend",
-        )
+        ax.plot(down.index, down.values, color="blue", label=f"{ticker} downtrend")
         ax.plot(
             down.index,
             neg_res["price_fit_down"],
@@ -313,10 +306,10 @@ def main():
             neg_res["tc_date"],
             color="green",
             linestyle="--",
-            label=f"Bottom {neg_res['tc_date'].date()}",
+            label=f"Structural turning (down) {neg_res['tc_date'].date()}",
         )
 
-    ax.set_title(f"{ticker} — Bubble → Collapse → Negative Bubble")
+    ax.set_title(f"{ticker} — Structural Trend Analysis")
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
     ax.legend(loc="best")
@@ -328,7 +321,7 @@ def main():
     # ② バブル度スコア
     # ------------------------------------------------
     st.write("### バブル度スコア")
-    st.caption("Bubble Score (0–100)")
+    st.caption("価格動向の“過熱度”を 0〜100 で定量化した指標です。")
 
     if score >= 80:
         icon = "🔴"
@@ -362,21 +355,21 @@ def main():
     st.metric("開始日 → 最高値", f"{rise_ratio:.2f}倍", f"{rise_percent:+.1f}%")
 
     # ------------------------------------------------
-    # ④ 候補日サマリー（R² は表示しない）
+    # ④ 候補日サマリー
     # ------------------------------------------------
-    st.write("### 候補日サマリー")
+    st.write("### 構造的な節目（サマリー）")
 
     rows = [
-        ["内部崩壊候補日（上昇）", bubble_res["tc_date"].date()],
+        ["構造的転換点（上昇）", bubble_res["tc_date"].date()],
         ["最高値の日付", peak_date.date()],
         ["バブル度スコア", f"{score} / 100"],
         ["開始日→最高値の上昇倍率", f"{rise_ratio:.2f}倍"],
     ]
 
     if neg_res.get("ok"):
-        rows.append(["内部底候補日（下落）", neg_res["tc_date"].date()])
+        rows.append(["構造的転換点（下落）", neg_res["tc_date"].date()])
     else:
-        rows.append(["内部底候補日（下落）", "該当なし"])
+        rows.append(["構造的転換点（下落）", "該当なし"])
 
     summary_df = pd.DataFrame(rows, columns=["イベント", "数値 / 日付"])
     st.table(summary_df)
