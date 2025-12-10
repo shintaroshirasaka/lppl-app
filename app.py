@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
-import os  # ファイル存在確認用にインポート追加
+import os
 
 # -------------------------------------------------------
 # LPPL-like model
@@ -205,40 +205,54 @@ def fetch_price_series(ticker: str, start_date: date, end_date: date):
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # ---- 簡易ダークテーマ（背景だけ黒） ----
+    # ---- CSS修正版：文字色を強制的に白くする設定 ----
     st.markdown(
         """
         <style>
+        /* アプリ全体の背景と基本文字色 */
         [data-testid="stAppViewContainer"] {
             background-color: #0b0c0e;
-            color: #f2f2f2;
+            color: #ffffff;
         }
         [data-testid="stHeader"] {
             background: rgba(0,0,0,0);
         }
-        /* バナーと上部の余白調整 */
+        
+        /* ラベル（Ticker, Start, Endなど）を白くする */
+        label, .stMarkdown p {
+            color: #ffffff !important;
+        }
+        
+        /* 入力ボックスの設定 */
+        .stTextInput > div > div > input,
+        .stDateInput > div > div > input {
+            background-color: #1a1c1f !important;
+            color: #ffffff !important;
+            border: 1px solid #444 !important;
+        }
+        
+        /* ボタンの設定 */
+        .stButton button {
+            background-color: #222428 !important;
+            color: #ffffff !important;
+            border: 1px solid #555 !important;
+            border-radius: 6px;
+        }
+        .stButton button:hover {
+            background-color: #333333 !important;
+            border-color: #ffffff !important;
+            color: #ffffff !important;
+        }
+
+        /* ヘッダーなどの文字色も念のため強制 */
+        h1, h2, h3, h4, h5, h6 {
+            color: #ffffff !important;
+        }
+        
+        /* バナー位置調整 */
         .block-container {
             padding-top: 1rem;
             padding-bottom: 5rem;
-        }
-        .stTextInput > div > div > input,
-        .stDateInput > div > div > input {
-            background-color: #1a1c1f;
-            color: #ffffff;
-            border: 1px solid #444;
-        }
-        .stButton button {
-            background-color: #222428;
-            color: #ffffff;
-            border-radius: 6px;
-            border: 1px solid #555;
-        }
-        .stButton button:hover {
-            background-color: #333333;
-            border-color: #777777;
-        }
-        h1, h2, h3, h4 {
-            color: #f2f2f2 !important;
         }
         </style>
         """,
@@ -246,15 +260,14 @@ def main():
     )
 
     # ----- Banner / Title Section -----
-    # 画像ファイル 'banner.png' があれば表示し、なければテキストタイトルを表示
     if os.path.exists("banner.png"):
-        st.image("banner.png", use_container_width=True) # 古いバージョンの場合 use_column_width=True
+        st.image("banner.png", use_container_width=True)
     else:
-        # 画像がない場合のフォールバック
         st.title("Out-stander")
 
     # ----- Input Form -----
     with st.form("input_form"):
+        # ここでラベル色がCSSで白くなるはずです
         ticker = st.text_input("Ticker", "TSM")
 
         today = date.today()
