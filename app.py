@@ -6,9 +6,10 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
+import os  # ファイル存在確認用にインポート追加
 
 # -------------------------------------------------------
-# LPPL-like model (以前うまく動いていた形)
+# LPPL-like model
 # -------------------------------------------------------
 
 def lppl(t, A, B, C, m, tc, omega, phi):
@@ -63,7 +64,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     return {
         "params": params,
         "price_fit": price_fit,
-        "r2": r2,              # UIには出さないが内部では使う
+        "r2": r2,
         "tc_date": tc_date,
         "tc_days": tc_days,
     }
@@ -135,7 +136,7 @@ def fit_lppl_negative_bubble(
         "ok": True,
         "down_series": down_series,
         "price_fit_down": price_fit_down,
-        "r2": r2_down,        # UIには出さない
+        "r2": r2_down,
         "tc_date": tc_bottom_date,
         "tc_days": tc_days,
         "params": params_down,
@@ -165,7 +166,7 @@ def bubble_score(r2_up, m, tc_index, last_index):
 
 
 # -------------------------------------------------------
-# 価格データ取得（以前うまく動いていた MultiIndex 対応）
+# 価格データ取得
 # -------------------------------------------------------
 
 def fetch_price_series(ticker: str, start_date: date, end_date: date):
@@ -215,6 +216,11 @@ def main():
         [data-testid="stHeader"] {
             background: rgba(0,0,0,0);
         }
+        /* バナーと上部の余白調整 */
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 5rem;
+        }
         .stTextInput > div > div > input,
         .stDateInput > div > div > input {
             background-color: #1a1c1f;
@@ -239,8 +245,13 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ----- Title -----
-    st.title("Out-stander")
+    # ----- Banner / Title Section -----
+    # 画像ファイル 'banner.png' があれば表示し、なければテキストタイトルを表示
+    if os.path.exists("banner.png"):
+        st.image("banner.png", use_container_width=True) # 古いバージョンの場合 use_column_width=True
+    else:
+        # 画像がない場合のフォールバック
+        st.title("Out-stander")
 
     # ----- Input Form -----
     with st.form("input_form"):
@@ -261,7 +272,11 @@ def main():
         st.stop()
 
     # ----- Fetch Data -----
-    price_series = fetch_price_series(ticker, start_date, end_date)
+    try:
+        price_series = fetch_price_series(ticker, start_date, end_date)
+    except Exception as e:
+        st.error(f"エラーが発生しました: {e}")
+        st.stop()
 
     if len(price_series) < 30:
         st.error("データが少なすぎます。期間を伸ばしてください。")
@@ -319,7 +334,7 @@ def main():
     st.pyplot(fig)
 
     # --------------------------------------------------
-    # Score & Gain Cards（ここがデザイン強化部分）
+    # Score & Gain Cards
     # --------------------------------------------------
     # Score → Risk label & color
     if score >= 80:
