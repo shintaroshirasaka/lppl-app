@@ -11,6 +11,7 @@ import streamlit as st
 # Internal LPPL-like model
 # -------------------------------------------------------
 
+
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
     dt = tc - t
@@ -32,7 +33,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R² (used only internally)
+    # R² (internal only)
     ss_res = np.sum((logp - log_fit) ** 2)
     ss_tot = np.sum((logp - logp.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -100,6 +101,7 @@ def fit_lppl_negative_bubble(
 # Bubble Score (0–100)
 # -------------------------------------------------------
 
+
 def bubble_score(r2_up, m, tc_index, last_index):
     r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
     m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
@@ -121,6 +123,7 @@ def bubble_score(r2_up, m, tc_index, last_index):
 # -------------------------------------------------------
 # Fetch Price Data
 # -------------------------------------------------------
+
 
 def fetch_price_series(ticker, start_date, end_date):
     df = yf.download(
@@ -148,10 +151,11 @@ def fetch_price_series(ticker, start_date, end_date):
 # Streamlit App (Dark Theme + Minimal UI)
 # -------------------------------------------------------
 
+
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # -------- Dark Theme CSS --------
+    # -------- Dark Theme CSS (強制版) --------
     st.markdown(
         """
         <style>
@@ -161,38 +165,48 @@ def main():
             color: #ffffff !important;
         }
 
-        /* Remove default header bar */
+        /* Header transparent */
         [data-testid="stHeader"] {
             background: rgba(0,0,0,0) !important;
         }
 
-        /* Sidebar (if used in future) */
+        /* Sidebar (for future use) */
         [data-testid="stSidebar"] {
             background-color: #111318 !important;
         }
 
-        /* Text and date inputs */
+        /* Form background */
+        .stForm, .stForm > div {
+            background-color: #0b0c0e !important;
+        }
+
+        /* Text & date inputs (all levels) */
+        input[type="text"], input[type="date"],
+        .stTextInput input, .stDateInput input,
         .stTextInput > div > div > input,
         .stDateInput > div > div > input {
             background-color: #1a1c1f !important;
             color: #ffffff !important;
-            border: 1px solid #444 !important;
+            border: 1px solid #3a3a3a !important;
             border-radius: 6px !important;
+            box-shadow: none !important;
         }
 
-        .stTextInput, .stDateInput {
-            background-color: #0b0c0e !important;
+        /* Labels */
+        label, .stMarkdown, .stDateInput label {
+            color: #cfcfcf !important;
         }
 
-        /* Button */
-        .stButton button {
+        /* Run button (強制黒化) */
+        .stButton > button, .stButton button, button[kind="primary"] {
             background-color: #222428 !important;
             color: #ffffff !important;
             border: 1px solid #555 !important;
             border-radius: 8px !important;
+            box-shadow: none !important;
         }
-        .stButton button:hover {
-            background-color: #333 !important;
+        .stButton > button:hover, .stButton button:hover {
+            background-color: #333333 !important;
             border: 1px solid #777 !important;
         }
 
@@ -202,13 +216,8 @@ def main():
         }
 
         /* General text */
-        p, label, span, div {
+        p, span, div {
             color: #cccccc;
-        }
-
-        /* Remove extra box shadow on form container */
-        .css-1d391kg, .css-1dp5vir {
-            background-color: #0b0c0e !important;
         }
 
         </style>
@@ -282,8 +291,8 @@ def main():
     if neg.get("ok"):
         down = neg["down_series"]
         ax.plot(down.index, down.values, color="cyan", label="Down")
-        ax.plot(down.index, neg["price_fit_down"], "--",
-                color="green", label="Down model")
+        ax.plot(down.index, neg["price_fit_down"],
+                "--", color="green", label="Down model")
         ax.axvline(neg["tc_date"], color="green", linestyle="--",
                    label=f"Turn (down) {neg['tc_date'].date()}")
 
