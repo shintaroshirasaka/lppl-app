@@ -7,38 +7,37 @@ from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
 
+
 # -------------------------------------------------------
 # Internal LPPL-like model
 # -------------------------------------------------------
-
 
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
     dt = tc - t
     dt = np.maximum(dt, 1e-6)
-    return A + B * (dt**m) + C * (dt**m) * np.cos(omega * np.log(dt) + phi)
+    return A + B*(dt**m) + C*(dt**m)*np.cos(omega*np.log(dt) + phi)
 
 
-def fit_lppl_bubble(price_series: pd.Series):
+def fit_lppl_bubble(price_series):
     price = price_series.values.astype(float)
-    t = np.arange(len(price), dtype=float)
+    t = np.arange(len(price))
     logp = np.log(price)
 
     N = len(t)
-    p0 = [np.mean(logp), -1.0, 0.1, 0.5, N + 20, 8.0, 0.0]
-    lower = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
-    upper = [10, 10, 10, 0.99, N + 250, 25.0, np.pi]
+    p0 = [np.mean(logp), -1.0, 0.1, 0.5, N+20, 8.0, 0.0]
+    lower = [-10, -10, -10, 0.01, N+1, 2.0, -np.pi]
+    upper = [10, 10, 10, 0.99, N+250, 25.0, np.pi]
 
     params, _ = curve_fit(lppl, t, logp, p0=p0, bounds=(lower, upper), maxfev=20000)
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R² (internal only)
-    ss_res = np.sum((logp - log_fit) ** 2)
-    ss_tot = np.sum((logp - logp.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot
+    ss_res = np.sum((logp - log_fit)**2)
+    ss_tot = np.sum((logp - np.mean(logp))**2)
+    r2 = 1 - ss_res/ss_tot
 
-    tc_days = float(params[4])
+    tc_days = params[4]
     tc_date = price_series.index[0] + timedelta(days=tc_days)
 
     return {
@@ -46,84 +45,82 @@ def fit_lppl_bubble(price_series: pd.Series):
         "price_fit": price_fit,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_days,
+        "tc_days": tc_days
     }
 
 
-def fit_lppl_negative_bubble(
-    price_series: pd.Series, peak_date, min_points: int = 10, min_drop_ratio: float = 0.03
-):
-    down = price_series[price_series.index >= peak_date].copy()
+def fit_lppl_negative_bubble(price_series, peak_date, min_points=10, min_drop_ratio=0.03):
+
+    down = price_series[price_series.index >= peak_date]
     if len(down) < min_points:
         return {"ok": False}
 
-    peak_price = float(price_series.loc[peak_date])
-    last_price = float(down.iloc[-1])
-    if (peak_price - last_price) / peak_price < min_drop_ratio:
+    peak_price = price_series[peak_date]
+    last_price = down.iloc[-1]
+
+    if (peak_price - last_price)/peak_price < min_drop_ratio:
         return {"ok": False}
 
-    price = down.values.astype(float)
-    t = np.arange(len(price), dtype=float)
+    price = down.values
+    t = np.arange(len(price))
     neg = -np.log(price)
 
     N = len(t)
-    p0 = [np.mean(neg), -1.0, 0.1, 0.5, N + 15, 8.0, 0.0]
-    lower = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
-    upper = [10, 10, 10, 0.99, N + 200, 25.0, np.pi]
+    p0 = [np.mean(neg), -1.0, 0.1, 0.5, N+15, 8.0, 0.0]
+    lower = [-10, -10, -10, 0.01, N+1, 2.0, -np.pi]
+    upper = [10, 10, 10, 0.99, N+200, 25.0, np.pi]
 
     try:
         params, _ = curve_fit(lppl, t, neg, p0=p0, bounds=(lower, upper), maxfev=20000)
-    except Exception:
+    except:
         return {"ok": False}
 
     neg_fit = lppl(t, *params)
-    price_fit = np.exp(-neg_fit)
+    price_fit_down = np.exp(-neg_fit)
 
-    ss_res = np.sum((neg - neg_fit) ** 2)
-    ss_tot = np.sum((neg - neg.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot
+    ss_res = np.sum((neg - neg_fit)**2)
+    ss_tot = np.sum((neg - np.mean(neg))**2)
+    r2 = 1 - ss_res/ss_tot
 
-    tc_days = float(params[4])
+    tc_days = params[4]
     tc_date = down.index[0] + timedelta(days=tc_days)
 
     return {
         "ok": True,
         "down_series": down,
-        "price_fit_down": price_fit,
+        "price_fit_down": price_fit_down,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_days,
-        "params": params,
+        "tc_days": tc_days
     }
 
 
 # -------------------------------------------------------
-# Bubble Score (0–100)
+# Bubble Score
 # -------------------------------------------------------
 
+def bubble_score(r2, m, tc_index, last_index):
 
-def bubble_score(r2_up, m, tc_index, last_index):
-    r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
-    m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
+    r_score = max(0, min(1, (r2 - 0.5)/0.5))
+    m_score = max(0, 1 - 2*abs(m - 0.5))
 
     gap = tc_index - last_index
     if gap <= 0:
-        tc_score = 1.0
+        tc_score = 1
     elif gap <= 30:
-        tc_score = 1.0
+        tc_score = 1
     elif gap >= 120:
-        tc_score = 0.0
+        tc_score = 0
     else:
-        tc_score = 1.0 - (gap - 30) / (120 - 30)
+        tc_score = 1 - (gap - 30)/90
 
-    raw = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
-    return int(round(100 * max(0.0, min(1.0, raw))))
+    score = 0.4*r_score + 0.3*m_score + 0.3*tc_score
+    return int(round(100*max(0, min(1, score))))
 
 
 # -------------------------------------------------------
-# Fetch Price Data
+# Fetch price series
 # -------------------------------------------------------
-
 
 def fetch_price_series(ticker, start_date, end_date):
     df = yf.download(
@@ -132,92 +129,91 @@ def fetch_price_series(ticker, start_date, end_date):
         end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
         auto_adjust=False,
     )
+
     if df.empty:
-        raise ValueError("No price data.")
+        raise ValueError("No data")
 
     if isinstance(df.columns, pd.MultiIndex):
-        s = (
-            df[("Adj Close", ticker)]
-            if ("Adj Close", ticker) in df
-            else df[("Close", ticker)]
-        )
+        return df[("Adj Close", ticker)].dropna()
     else:
-        s = df["Adj Close"] if "Adj Close" in df else df["Close"]
-
-    return s.dropna()
+        return df["Adj Close"].dropna()
 
 
 # -------------------------------------------------------
-# Streamlit App (Dark Theme + Minimal UI)
+# Main App
 # -------------------------------------------------------
-
 
 def main():
+
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # -------- Dark Theme CSS (強制版) --------
+    # ---------------------------------------------------
+    # SUPER DARK THEME CSS (強制版 / 最新Streamlit対応)
+    # ---------------------------------------------------
     st.markdown(
         """
         <style>
-        /* Main app background */
+
+        /* 全画面を黒に */
         [data-testid="stAppViewContainer"] {
             background-color: #0b0c0e !important;
-            color: #ffffff !important;
         }
 
-        /* Header transparent */
+        /* Header を透明に */
         [data-testid="stHeader"] {
             background: rgba(0,0,0,0) !important;
         }
 
-        /* Sidebar (for future use) */
-        [data-testid="stSidebar"] {
-            background-color: #111318 !important;
+        /* Label（Ticker, Start, End） */
+        label {
+            color: #d0d0d0 !important;
+            font-size: 0.9rem !important;
         }
 
-        /* Form background */
-        .stForm, .stForm > div {
-            background-color: #0b0c0e !important;
-        }
-
-        /* Text & date inputs (all levels) */
-        input[type="text"], input[type="date"],
-        .stTextInput input, .stDateInput input,
-        .stTextInput > div > div > input,
-        .stDateInput > div > div > input {
-            background-color: #1a1c1f !important;
-            color: #ffffff !important;
-            border: 1px solid #3a3a3a !important;
+        /* -------------------------
+           入力欄（白化を完全除去）
+        ------------------------- */
+        input, textarea {
+            background-color: #1c1d1f !important;
+            color: white !important;
+            border: 1px solid #444 !important;
             border-radius: 6px !important;
-            box-shadow: none !important;
         }
 
-        /* Labels */
-        label, .stMarkdown, .stDateInput label {
-            color: #cfcfcf !important;
+        /* Streamlit 内部構造まで深く指定して白い帯を消す */
+        .stTextInput > div > div > input,
+        .stDateInput > div > div > input,
+        .stTextInput input,
+        .stDateInput input {
+            background-color: #1c1d1f !important;
+            color: white !important;
+            border: 1px solid #444 !important;
+            border-radius: 6px !important;
         }
 
-        /* Run button (強制黒化) */
-        .stButton > button, .stButton button, button[kind="primary"] {
+        /* -------------------------
+           Run ボタン（黒基調）
+        ------------------------- */
+        .stButton button {
             background-color: #222428 !important;
-            color: #ffffff !important;
+            color: white !important;
             border: 1px solid #555 !important;
             border-radius: 8px !important;
-            box-shadow: none !important;
-        }
-        .stButton > button:hover, .stButton button:hover {
-            background-color: #333333 !important;
-            border: 1px solid #777 !important;
         }
 
-        /* Headings */
-        h1, h2, h3, h4 {
-            color: #f0f0f0 !important;
+        .stButton button:hover {
+            background-color: #333 !important;
+            border-color: #777 !important;
         }
 
-        /* General text */
-        p, span, div {
-            color: #cccccc;
+        /* Score / Gain の文字 */
+        h1, h2, h3 {
+            color: #f5f5f5 !important;
+        }
+
+        /* グラフ背景 */
+        .stPyplotCanvas {
+            background-color: #0b0c0e !important;
         }
 
         </style>
@@ -225,17 +221,21 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # -------- Title --------
+    # ---------------------------------------------------
+    # Title
+    # ---------------------------------------------------
     st.title("Out-stander")
 
-    # -------- Input Form --------
-    with st.form("form"):
-        # 1st row: Ticker (full width)
+    # ---------------------------------------------------
+    # Input Form
+    # ---------------------------------------------------
+    with st.form("f"):
+
         ticker = st.text_input("Ticker", "TSM")
 
-        # 2nd row: Start / End
         today = date.today()
         default_start = today - timedelta(days=220)
+
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("Start", default_start)
@@ -247,52 +247,53 @@ def main():
     if not submitted:
         st.stop()
 
-    # -------- Fetch Data --------
     series = fetch_price_series(ticker, start_date, end_date)
+
     if len(series) < 30:
         st.error("Insufficient data.")
         st.stop()
 
-    # -------- Uptrend Model --------
+    # ---------------------------------------------------
+    # Uptrend analysis
+    # ---------------------------------------------------
     up = fit_lppl_bubble(series)
 
     peak_date = series.idxmax()
     peak_price = float(series.max())
-    start_price = float(series.iloc[0])
-    gain = peak_price / start_price
+    start_price_v = float(series.iloc[0])
+    gain = peak_price / start_price_v
     gain_pct = (gain - 1) * 100
 
     params = up["params"]
     r2 = up["r2"]
     m = params[3]
-    tc_index = float(up["tc_days"])
+    tc_index = up["tc_days"]
     last_index = len(series) - 1
     score = bubble_score(r2, m, tc_index, last_index)
 
-    # -------- Downtrend Model --------
-    try:
-        neg = fit_lppl_negative_bubble(series, peak_date)
-    except Exception:
-        neg = {"ok": False}
+    # Downtrend
+    neg = fit_lppl_negative_bubble(series, peak_date)
 
-    # -------- Graph --------
+    # ---------------------------------------------------
+    # Plot
+    # ---------------------------------------------------
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(series.index, series.values, color="gray", label=ticker)
-    ax.plot(series.index, up["price_fit"], color="orange", label="Up model")
+    ax.plot(series.index, series.values, label=ticker, color="gray")
+    ax.plot(series.index, up["price_fit"], label="Up model", color="orange")
 
     ax.axvline(up["tc_date"], color="red", linestyle="--",
                label=f"Turn (up) {up['tc_date'].date()}")
+
     ax.axvline(peak_date, color="white", linestyle=":",
                label=f"Peak {peak_date.date()}")
 
     if neg.get("ok"):
         down = neg["down_series"]
         ax.plot(down.index, down.values, color="cyan", label="Down")
-        ax.plot(down.index, neg["price_fit_down"],
-                "--", color="green", label="Down model")
+        ax.plot(down.index, neg["price_fit_down"], "--", color="green", label="Down model")
         ax.axvline(neg["tc_date"], color="green", linestyle="--",
                    label=f"Turn (down) {neg['tc_date'].date()}")
 
@@ -300,22 +301,26 @@ def main():
     ax.set_ylabel("Price", color="white")
     ax.tick_params(colors="white")
     ax.legend(facecolor="#0b0c0e", labelcolor="white")
-    ax.grid(True, color="#333333")
+    ax.grid(color="#333333")
 
     st.pyplot(fig)
 
-    # -------- Score --------
+    # ---------------------------------------------------
+    # Score
+    # ---------------------------------------------------
     st.subheader("Score")
     st.markdown(f"<h1 style='font-size:48px'>{score}</h1>", unsafe_allow_html=True)
 
     if score >= 80:
-        st.markdown("<h2>🔴 High Risk</h2>", unsafe_allow_html=True)
+        st.write("🔴 High Risk")
     elif score >= 60:
-        st.markdown("<h2>🟡 Caution</h2>", unsafe_allow_html=True)
+        st.write("🟡 Caution")
     else:
-        st.markdown("<h2>🟢 Safe</h2>", unsafe_allow_html=True)
+        st.write("🟢 Safe")
 
-    # -------- Gain --------
+    # ---------------------------------------------------
+    # Gain
+    # ---------------------------------------------------
     st.subheader("Gain")
     st.metric("Start → Peak", f"{gain:.2f}x", f"{gain_pct:+.1f}%")
 
