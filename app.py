@@ -205,54 +205,59 @@ def fetch_price_series(ticker: str, start_date: date, end_date: date):
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # ---- CSS修正版：文字色を強制的に白くする設定 ----
+    # ---- 強化版CSS：入力フォームとボタンを強制的にダークモード仕様にする ----
     st.markdown(
         """
         <style>
-        /* アプリ全体の背景と基本文字色 */
-        [data-testid="stAppViewContainer"] {
-            background-color: #0b0c0e;
-            color: #ffffff;
-        }
-        [data-testid="stHeader"] {
-            background: rgba(0,0,0,0);
-        }
-        
-        /* ラベル（Ticker, Start, Endなど）を白くする */
-        label, .stMarkdown p {
+        /* メイン背景と文字色 */
+        .stApp {
+            background-color: #0b0c0e !important;
             color: #ffffff !important;
         }
         
-        /* 入力ボックスの設定 */
-        .stTextInput > div > div > input,
-        .stDateInput > div > div > input {
-            background-color: #1a1c1f !important;
-            color: #ffffff !important;
-            border: 1px solid #444 !important;
-        }
-        
-        /* ボタンの設定 */
-        .stButton button {
-            background-color: #222428 !important;
-            color: #ffffff !important;
-            border: 1px solid #555 !important;
-            border-radius: 6px;
-        }
-        .stButton button:hover {
-            background-color: #333333 !important;
-            border-color: #ffffff !important;
+        /* すべてのラベル（Ticker, Start, Endなど） */
+        div[data-testid="stMarkdownContainer"] p, label {
             color: #ffffff !important;
         }
 
-        /* ヘッダーなどの文字色も念のため強制 */
-        h1, h2, h3, h4, h5, h6 {
+        /* 入力ボックス（Tickerのテキスト入力など）の背景と文字 */
+        input.st-ai, input.st-ah, div[data-baseweb="input"] {
+            background-color: #1a1c1f !important;
             color: #ffffff !important;
+            border-color: #444 !important;
         }
         
-        /* バナー位置調整 */
-        .block-container {
-            padding-top: 1rem;
-            padding-bottom: 5rem;
+        /* 入力された文字自体の色指定 */
+        input {
+            color: #ffffff !important;
+        }
+
+        /* 日付入力のアイコンや文字 */
+        div[data-baseweb="input"] svg {
+            fill: #ffffff !important;
+        }
+
+        /* RUNボタンの強制スタイル */
+        div[data-testid="stFormSubmitButton"] button {
+            background-color: #222428 !important;
+            color: #ffffff !important;
+            border: 1px solid #555 !important;
+        }
+        div[data-testid="stFormSubmitButton"] button:hover {
+            background-color: #444 !important;
+            border-color: #888 !important;
+            color: #ffffff !important;
+        }
+        div[data-testid="stFormSubmitButton"] button:active {
+            color: #ffffff !important;
+        }
+        div[data-testid="stFormSubmitButton"] p {
+             color: #ffffff !important;
+        }
+
+        /* ヘッダーの透明化 */
+        [data-testid="stHeader"] {
+            background: rgba(0,0,0,0) !important;
         }
         </style>
         """,
@@ -267,7 +272,6 @@ def main():
 
     # ----- Input Form -----
     with st.form("input_form"):
-        # ここでラベル色がCSSで白くなるはずです
         ticker = st.text_input("Ticker", "TSM")
 
         today = date.today()
@@ -349,7 +353,6 @@ def main():
     # --------------------------------------------------
     # Score & Gain Cards
     # --------------------------------------------------
-    # Score → Risk label & color
     if score >= 80:
         risk_label = "High"
         risk_color = "#ff4d4f"
