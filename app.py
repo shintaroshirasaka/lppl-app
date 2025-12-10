@@ -94,7 +94,7 @@ def fit_lppl_negative_bubble(price_series, peak_date, min_points=10, min_drop_ra
 
 
 # -------------------------------------------------------
-# Bubble Score
+# Bubble Score (0–100)
 # -------------------------------------------------------
 
 def bubble_score(r2_up, m, tc_index, last_index):
@@ -116,7 +116,7 @@ def bubble_score(r2_up, m, tc_index, last_index):
 
 
 # -------------------------------------------------------
-# Fetch data
+# Fetch Price Data
 # -------------------------------------------------------
 
 def fetch_price_series(ticker, start_date, end_date):
@@ -133,25 +133,70 @@ def fetch_price_series(ticker, start_date, end_date):
         s = df[("Adj Close", ticker)] if ("Adj Close", ticker) in df else df[("Close", ticker)]
     else:
         s = df["Adj Close"] if "Adj Close" in df else df["Close"]
+
     return s.dropna()
 
 
 # -------------------------------------------------------
-# Streamlit App (Minimal English UI)
+# Streamlit App (Dark Theme + Minimal UI)
 # -------------------------------------------------------
 
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
+
+    # -------- Dark Theme CSS --------
+    st.markdown(
+        """
+        <style>
+        /* Background */
+        body, .stApp {
+            background-color: #0b0c0e !important;
+            color: #ffffff !important;
+        }
+
+        /* Inputs */
+        .stTextInput > div > div > input,
+        .stDateInput > div > div > input {
+            background-color: #1a1c1f !important;
+            color: #ffffff !important;
+            border: 1px solid #3a3a3a !important;
+        }
+
+        /* Button */
+        .stButton button {
+            background-color: #222428 !important;
+            color: #ffffff !important;
+            border: 1px solid #444 !important;
+            border-radius: 8px !important;
+        }
+        .stButton button:hover {
+            background-color: #333 !important;
+            border: 1px solid #666 !important;
+        }
+
+        /* Text Colors */
+        h1, h2, h3, h4 {
+            color: #f0f0f0 !important;
+        }
+
+        /* Plot Background */
+        .stPyplotCanvas {
+            background-color: #0b0c0e !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # -------- Title --------
     st.title("Out-stander")
 
-    # -------- Form --------
+    # -------- Input Form --------
     with st.form("form"):
-
         ticker = st.text_input("Ticker", "TSM")
 
         today = date.today()
         default_start = today - timedelta(days=220)
-
         col1, col2 = st.columns(2)
         with col1:
             start_date = st.date_input("Start", default_start)
@@ -163,13 +208,13 @@ def main():
     if not submitted:
         st.stop()
 
+    # -------- Fetch Data --------
     series = fetch_price_series(ticker, start_date, end_date)
-
     if len(series) < 30:
         st.error("Insufficient data.")
         st.stop()
 
-    # Uptrend model
+    # -------- Uptrend Model --------
     up = fit_lppl_bubble(series)
 
     peak_date = series.idxmax()
@@ -185,7 +230,7 @@ def main():
     last_index = len(series) - 1
     score = bubble_score(r2, m, tc_index, last_index)
 
-    # Down model
+    # -------- Downtrend Model --------
     try:
         neg = fit_lppl_negative_bubble(series, peak_date)
     except:
@@ -193,26 +238,30 @@ def main():
 
     # -------- Graph --------
     fig, ax = plt.subplots(figsize=(10,5))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
 
-    ax.plot(series.index, series.values, color="lightgray", label=ticker)
+    ax.plot(series.index, series.values, color="gray", label=ticker)
     ax.plot(series.index, up["price_fit"], color="orange", label="Up model")
 
     ax.axvline(up["tc_date"], color="red", linestyle="--",
                label=f"Turn (up) {up['tc_date'].date()}")
-    ax.axvline(peak_date, color="black", linestyle=":",
+    ax.axvline(peak_date, color="white", linestyle=":",
                label=f"Peak {peak_date.date()}")
 
     if neg.get("ok"):
         down = neg["down_series"]
-        ax.plot(down.index, down.values, color="blue", label="Down")
+        ax.plot(down.index, down.values, color="cyan", label="Down")
         ax.plot(down.index, neg["price_fit_down"], "--", color="green", label="Down model")
         ax.axvline(neg["tc_date"], color="green", linestyle="--",
                    label=f"Turn (down) {neg['tc_date'].date()}")
 
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Price")
-    ax.legend()
-    ax.grid(True)
+    ax.set_xlabel("Date", color="white")
+    ax.set_ylabel("Price", color="white")
+    ax.tick_params(colors="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    ax.grid(True, color="#333")
+
     st.pyplot(fig)
 
     # -------- Score --------
