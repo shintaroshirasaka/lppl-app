@@ -50,7 +50,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R² は内部でのみ利用
+    # R²（内部だけで使用）
     ss_res = np.sum((log_price - log_fit) ** 2)
     ss_tot = np.sum((log_price - log_price.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -120,6 +120,7 @@ def fit_lppl_negative_bubble(
     neg_fit = lppl(t, *params)
     price_fit = np.exp(-neg_fit)
 
+    # 下落側 R² も内部だけで保持
     ss_res = np.sum((neg - neg_fit) ** 2)
     ss_tot = np.sum((neg - neg.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -145,6 +146,7 @@ def fit_lppl_negative_bubble(
 
 
 def bubble_score(r2_up, m, tc_index, last_index):
+    """バブル度スコア（0〜100）"""
     r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
     m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
 
@@ -196,31 +198,33 @@ def fetch_price_series(ticker, start_date, end_date):
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
+    # タイトルのみ
     st.title("Out-stander")
 
     # ---------------- 入力フォーム ----------------
     with st.form("input_form"):
-        # 1行目：Ticker（フル幅）
-        ticker = st.text_input("Ticker", "AMD")
+        # 1行目：ティッカー（フル幅）
+        ticker = st.text_input("ティッカー", "TSM")
 
-        # 2行目：Start / End（2カラム）
+        # 2行目：開始日・終了日（2カラム）
         today = date.today()
         default_start = today - timedelta(days=220)
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start", default_start)
+            start_date = st.date_input("開始日", default_start)
         with col2:
-            end_date = st.date_input("End", today)
+            end_date = st.date_input("終了日", today)
 
-        submitted = st.form_submit_button("Run")
+        submitted = st.form_submit_button("実行")
 
     if not submitted:
         st.stop()
 
     # ---------------- データ取得 ----------------
     price_series = fetch_price_series(ticker, start_date, end_date)
+
     if len(price_series) < 30:
-        st.error("Insufficient data.")
+        st.error("データが不足しています。期間を伸ばしてください。")
         st.stop()
 
     # ---------------- 上昇構造解析 ----------------
@@ -275,21 +279,26 @@ def main():
 
     # ---------------- バブル度スコア ----------------
     st.subheader("バブル度スコア")
-    st.markdown(f"<h1 style='font-size:48px'>{score}</h1>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<h1 style='font-size:48px; margin:0px'>{score}</h1>",
+        unsafe_allow_html=True,
+    )
 
     if score >= 80:
-        st.markdown("<h2>🔴 High Risk</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='margin-top:0.5rem'>🔴 危険</h2>",
+                    unsafe_allow_html=True)
     elif score >= 60:
-        st.markdown("<h2>🟡 Caution</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='margin-top:0.5rem'>🟡 注意</h2>",
+                    unsafe_allow_html=True)
     else:
-        st.markdown("<h2>🟢 Safe</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='margin-top:0.5rem'>🟢 安全</h2>",
+                    unsafe_allow_html=True)
 
     # ---------------- 上昇倍率 ----------------
     st.subheader("上昇倍率")
-    st.metric("Start → Peak", f"{rise_ratio:.2f}x", f"{rise_percent:+.1f}%")
+    st.metric("開始日 → 最高値", f"{rise_ratio:.2f}倍", f"{rise_percent:+.1f}%")
 
-    # 構造的転換点サマリーは非表示（表そのものを出さない）
+    # 構造的転換点サマリーは表示しない（表自体なし）
 
 
 if __name__ == "__main__":
