@@ -32,6 +32,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
+    # R² (used only internally)
     ss_res = np.sum((logp - log_fit) ** 2)
     ss_tot = np.sum((logp - logp.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -154,45 +155,62 @@ def main():
     st.markdown(
         """
         <style>
-        /* 全体背景 */
+        /* Main app background */
         [data-testid="stAppViewContainer"] {
             background-color: #0b0c0e !important;
             color: #ffffff !important;
         }
-        /* ヘッダー（デフォルトの白帯）を消す */
+
+        /* Remove default header bar */
         [data-testid="stHeader"] {
             background: rgba(0,0,0,0) !important;
         }
-        /* サイドバーがあれば黒に */
+
+        /* Sidebar (if used in future) */
         [data-testid="stSidebar"] {
             background-color: #111318 !important;
         }
-        /* テキスト入力・日付入力 */
+
+        /* Text and date inputs */
         .stTextInput > div > div > input,
         .stDateInput > div > div > input {
             background-color: #1a1c1f !important;
             color: #ffffff !important;
-            border: 1px solid #3a3a3a !important;
+            border: 1px solid #444 !important;
+            border-radius: 6px !important;
         }
-        /* ボタン */
+
+        .stTextInput, .stDateInput {
+            background-color: #0b0c0e !important;
+        }
+
+        /* Button */
         .stButton button {
             background-color: #222428 !important;
             color: #ffffff !important;
-            border: 1px solid #444 !important;
+            border: 1px solid #555 !important;
             border-radius: 8px !important;
         }
         .stButton button:hover {
             background-color: #333 !important;
-            border: 1px solid #666 !important;
+            border: 1px solid #777 !important;
         }
-        /* 見出し */
+
+        /* Headings */
         h1, h2, h3, h4 {
             color: #f0f0f0 !important;
         }
-        /* 通常テキスト */
-        .stMarkdown, .stMetric {
-            color: #ffffff !important;
+
+        /* General text */
+        p, label, span, div {
+            color: #cccccc;
         }
+
+        /* Remove extra box shadow on form container */
+        .css-1d391kg, .css-1dp5vir {
+            background-color: #0b0c0e !important;
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -203,10 +221,10 @@ def main():
 
     # -------- Input Form --------
     with st.form("form"):
-        # 1行目：Ticker
+        # 1st row: Ticker (full width)
         ticker = st.text_input("Ticker", "TSM")
 
-        # 2行目：Start / End
+        # 2nd row: Start / End
         today = date.today()
         default_start = today - timedelta(days=220)
         col1, col2 = st.columns(2)
