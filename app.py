@@ -1,6 +1,6 @@
 # ここにさっき渡した app.py のコード全文を貼る
 import numpy as np
-import pandas as np
+import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
@@ -9,12 +9,11 @@ from datetime import date, timedelta
 import streamlit as st
 
 # -------------------------------------------------------
-# 数理モデル本体（内部では LPPL 形だが外には出さない）
+# LPPL 形の数理モデル（内部のみで使用）
 # -------------------------------------------------------
 
 
 def lppl(t, A, B, C, m, tc, omega, phi):
-    """log-price 用の数理モデル"""
     t = np.asarray(t, dtype=float)
     dt = tc - t
     dt = np.maximum(dt, 1e-6)
@@ -22,13 +21,12 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """上昇局面へのモデルフィット"""
+    """上昇局面へのフィット（上昇構造の解析）"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
-
     # 初期値
     A_init = np.mean(log_price)
     B_init = -1.0
@@ -54,9 +52,9 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R² は内部でのみ利用（UIには出さない）
+    # R² は内部のみで使用（表示しない）
     ss_res = np.sum((log_price - log_fit) ** 2)
-    ss_tot = np.sum((log_price - np.mean(log_price)) ** 2)
+    ss_tot = np.sum((log_price - log_price.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
@@ -78,7 +76,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """下落局面の負バブル解析（成功しない場合は ok=False）"""
+    """下落局面のフィット（負のバブル構造の解析）"""
 
     down = price_series[price_series.index >= peak_date].copy()
     if len(down) < min_points:
@@ -124,7 +122,7 @@ def fit_lppl_negative_bubble(
     neg_fit = lppl(t, *params)
     price_fit = np.exp(-neg_fit)
 
-    # 下落用の R² も内部でのみ利用
+    # ここでも R² は内部のみに保持（必要なら score の検算に使える）
     ss_res = np.sum((neg - neg_fit) ** 2)
     ss_tot = np.sum((neg - neg.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -151,9 +149,11 @@ def fit_lppl_negative_bubble(
 
 def bubble_score(r2_up, m, tc_index, last_index):
     """バブル度スコア（0〜100）"""
+    # R² 成分（構造の綺麗さ）
     r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
+    # m 成分（曲率のバブル性）
     m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
-
+    # t_c の近さ成分
     gap = tc_index - last_index
     if gap <= 0:
         tc_score = 1.0
@@ -165,9 +165,7 @@ def bubble_score(r2_up, m, tc_index, last_index):
         tc_score = 1.0 - (gap - 30) / (120 - 30)
 
     score_raw = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
-    score = int(round(100 * max(0.0, min(1.0, score_raw))))
-
-    return score
+    return int(round(100 * max(0.0, min(1.0, score_raw))))
 
 
 # -------------------------------------------------------
@@ -235,24 +233,22 @@ def main():
         st.error("データが不足しています。期間を伸ばしてください。")
         st.stop()
 
-    # ---------------- 上昇バブル解析 ----------------
+    # ---------------- 上昇構造解析 ----------------
     bubble_res = fit_lppl_bubble(price_series)
 
-    # 最高値 & 上昇倍率
+    # 最高値＆上昇倍率
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
     start_price = float(price_series.iloc[0])
-
     rise_ratio = peak_price / start_price
     rise_percent = (rise_ratio - 1.0) * 100.0
 
     # ---------------- Bubble Score ----------------
     params_up = bubble_res["params"]
-    r2_up = bubble_res["r2"]          # 内部のみ利用
+    r2_up = bubble_res["r2"]      # 内部のみ利用
     m_up = params_up[3]
     tc_index = float(bubble_res["tc_days"])
     last_index = float(len(price_series) - 1)
-
     score = bubble_score(r2_up, m_up, tc_index, last_index)
 
     # ---------------- 負バブル解析（下落） ----------------
@@ -264,57 +260,32 @@ def main():
     # ------------------------------------------------
     # ① 統合グラフ
     # ------------------------------------------------
-    st.write("### 構造解析グラフ")
+    st.write("### 統合グラフ")
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(
-        price_series.index,
-        price_series.values,
-        color="lightgray",
-        label=f"{ticker} price",
-    )
-    ax.plot(
-        price_series.index,
-        bubble_res["price_fit"],
-        color="orange",
-        label="Model (uptrend)",
-    )
-    ax.axvline(
-        bubble_res["tc_date"],
-        color="red",
-        linestyle="--",
-        label=f"Structural turning (up) {bubble_res['tc_date'].date()}",
-    )
-    ax.axvline(
-        peak_date,
-        color="black",
-        linestyle=":",
-        label=f"Price peak {peak_date.date()}",
-    )
+    ax.plot(price_series.index, price_series.values,
+            color="lightgray", label=f"{ticker} price")
+    ax.plot(price_series.index, bubble_res["price_fit"],
+            color="orange", label="Model (uptrend)")
+
+    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
+               label=f"Structural turning (up) {bubble_res['tc_date'].date()}")
+    ax.axvline(peak_date, color="black", linestyle=":",
+               label=f"Price peak {peak_date.date()}")
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="blue", label=f"{ticker} downtrend")
-        ax.plot(
-            down.index,
-            neg_res["price_fit_down"],
-            "--",
-            color="green",
-            label="Model (downtrend)",
-        )
-        ax.axvline(
-            neg_res["tc_date"],
-            color="green",
-            linestyle="--",
-            label=f"Structural turning (down) {neg_res['tc_date'].date()}",
-        )
+        ax.plot(down.index, neg_res["price_fit_down"], "--",
+                color="green", label="Model (downtrend)")
+        ax.axvline(neg_res["tc_date"], color="green", linestyle="--",
+                   label=f"Structural turning (down) {neg_res['tc_date'].date()}")
 
-    ax.set_title(f"{ticker} — Structural Trend Analysis")
+    ax.set_title(f"{ticker} — Trend Structure Analysis")
     ax.set_xlabel("Date")
     ax.set_ylabel("Price")
     ax.legend(loc="best")
     ax.grid(True)
-
     st.pyplot(fig)
 
     # ------------------------------------------------
@@ -355,9 +326,9 @@ def main():
     st.metric("開始日 → 最高値", f"{rise_ratio:.2f}倍", f"{rise_percent:+.1f}%")
 
     # ------------------------------------------------
-    # ④ 候補日サマリー
+    # ④ 構造的転換点サマリー
     # ------------------------------------------------
-    st.write("### 構造的な節目（サマリー）")
+    st.write("### 構造的転換点サマリー")
 
     rows = [
         ["構造的転換点（上昇）", bubble_res["tc_date"].date()],
