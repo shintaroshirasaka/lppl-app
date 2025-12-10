@@ -196,30 +196,31 @@ def fetch_price_series(ticker, start_date, end_date):
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # タイトルのみ（説明文は削除）
     st.title("Out-stander")
 
     # ---------------- 入力フォーム ----------------
     with st.form("input_form"):
+        # 1行目：Ticker（フル幅）
+        ticker = st.text_input("Ticker", "AMD")
+
+        # 2行目：Start / End（2カラム）
+        today = date.today()
+        default_start = today - timedelta(days=220)
         col1, col2 = st.columns(2)
         with col1:
-            ticker = st.text_input("ティッカー", "AMD")
+            start_date = st.date_input("Start", default_start)
         with col2:
-            today = date.today()
-            default_start = today - timedelta(days=220)
-            start_date = st.date_input("開始日", default_start)
-        end_date = st.date_input("終了日", today)
+            end_date = st.date_input("End", today)
 
-        submitted = st.form_submit_button("実行")
+        submitted = st.form_submit_button("Run")
 
     if not submitted:
         st.stop()
 
     # ---------------- データ取得 ----------------
     price_series = fetch_price_series(ticker, start_date, end_date)
-
     if len(price_series) < 30:
-        st.error("データが不足しています。期間を伸ばしてください。")
+        st.error("Insufficient data.")
         st.stop()
 
     # ---------------- 上昇構造解析 ----------------
@@ -246,9 +247,7 @@ def main():
     except Exception:
         neg_res = {"ok": False}
 
-    # ------------------------------------------------
-    # グラフ（見出しは出さない）
-    # ------------------------------------------------
+    # ---------------- グラフ ----------------
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(price_series.index, price_series.values,
             color="lightgray", label=f"{ticker}")
@@ -274,30 +273,25 @@ def main():
     ax.grid(True)
     st.pyplot(fig)
 
-    # ------------------------------------------------
-    # バブル度スコア（説明文は削除）
-    # ------------------------------------------------
+    # ---------------- バブル度スコア ----------------
     st.subheader("バブル度スコア")
     st.markdown(f"<h1 style='font-size:48px'>{score}</h1>",
                 unsafe_allow_html=True)
 
     if score >= 80:
-        st.markdown("<h2>🔴 危険</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>🔴 High Risk</h2>", unsafe_allow_html=True)
     elif score >= 60:
-        st.markdown("<h2>🟡 注意</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>🟡 Caution</h2>", unsafe_allow_html=True)
     else:
-        st.markdown("<h2>🟢 安全</h2>", unsafe_allow_html=True)
+        st.markdown("<h2>🟢 Safe</h2>", unsafe_allow_html=True)
 
-    # ------------------------------------------------
-    # 上昇倍率（ラベルだけ）
-    # ------------------------------------------------
+    # ---------------- 上昇倍率 ----------------
     st.subheader("上昇倍率")
-    st.metric("開始日 → 最高値", f"{rise_ratio:.2f}倍", f"{rise_percent:+.1f}%")
+    st.metric("Start → Peak", f"{rise_ratio:.2f}x", f"{rise_percent:+.1f}%")
 
-    # ------------------------------------------------
-    # 構造的転換点サマリーは丸ごと非表示
-    # ------------------------------------------------
+    # 構造的転換点サマリーは非表示（表そのものを出さない）
 
 
 if __name__ == "__main__":
     main()
+
