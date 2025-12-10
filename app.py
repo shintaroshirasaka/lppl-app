@@ -54,7 +54,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R² は内部でのみ使用（表示には出さない）
+    # R² は内部でのみ利用（UIには出さない）
     ss_res = np.sum((log_price - log_fit) ** 2)
     ss_tot = np.sum((log_price - log_price.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -124,7 +124,7 @@ def fit_lppl_negative_bubble(
     neg_fit = lppl(t, *params)
     price_fit = np.exp(-neg_fit)
 
-    # R²（下落用）も内部でのみ利用可能
+    # 下落用の R² も内部でのみ利用可能
     ss_res = np.sum((neg - neg_fit) ** 2)
     ss_tot = np.sum((neg - neg.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -250,7 +250,7 @@ def main():
 
     # ---------------- Bubble Score ----------------
     params_up = bubble_res["params"]
-    r2_up = bubble_res["r2"]          # 内部でのみ利用
+    r2_up = bubble_res["r2"]          # 内部のみ利用
     m_up = params_up[3]
     tc_index = float(bubble_res["tc_days"])
     last_index = float(len(price_series) - 1)
@@ -362,7 +362,7 @@ def main():
     st.metric("開始日 → 最高値", f"{rise_ratio:.2f}倍", f"{rise_percent:+.1f}%")
 
     # ------------------------------------------------
-    # ④ 候補日サマリー（R² は非表示）
+    # ④ 候補日サマリー（R² は表示しない）
     # ------------------------------------------------
     st.write("### 候補日サマリー")
 
@@ -374,9 +374,7 @@ def main():
     ]
 
     if neg_res.get("ok"):
-        rows.append(
-            ["内部底候補日（下落）", neg_res["tc_date"].date()]
-        )
+        rows.append(["内部底候補日（下落）", neg_res["tc_date"].date()])
     else:
         rows.append(["内部底候補日（下落）", "該当なし"])
 
