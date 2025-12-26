@@ -1,4 +1,3 @@
-# ここにさっき渡した app.py のコード全文を貼る
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -214,7 +213,7 @@ def main():
             background-color: #0b0c0e !important;
             color: #ffffff !important;
         }
-        
+
         /* すべてのラベル（Ticker, Start, Endなど） */
         div[data-testid="stMarkdownContainer"] p, label {
             color: #ffffff !important;
@@ -226,10 +225,15 @@ def main():
             color: #ffffff !important;
             border-color: #444 !important;
         }
-        
+
         /* 入力された文字自体の色指定 */
         input {
             color: #ffffff !important;
+        }
+
+        /* placeholder（例: NVDA...）の色を少し薄くする */
+        input::placeholder {
+            color: rgba(255,255,255,0.45) !important;
         }
 
         /* 日付入力のアイコンや文字 */
@@ -272,7 +276,12 @@ def main():
 
     # ----- Input Form -----
     with st.form("input_form"):
-        ticker = st.text_input("Ticker", "TSM")
+        # ここが修正点：空欄に見せて、例はplaceholderで表示
+        ticker = st.text_input(
+            "Ticker",
+            value="",
+            placeholder="例: NVDA / 0700.HK / 7203.T"
+        )
 
         today = date.today()
         default_start = today - timedelta(days=220)
@@ -285,7 +294,13 @@ def main():
 
         submitted = st.form_submit_button("Run")
 
+    # 未送信なら何もせず停止（現状維持）
     if not submitted:
+        st.stop()
+
+    # 送信されたがTickerが空ならエラー
+    if not ticker.strip():
+        st.error("Tickerを入力してください（例: NVDA / 0700.HK / 7203.T）")
         st.stop()
 
     # ----- Fetch Data -----
@@ -435,3 +450,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
