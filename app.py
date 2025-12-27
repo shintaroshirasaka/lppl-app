@@ -65,15 +65,28 @@ if not ok:
     st.error("Login required.")
     st.stop()
 
-# Optional: show who signed in
-# st.caption(f"Signed in as: {authed_email}")
-
 
 # =======================================================
 # Cache settings (ここだけ調整すればOK)
 # =======================================================
 PRICE_TTL_SECONDS = 15 * 60         # yfinanceのキャッシュ（例: 15分）
 FIT_TTL_SECONDS = 24 * 60 * 60      # fit結果のキャッシュ（例: 24時間）
+
+# =======================================================
+# NEW SCORE SETTINGS (あなた提案の「時間距離ベース」スコア)
+# =======================================================
+# どこまでを「近い/遠い」とみなすか（営業日ベースの目安）
+UP_FUTURE_NEAR_DAYS = 30     # t_c が30営業日以内なら、緑の上限付近
+UP_FUTURE_FAR_DAYS  = 180    # t_c が180営業日以上先なら、緑の下限付近
+
+UP_PAST_NEAR_DAYS   = 7      # t_c が直近過去（7営業日以内）→黄色の下限付近
+UP_PAST_FAR_DAYS    = 120    # t_c が120営業日以上過去 →黄色の上限付近
+
+DOWN_TC_NEAR_DAYS   = 30     # down_tc が30日以内に迫る → 赤強め
+DOWN_TC_FAR_DAYS    = 120    # down_tc が120日以上先 → 赤弱め（それでも赤）
+
+DOWN_PAST_NEAR_DAYS = 7      # down_tc が過去に入って間もない → 赤中
+DOWN_PAST_FAR_DAYS  = 60     # down_tc が過去に長く入っている → 100に近づく
 
 
 # -------------------------------------------------------
@@ -211,27 +224,6 @@ def fit_lppl_negative_bubble(
 
 
 # -------------------------------------------------------
-# Bubble Score（0〜100）
-# -------------------------------------------------------
-def bubble_score(r2_up, m, tc_index, last_index):
-    r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
-    m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
-
-    gap = tc_index - last_index
-    if gap <= 0:
-        tc_score = 1.0
-    elif gap <= 30:
-        tc_score = 1.0
-    elif gap >= 120:
-        tc_score = 0.0
-    else:
-        tc_score = 1.0 - (gap - 30) / (120 - 30)
-
-    score_raw = 0.4 * r_score + 0.3 * m_score + 0.3 * tc_score
-    return int(round(100 * max(0.0, min(1.0, score_raw))))
-
-
-# -------------------------------------------------------
 # 価格データ取得（キャッシュ版）
 # -------------------------------------------------------
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
@@ -268,10 +260,6 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
 # fit結果キャッシュ（Seriesを安定キー化）
 # -------------------------------------------------------
 def series_cache_key(s: pd.Series) -> str:
-    """
-    Seriesの index と values から安定したキーを作る。
-    同じデータなら同じキーになる。
-    """
     idx = s.index.astype("int64").to_numpy()  # datetime -> ns int
     vals = s.to_numpy(dtype="float64")
     h = hashlib.sha256()
@@ -282,10 +270,6 @@ def series_cache_key(s: pd.Series) -> str:
 
 @st.cache_data(ttl=FIT_TTL_SECONDS, show_spinner=False)
 def fit_lppl_bubble_cached(price_key: str, price_values: np.ndarray, idx_int: np.ndarray):
-    """
-    キャッシュのためSeriesではなく配列で受け取る。
-    price_keyはキャッシュキー（内容は使わないが、変化検知に必要）。
-    """
     idx = pd.to_datetime(idx_int)  # ns int -> datetime
     s = pd.Series(price_values, index=idx)
     return fit_lppl_bubble(s)
@@ -309,6 +293,100 @@ def fit_lppl_negative_bubble_cached(
         min_points=min_points,
         min_drop_ratio=min_drop_ratio,
     )
+
+
+# =======================================================
+# NEW: Signal & Score (あなた提案の定義)
+#   - green: tc is future
+#   - yellow: tc is past but no down_tc
+#   - red: down_tc exists
+# score: within each regime, increases with "urgency"
+# =======================================================
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
+    # x0->y0, x1->y1 (linear), clamp outside
+    if x0 == x1:
+        return y0
+    if x <= x0:
+        return y0
+    if x >= x1:
+        return y1
+    t = (x - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
+
+
+def compute_signal_and_score(
+    last_index: float,
+    tc_index: float,
+    down_tc_date: pd.Timestamp | None,
+    end_date: pd.Timestamp,
+) -> tuple[str, int]:
+    """
+    Returns: (signal_label, score_int)
+      signal_label in {"SAFE","CAUTION","HIGH"}
+      score_int in 0..100
+    """
+
+    # 1) RED regime if down_tc exists
+    if down_tc_date is not None:
+        delta_days = (down_tc_date.normalize() - end_date.normalize()).days
+
+        # down_tc in the future -> early red (80..95)
+        if delta_days > 0:
+            # closer -> higher
+            s = _lin_map(
+                x=delta_days,
+                x0=DOWN_TC_FAR_DAYS,  # far future -> weaker red
+                x1=DOWN_TC_NEAR_DAYS, # near future -> stronger red
+                y0=80,
+                y1=95
+            )
+            s = _clamp(s, 80, 95)
+            return ("HIGH", int(round(s)))
+
+        # down_tc already in the past -> deeper red (90..100)
+        past_days = abs(delta_days)
+        s = _lin_map(
+            x=past_days,
+            x0=DOWN_PAST_NEAR_DAYS,
+            x1=DOWN_PAST_FAR_DAYS,
+            y0=90,
+            y1=100
+        )
+        s = _clamp(s, 90, 100)
+        return ("HIGH", int(round(s)))
+
+    # 2) No down_tc: decide by tc_index vs now (last_index)
+    gap = tc_index - last_index
+
+    # GREEN regime: tc in future
+    if gap > 0:
+        # far -> low, near -> high (0..59)
+        s = _lin_map(
+            x=gap,
+            x0=UP_FUTURE_FAR_DAYS,
+            x1=UP_FUTURE_NEAR_DAYS,
+            y0=0,
+            y1=59
+        )
+        s = _clamp(s, 0, 59)
+        return ("SAFE", int(round(s)))
+
+    # YELLOW regime: tc in past
+    past = abs(gap)
+
+    s = _lin_map(
+        x=past,
+        x0=UP_PAST_NEAR_DAYS,
+        x1=UP_PAST_FAR_DAYS,
+        y0=60,
+        y1=79
+    )
+    s = _clamp(s, 60, 79)
+    return ("CAUTION", int(round(s)))
 
 
 # -------------------------------------------------------
@@ -384,7 +462,6 @@ def main():
         st.stop()
 
     try:
-        # --- yfinance キャッシュ版 ---
         price_series = fetch_price_series_cached(ticker, start_date, end_date)
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
@@ -394,12 +471,12 @@ def main():
         st.error("データが少なすぎます。期間を伸ばしてください。")
         st.stop()
 
-    # --- fit キャッシュ用キー（価格Seriesが同じなら同じキー） ---
+    # --- fit キャッシュ用キー ---
     key = series_cache_key(price_series)
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
 
-    # --- curve_fit（上昇）キャッシュ版 ---
+    # --- curve_fit（上昇） ---
     bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
 
     peak_date = price_series.idxmax()
@@ -408,14 +485,7 @@ def main():
     gain = peak_price / start_price_val
     gain_pct = (gain - 1.0) * 100.0
 
-    params_up = bubble_res["params"]
-    r2_up = bubble_res["r2"]
-    m_up = params_up[3]
-    tc_index = float(bubble_res["tc_days"])
-    last_index = float(len(price_series) - 1)
-    score = bubble_score(r2_up, m_up, tc_index, last_index)
-
-    # --- curve_fit（下落）キャッシュ版（peak_date もキーに含める） ---
+    # --- curve_fit（下落） ---
     peak_date_int = int(pd.Timestamp(peak_date).value)
     neg_res = fit_lppl_negative_bubble_cached(
         key,
@@ -426,6 +496,24 @@ def main():
         min_drop_ratio=0.03,
     )
 
+    # ===================================================
+    # NEW SCORE: distance-based regime score
+    # ===================================================
+    last_index = float(len(price_series) - 1)
+    tc_index = float(bubble_res["tc_days"])
+
+    down_tc_date = None
+    if neg_res.get("ok"):
+        down_tc_date = pd.Timestamp(neg_res["tc_date"])
+
+    signal_label, score = compute_signal_and_score(
+        last_index=last_index,
+        tc_index=tc_index,
+        down_tc_date=down_tc_date,
+        end_date=pd.Timestamp(end_date),
+    )
+
+    # --- plot ---
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
@@ -434,16 +522,16 @@ def main():
     ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
 
     ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
-               label=f"Turn (up) {bubble_res['tc_date'].date()}")
+               label=f"Turn (up) {pd.Timestamp(bubble_res['tc_date']).date()}")
     ax.axvline(peak_date, color="white", linestyle=":",
-               label=f"Peak {peak_date.date()}")
+               label=f"Peak {pd.Timestamp(peak_date).date()}")
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="cyan", label="Down")
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
         ax.axvline(neg_res["tc_date"], color="green", linestyle="--",
-                   label=f"Turn (down) {neg_res['tc_date'].date()}")
+                   label=f"Turn (down) {pd.Timestamp(neg_res['tc_date']).date()}")
 
     ax.set_xlabel("Date", color="white")
     ax.set_ylabel("Price", color="white")
@@ -453,10 +541,13 @@ def main():
 
     st.pyplot(fig)
 
-    if score >= 80:
+    # ===================================================
+    # UI label (signal derived from regime)
+    # ===================================================
+    if signal_label == "HIGH":
         risk_label = "High"
         risk_color = "#ff4d4f"
-    elif score >= 60:
+    elif signal_label == "CAUTION":
         risk_label = "Caution"
         risk_color = "#ffc53d"
     else:
