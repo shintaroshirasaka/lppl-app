@@ -7,9 +7,96 @@ from datetime import date, timedelta
 import streamlit as st
 import os
 
-# -------------------------------------------------------
+# =======================================================
+# AUTH GATE: Require signed short-lived token (?t=...)
+# =======================================================
+import time
+import hmac
+import hashlib
+import base64
+
+
+def _b64url_decode(s: str) -> bytes:
+    # add padding if missing
+    s += "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s.encode("utf-8"))
+
+
+def verify_token(token: str, secret: str) -> tuple[bool, str]:
+    """
+    token format:
+      base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
+
+    returns: (ok, email)
+    """
+    try:
+        part_payload, part_sig = token.split(".", 1)
+
+        payload = _b64url_decode(part_payload).decode("utf-8")
+        sig = _b64url_decode(part_sig).decode("utf-8")
+
+        email, exp_str = payload.split("|", 1)
+        exp = int(exp_str)
+
+        if time.time() > exp:
+            return (False, "")
+
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected, sig):
+            return (False, "")
+
+        return (True, email)
+    except Exception:
+        return (False, "")
+
+
+def get_query_param_token() -> str:
+    """
+    Streamlit versions differ:
+      - Newer: st.query_params
+      - Older: st.experimental_get_query_params()
+    We'll support both.
+    """
+    # Preferred (works in many environments)
+    try:
+        qp = st.experimental_get_query_params()  # dict[str, list[str]]
+        t = qp.get("t", [""])
+        return t[0] if isinstance(t, list) and t else ""
+    except Exception:
+        pass
+
+    # Newer API fallback
+    try:
+        t = st.query_params.get("t", "")
+        return t if isinstance(t, str) else ""
+    except Exception:
+        return ""
+
+
+# ---- Require token here (before app UI) ----
+OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
+token = get_query_param_token()
+
+if not OS_TOKEN_SECRET or not token:
+    st.error("Login required.")
+    st.stop()
+
+ok, authed_email = verify_token(token, OS_TOKEN_SECRET)
+if not ok:
+    st.error("Login required.")
+    st.stop()
+
+# (Optional) show who signed in (comment out if you don't want it)
+# st.caption(f"Signed in as: {authed_email}")
+
+# =======================================================
 # LPPL-like model
-# -------------------------------------------------------
+# =======================================================
 
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
@@ -276,7 +363,6 @@ def main():
 
     # ----- Input Form -----
     with st.form("input_form"):
-        # ここが修正点：空欄に見せて、例はplaceholderで表示
         ticker = st.text_input(
             "Ticker",
             value="",
@@ -294,11 +380,9 @@ def main():
 
         submitted = st.form_submit_button("Run")
 
-    # 未送信なら何もせず停止（現状維持）
     if not submitted:
         st.stop()
 
-    # 送信されたがTickerが空ならエラー
     if not ticker.strip():
         st.error("Tickerを入力してください（例: NVDA / 0700.HK / 7203.T）")
         st.stop()
