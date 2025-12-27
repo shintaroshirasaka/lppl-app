@@ -9,10 +9,6 @@ import os
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
-#   - Render env var: OS_TOKEN_SECRET
-#   - Query param: ?t=<token>
-# Token format:
-#   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
 import time
 import hmac
@@ -52,7 +48,6 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (False, "")
 
 
-# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
 token = st.query_params.get("t", "")
 
@@ -65,24 +60,20 @@ if not ok:
     st.error("Login required.")
     st.stop()
 
-# =======================================================
-# Cache settings
-# =======================================================
-PRICE_TTL_SECONDS = 15 * 60         # yfinanceのキャッシュ（例: 15分）
-FIT_TTL_SECONDS = 24 * 60 * 60      # fit結果のキャッシュ（例: 24時間）
+
+PRICE_TTL_SECONDS = 15 * 60
+FIT_TTL_SECONDS = 24 * 60 * 60
+
 
 # =======================================================
-# NEW SCORE SETTINGS（時間距離ベース・カレンダー日数）
+# SCORE SETTINGS（カレンダー日数ベース）
 # =======================================================
-# SAFE: tc_date が未来。遠いほど安全(低得点)、近いほど黄に近い(高得点)
 UP_FUTURE_NEAR_DAYS = 30
 UP_FUTURE_FAR_DAYS  = 180
 
-# CAUTION: tc_date が過去。直近過去ほど安全寄り(低得点)、遠い過去ほど赤寄り(高得点)
 UP_PAST_NEAR_DAYS   = 7
 UP_PAST_FAR_DAYS    = 120
 
-# HIGH: down_tc_date が存在。未来に近いほど赤強め、過去に入って時間経過ほど100に近い
 DOWN_TC_NEAR_DAYS   = 30
 DOWN_TC_FAR_DAYS    = 120
 
@@ -101,14 +92,12 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """上昇局面へのフィット"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
-    # 初期値
     A_init = np.mean(log_price)
     B_init = -1.0
     C_init = 0.1
@@ -118,7 +107,6 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # 境界
     lower_bounds = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
     upper_bounds = [10, 10, 10, 0.99, N + 250, 25.0, np.pi]
 
@@ -139,7 +127,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
-    tc_days = float(params[4])  # カレンダー日数ベース
+    tc_days = float(params[4])  # カレンダー日数
     tc_date = first_date + timedelta(days=tc_days)
 
     return {
@@ -157,7 +145,6 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """下落局面へのフィット（負バブル）"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -166,7 +153,6 @@ def fit_lppl_negative_bubble(
     peak_price = float(price_series.loc[peak_date])
     last_price = float(down_series.iloc[-1])
     drop_ratio = (peak_price - last_price) / peak_price
-
     if drop_ratio < min_drop_ratio:
         return {"ok": False}
 
@@ -174,7 +160,7 @@ def fit_lppl_negative_bubble(
     t_down = np.arange(len(price_down), dtype=float)
 
     log_down = np.log(price_down)
-    neg_log_down = -log_down  # 下落をバブルとして見る
+    neg_log_down = -log_down
 
     N_down = len(t_down)
     A_init = np.mean(neg_log_down)
@@ -210,7 +196,7 @@ def fit_lppl_negative_bubble(
     r2_down = 1 - ss_res / ss_tot
 
     first_down_date = down_series.index[0]
-    tc_days = float(params_down[4])  # カレンダー日数ベース
+    tc_days = float(params_down[4])
     tc_bottom_date = first_down_date + timedelta(days=tc_days)
 
     return {
@@ -224,9 +210,6 @@ def fit_lppl_negative_bubble(
     }
 
 
-# -------------------------------------------------------
-# 価格データ取得（キャッシュ版）
-# -------------------------------------------------------
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
     df = yf.download(
@@ -235,7 +218,6 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
         end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
         auto_adjust=False,
     )
-
     if df.empty:
         raise ValueError("価格データが取得できません。")
 
@@ -257,11 +239,8 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
     return s.dropna()
 
 
-# -------------------------------------------------------
-# fit結果キャッシュ（Seriesを安定キー化）
-# -------------------------------------------------------
 def series_cache_key(s: pd.Series) -> str:
-    idx = s.index.astype("int64").to_numpy()  # datetime -> ns int
+    idx = s.index.astype("int64").to_numpy()
     vals = s.to_numpy(dtype="float64")
     h = hashlib.sha256()
     h.update(idx.tobytes())
@@ -271,7 +250,7 @@ def series_cache_key(s: pd.Series) -> str:
 
 @st.cache_data(ttl=FIT_TTL_SECONDS, show_spinner=False)
 def fit_lppl_bubble_cached(price_key: str, price_values: np.ndarray, idx_int: np.ndarray):
-    idx = pd.to_datetime(idx_int)  # ns int -> datetime
+    idx = pd.to_datetime(idx_int)
     s = pd.Series(price_values, index=idx)
     return fit_lppl_bubble(s)
 
@@ -296,18 +275,11 @@ def fit_lppl_negative_bubble_cached(
     )
 
 
-# =======================================================
-# NEW: Signal & Score (日付差分ベース)  ★バグ修正版★
-#   - green: tc_date is future
-#   - yellow: tc_date is past but no down_tc
-#   - red: down_tc exists
-# =======================================================
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
 def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
-    # x0->y0, x1->y1 (linear), clamp outside
     if x0 == x1:
         return y0
     if x <= x0:
@@ -323,61 +295,55 @@ def compute_signal_and_score_by_dates(
     end_date: pd.Timestamp,
     down_tc_date: pd.Timestamp | None,
 ) -> tuple[str, int]:
-    """
-    Returns: (signal_label, score_int)
-      signal_label in {"SAFE","CAUTION","HIGH"}
-      score_int in 0..100
-    """
-
-    end_d = end_date.normalize()
+    end_d = pd.Timestamp(end_date).normalize()
     tc_d = pd.Timestamp(tc_date).normalize()
 
-    # 1) RED regime if down_tc exists
+    # -----------------------------
+    # RED: down_tc exists
+    # -----------------------------
     if down_tc_date is not None:
         down_d = pd.Timestamp(down_tc_date).normalize()
-        delta = (down_d - end_d).days  # future positive / past negative
+        delta = (down_d - end_d).days  # future:+ / past:-
 
-        # down_tc in the future -> early red (80..95)
+        # down_tc future: 80..95 (near -> stronger)
         if delta > 0:
             s = _lin_map(
                 x=delta,
-                x0=DOWN_TC_FAR_DAYS,   # far -> weaker red
-                x1=DOWN_TC_NEAR_DAYS,  # near -> stronger red
-                y0=80,
-                y1=95,
+                x0=DOWN_TC_NEAR_DAYS,
+                x1=DOWN_TC_FAR_DAYS,
+                y0=95,
+                y1=80,
             )
-            s = _clamp(s, 80, 95)
-            return ("HIGH", int(round(s)))
+            return ("HIGH", int(round(_clamp(s, 80, 95))))
 
-        # down_tc already in the past -> deeper red (90..100)
-        past_days = abs(delta)
+        # down_tc past: 90..100 (older -> closer to 100)
+        past = abs(delta)
         s = _lin_map(
-            x=past_days,
+            x=past,
             x0=DOWN_PAST_NEAR_DAYS,
             x1=DOWN_PAST_FAR_DAYS,
             y0=90,
             y1=100,
         )
-        s = _clamp(s, 90, 100)
-        return ("HIGH", int(round(s)))
+        return ("HIGH", int(round(_clamp(s, 90, 100))))
 
-    # 2) No down_tc: decide by tc_date vs end_date
-    gap_days = (tc_d - end_d).days  # future positive / past negative
+    # -----------------------------
+    # No down_tc: decide by tc_date
+    # -----------------------------
+    gap_days = (tc_d - end_d).days  # future:+ / past:-
 
-    # GREEN regime: tc in future
+    # GREEN: tc future → near=59, far=0
     if gap_days > 0:
-        # far -> low, near -> high (0..59)
         s = _lin_map(
             x=gap_days,
-            x0=UP_FUTURE_FAR_DAYS,
-            x1=UP_FUTURE_NEAR_DAYS,
-            y0=0,
-            y1=59,
+            x0=UP_FUTURE_NEAR_DAYS,
+            x1=UP_FUTURE_FAR_DAYS,
+            y0=59,
+            y1=0,
         )
-        s = _clamp(s, 0, 59)
-        return ("SAFE", int(round(s)))
+        return ("SAFE", int(round(_clamp(s, 0, 59))))
 
-    # YELLOW regime: tc in past
+    # YELLOW: tc past → near=60, far=79
     past = abs(gap_days)
     s = _lin_map(
         x=past,
@@ -386,46 +352,29 @@ def compute_signal_and_score_by_dates(
         y0=60,
         y1=79,
     )
-    s = _clamp(s, 60, 79)
-    return ("CAUTION", int(round(s)))
+    return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
-# -------------------------------------------------------
-# Streamlit アプリ本体
-# -------------------------------------------------------
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
     st.markdown(
         """
         <style>
-        .stApp {
-            background-color: #0b0c0e !important;
-            color: #ffffff !important;
-        }
-        div[data-testid="stMarkdownContainer"] p, label {
-            color: #ffffff !important;
-        }
+        .stApp { background-color: #0b0c0e !important; color: #ffffff !important; }
+        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; }
         input.st-ai, input.st-ah, div[data-baseweb="input"] {
-            background-color: #1a1c1f !important;
-            color: #ffffff !important;
-            border-color: #444 !important;
+            background-color: #1a1c1f !important; color: #ffffff !important; border-color: #444 !important;
         }
         input { color: #ffffff !important; }
         input::placeholder { color: rgba(255,255,255,0.45) !important; }
         div[data-baseweb="input"] svg { fill: #ffffff !important; }
         div[data-testid="stFormSubmitButton"] button {
-            background-color: #222428 !important;
-            color: #ffffff !important;
-            border: 1px solid #555 !important;
+            background-color: #222428 !important; color: #ffffff !important; border: 1px solid #555 !important;
         }
         div[data-testid="stFormSubmitButton"] button:hover {
-            background-color: #444 !important;
-            border-color: #888 !important;
-            color: #ffffff !important;
+            background-color: #444 !important; border-color: #888 !important; color: #ffffff !important;
         }
-        div[data-testid="stFormSubmitButton"] button:active { color: #ffffff !important; }
-        div[data-testid="stFormSubmitButton"] p { color: #ffffff !important; }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
         </style>
         """,
@@ -438,11 +387,7 @@ def main():
         st.title("Out-stander")
 
     with st.form("input_form"):
-        ticker = st.text_input(
-            "Ticker",
-            value="",
-            placeholder="例: NVDA / 0700.HK / 7203.T"
-        )
+        ticker = st.text_input("Ticker", value="", placeholder="例: NVDA / 0700.HK / 7203.T")
 
         today = date.today()
         default_start = today - timedelta(days=220)
@@ -472,12 +417,10 @@ def main():
         st.error("データが少なすぎます。期間を伸ばしてください。")
         st.stop()
 
-    # --- fit キャッシュ用キー ---
     key = series_cache_key(price_series)
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
 
-    # --- curve_fit（上昇） ---
     bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
 
     peak_date = price_series.idxmax()
@@ -486,31 +429,18 @@ def main():
     gain = peak_price / start_price_val
     gain_pct = (gain - 1.0) * 100.0
 
-    # --- curve_fit（下落） ---
     peak_date_int = int(pd.Timestamp(peak_date).value)
     neg_res = fit_lppl_negative_bubble_cached(
-        key,
-        vals,
-        idx_int,
-        peak_date_int=peak_date_int,
-        min_points=10,
-        min_drop_ratio=0.03,
+        key, vals, idx_int, peak_date_int=peak_date_int, min_points=10, min_drop_ratio=0.03
     )
 
-    # ===================================================
-    # NEW SCORE: date-distance-based regime score (FIXED)
-    # ===================================================
     tc_date = pd.Timestamp(bubble_res["tc_date"])
     end_ts = pd.Timestamp(end_date)
 
-    down_tc_date = None
-    if neg_res.get("ok"):
-        down_tc_date = pd.Timestamp(neg_res["tc_date"])
+    down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
 
     signal_label, score = compute_signal_and_score_by_dates(
-        tc_date=tc_date,
-        end_date=end_ts,
-        down_tc_date=down_tc_date,
+        tc_date=tc_date, end_date=end_ts, down_tc_date=down_tc_date
     )
 
     # --- plot ---
@@ -541,9 +471,6 @@ def main():
 
     st.pyplot(fig)
 
-    # ===================================================
-    # UI label (signal derived from regime)
-    # ===================================================
     if signal_label == "HIGH":
         risk_label = "High"
         risk_color = "#ff4d4f"
@@ -557,70 +484,37 @@ def main():
     col_score, col_gain = st.columns(2)
 
     with col_score:
-        score_card_html = f"""
-        <div style="
-            background-color: #141518;
-            border: 1px solid #2a2c30;
-            border-radius: 12px;
-            padding: 18px 20px 16px 20px;
-            margin-top: 8px;
-        ">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Score
-            </div>
-            <div style="display: flex; align-items: baseline; gap: 12px;">
-                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">
-                    {score}
+        st.markdown(
+            f"""
+            <div style="background-color:#141518;border:1px solid #2a2c30;border-radius:12px;padding:18px 20px 16px 20px;margin-top:8px;">
+              <div style="font-size:0.85rem;color:#a0a2a8;margin-bottom:6px;">Score</div>
+              <div style="display:flex;align-items:baseline;gap:12px;">
+                <div style="font-size:40px;font-weight:700;color:#f5f5f5;">{score}</div>
+                <div style="padding:2px 10px;border-radius:999px;background-color:{risk_color}33;color:{risk_color};font-size:0.85rem;font-weight:600;">
+                  {risk_label}
                 </div>
-                <div style="
-                    padding: 2px 10px;
-                    border-radius: 999px;
-                    background-color: {risk_color}33;
-                    color: {risk_color};
-                    font-size: 0.85rem;
-                    font-weight: 600;
-                ">
-                    {risk_label}
-                </div>
+              </div>
             </div>
-        </div>
-        """
-        st.markdown(score_card_html, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
     with col_gain:
-        gain_card_html = f"""
-        <div style="
-            background-color: #141518;
-            border: 1px solid #2a2c30;
-            border-radius: 12px;
-            padding: 18px 20px 16px 20px;
-            margin-top: 8px;
-        ">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Gain
-            </div>
-            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">
-                {gain:.2f}x
-            </div>
-            <div style="font-size: 0.9rem; color: #a0a2a8; margin-top: 4px;">
-                Start → Peak
-            </div>
-            <div style="
-                margin-top: 6px;
-                display: inline-block;
-                padding: 2px 10px;
-                border-radius: 999px;
-                background-color: #102915;
-                color: #52c41a;
-                font-size: 0.85rem;
-                font-weight: 500;
-            ">
+        st.markdown(
+            f"""
+            <div style="background-color:#141518;border:1px solid #2a2c30;border-radius:12px;padding:18px 20px 16px 20px;margin-top:8px;">
+              <div style="font-size:0.85rem;color:#a0a2a8;margin-bottom:6px;">Gain</div>
+              <div style="font-size:36px;font-weight:700;color:#f5f5f5;line-height:1.1;">{gain:.2f}x</div>
+              <div style="font-size:0.9rem;color:#a0a2a8;margin-top:4px;">Start → Peak</div>
+              <div style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:999px;background-color:#102915;color:#52c41a;font-size:0.85rem;font-weight:500;">
                 {gain_pct:+.1f}%
+              </div>
             </div>
-        </div>
-        """
-        st.markdown(gain_card_html, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
     main()
+
