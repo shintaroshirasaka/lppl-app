@@ -69,10 +69,16 @@ if not ok:
 # st.caption(f"Signed in as: {authed_email}")
 
 
+# =======================================================
+# Cache settings (ここだけ調整すればOK)
+# =======================================================
+PRICE_TTL_SECONDS = 15 * 60         # yfinanceのキャッシュ（例: 15分）
+FIT_TTL_SECONDS = 24 * 60 * 60      # fit結果のキャッシュ（例: 24時間）
+
+
 # -------------------------------------------------------
 # LPPL-like model
 # -------------------------------------------------------
-
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
     dt = tc - t
@@ -207,7 +213,6 @@ def fit_lppl_negative_bubble(
 # -------------------------------------------------------
 # Bubble Score（0〜100）
 # -------------------------------------------------------
-
 def bubble_score(r2_up, m, tc_index, last_index):
     r_score = max(0.0, min(1.0, (r2_up - 0.5) / 0.5))
     m_score = max(0.0, 1.0 - 2 * abs(m - 0.5))
@@ -227,10 +232,10 @@ def bubble_score(r2_up, m, tc_index, last_index):
 
 
 # -------------------------------------------------------
-# 価格データ取得
+# 価格データ取得（キャッシュ版）
 # -------------------------------------------------------
-
-def fetch_price_series(ticker: str, start_date: date, end_date: date):
+@st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
+def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
     df = yf.download(
         ticker,
         start=start_date.strftime("%Y-%m-%d"),
@@ -260,9 +265,55 @@ def fetch_price_series(ticker: str, start_date: date, end_date: date):
 
 
 # -------------------------------------------------------
+# fit結果キャッシュ（Seriesを安定キー化）
+# -------------------------------------------------------
+def series_cache_key(s: pd.Series) -> str:
+    """
+    Seriesの index と values から安定したキーを作る。
+    同じデータなら同じキーになる。
+    """
+    idx = s.index.astype("int64").to_numpy()  # datetime -> ns int
+    vals = s.to_numpy(dtype="float64")
+    h = hashlib.sha256()
+    h.update(idx.tobytes())
+    h.update(vals.tobytes())
+    return h.hexdigest()
+
+
+@st.cache_data(ttl=FIT_TTL_SECONDS, show_spinner=False)
+def fit_lppl_bubble_cached(price_key: str, price_values: np.ndarray, idx_int: np.ndarray):
+    """
+    キャッシュのためSeriesではなく配列で受け取る。
+    price_keyはキャッシュキー（内容は使わないが、変化検知に必要）。
+    """
+    idx = pd.to_datetime(idx_int)  # ns int -> datetime
+    s = pd.Series(price_values, index=idx)
+    return fit_lppl_bubble(s)
+
+
+@st.cache_data(ttl=FIT_TTL_SECONDS, show_spinner=False)
+def fit_lppl_negative_bubble_cached(
+    price_key: str,
+    price_values: np.ndarray,
+    idx_int: np.ndarray,
+    peak_date_int: int,
+    min_points: int,
+    min_drop_ratio: float,
+):
+    idx = pd.to_datetime(idx_int)
+    s = pd.Series(price_values, index=idx)
+    peak_date = pd.to_datetime(peak_date_int)
+    return fit_lppl_negative_bubble(
+        s,
+        peak_date=peak_date,
+        min_points=min_points,
+        min_drop_ratio=min_drop_ratio,
+    )
+
+
+# -------------------------------------------------------
 # Streamlit アプリ本体
 # -------------------------------------------------------
-
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
@@ -333,7 +384,8 @@ def main():
         st.stop()
 
     try:
-        price_series = fetch_price_series(ticker, start_date, end_date)
+        # --- yfinance キャッシュ版 ---
+        price_series = fetch_price_series_cached(ticker, start_date, end_date)
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
         st.stop()
@@ -342,7 +394,13 @@ def main():
         st.error("データが少なすぎます。期間を伸ばしてください。")
         st.stop()
 
-    bubble_res = fit_lppl_bubble(price_series)
+    # --- fit キャッシュ用キー（価格Seriesが同じなら同じキー） ---
+    key = series_cache_key(price_series)
+    idx_int = price_series.index.astype("int64").to_numpy()
+    vals = price_series.to_numpy(dtype="float64")
+
+    # --- curve_fit（上昇）キャッシュ版 ---
+    bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
 
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
@@ -357,7 +415,16 @@ def main():
     last_index = float(len(price_series) - 1)
     score = bubble_score(r2_up, m_up, tc_index, last_index)
 
-    neg_res = fit_lppl_negative_bubble(price_series, peak_date)
+    # --- curve_fit（下落）キャッシュ版（peak_date もキーに含める） ---
+    peak_date_int = int(pd.Timestamp(peak_date).value)
+    neg_res = fit_lppl_negative_bubble_cached(
+        key,
+        vals,
+        idx_int,
+        peak_date_int=peak_date_int,
+        min_points=10,
+        min_drop_ratio=0.03,
+    )
 
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
