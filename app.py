@@ -9,6 +9,10 @@ import os
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
+#   - Render env var: OS_TOKEN_SECRET
+#   - Query param: ?t=<token>
+# Token format:
+#   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
 import time
 import hmac
@@ -17,18 +21,11 @@ import base64
 
 
 def _b64url_decode(s: str) -> bytes:
-    # add padding if missing
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s.encode("utf-8"))
 
 
 def verify_token(token: str, secret: str) -> tuple[bool, str]:
-    """
-    token format:
-      base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
-
-    returns: (ok, email)
-    """
     try:
         part_payload, part_sig = token.split(".", 1)
 
@@ -55,32 +52,9 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (False, "")
 
 
-def get_query_param_token() -> str:
-    """
-    Streamlit versions differ:
-      - Newer: st.query_params
-      - Older: st.experimental_get_query_params()
-    We'll support both.
-    """
-    # Preferred (works in many environments)
-    try:
-        qp = st.experimental_get_query_params()  # dict[str, list[str]]
-        t = qp.get("t", [""])
-        return t[0] if isinstance(t, list) and t else ""
-    except Exception:
-        pass
-
-    # Newer API fallback
-    try:
-        t = st.query_params.get("t", "")
-        return t if isinstance(t, str) else ""
-    except Exception:
-        return ""
-
-
-# ---- Require token here (before app UI) ----
+# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
-token = get_query_param_token()
+token = st.query_params.get("t", "")
 
 if not OS_TOKEN_SECRET or not token:
     st.error("Login required.")
@@ -91,12 +65,13 @@ if not ok:
     st.error("Login required.")
     st.stop()
 
-# (Optional) show who signed in (comment out if you don't want it)
+# Optional: show who signed in
 # st.caption(f"Signed in as: {authed_email}")
 
-# =======================================================
+
+# -------------------------------------------------------
 # LPPL-like model
-# =======================================================
+# -------------------------------------------------------
 
 def lppl(t, A, B, C, m, tc, omega, phi):
     t = np.asarray(t, dtype=float)
@@ -291,44 +266,24 @@ def fetch_price_series(ticker: str, start_date: date, end_date: date):
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
-    # ---- 強化版CSS：入力フォームとボタンを強制的にダークモード仕様にする ----
     st.markdown(
         """
         <style>
-        /* メイン背景と文字色 */
         .stApp {
             background-color: #0b0c0e !important;
             color: #ffffff !important;
         }
-
-        /* すべてのラベル（Ticker, Start, Endなど） */
         div[data-testid="stMarkdownContainer"] p, label {
             color: #ffffff !important;
         }
-
-        /* 入力ボックス（Tickerのテキスト入力など）の背景と文字 */
         input.st-ai, input.st-ah, div[data-baseweb="input"] {
             background-color: #1a1c1f !important;
             color: #ffffff !important;
             border-color: #444 !important;
         }
-
-        /* 入力された文字自体の色指定 */
-        input {
-            color: #ffffff !important;
-        }
-
-        /* placeholder（例: NVDA...）の色を少し薄くする */
-        input::placeholder {
-            color: rgba(255,255,255,0.45) !important;
-        }
-
-        /* 日付入力のアイコンや文字 */
-        div[data-baseweb="input"] svg {
-            fill: #ffffff !important;
-        }
-
-        /* RUNボタンの強制スタイル */
+        input { color: #ffffff !important; }
+        input::placeholder { color: rgba(255,255,255,0.45) !important; }
+        div[data-baseweb="input"] svg { fill: #ffffff !important; }
         div[data-testid="stFormSubmitButton"] button {
             background-color: #222428 !important;
             color: #ffffff !important;
@@ -339,29 +294,19 @@ def main():
             border-color: #888 !important;
             color: #ffffff !important;
         }
-        div[data-testid="stFormSubmitButton"] button:active {
-            color: #ffffff !important;
-        }
-        div[data-testid="stFormSubmitButton"] p {
-             color: #ffffff !important;
-        }
-
-        /* ヘッダーの透明化 */
-        [data-testid="stHeader"] {
-            background: rgba(0,0,0,0) !important;
-        }
+        div[data-testid="stFormSubmitButton"] button:active { color: #ffffff !important; }
+        div[data-testid="stFormSubmitButton"] p { color: #ffffff !important; }
+        [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # ----- Banner / Title Section -----
     if os.path.exists("banner.png"):
         st.image("banner.png", use_container_width=True)
     else:
         st.title("Out-stander")
 
-    # ----- Input Form -----
     with st.form("input_form"):
         ticker = st.text_input(
             "Ticker",
@@ -387,7 +332,6 @@ def main():
         st.error("Tickerを入力してください（例: NVDA / 0700.HK / 7203.T）")
         st.stop()
 
-    # ----- Fetch Data -----
     try:
         price_series = fetch_price_series(ticker, start_date, end_date)
     except Exception as e:
@@ -398,7 +342,6 @@ def main():
         st.error("データが少なすぎます。期間を伸ばしてください。")
         st.stop()
 
-    # ----- 上昇モデル -----
     bubble_res = fit_lppl_bubble(price_series)
 
     peak_date = price_series.idxmax()
@@ -414,18 +357,14 @@ def main():
     last_index = float(len(price_series) - 1)
     score = bubble_score(r2_up, m_up, tc_index, last_index)
 
-    # ----- 下落モデル -----
     neg_res = fit_lppl_negative_bubble(price_series, peak_date)
 
-    # ----- グラフ -----
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(price_series.index, price_series.values,
-            color="gray", label=ticker)
-    ax.plot(price_series.index, bubble_res["price_fit"],
-            color="orange", label="Up model")
+    ax.plot(price_series.index, price_series.values, color="gray", label=ticker)
+    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
 
     ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
                label=f"Turn (up) {bubble_res['tc_date'].date()}")
@@ -434,10 +373,8 @@ def main():
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(down.index, down.values,
-                color="cyan", label="Down")
-        ax.plot(down.index, neg_res["price_fit_down"],
-                "--", color="green", label="Down model")
+        ax.plot(down.index, down.values, color="cyan", label="Down")
+        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
         ax.axvline(neg_res["tc_date"], color="green", linestyle="--",
                    label=f"Turn (down) {neg_res['tc_date'].date()}")
 
@@ -449,9 +386,6 @@ def main():
 
     st.pyplot(fig)
 
-    # --------------------------------------------------
-    # Score & Gain Cards
-    # --------------------------------------------------
     if score >= 80:
         risk_label = "High"
         risk_color = "#ff4d4f"
@@ -464,7 +398,6 @@ def main():
 
     col_score, col_gain = st.columns(2)
 
-    # ----- Score Card -----
     with col_score:
         score_card_html = f"""
         <div style="
@@ -496,7 +429,6 @@ def main():
         """
         st.markdown(score_card_html, unsafe_allow_html=True)
 
-    # ----- Gain Card -----
     with col_gain:
         gain_card_html = f"""
         <div style="
@@ -534,4 +466,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
