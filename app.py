@@ -65,28 +65,29 @@ if not ok:
     st.error("Login required.")
     st.stop()
 
-
 # =======================================================
-# Cache settings (ここだけ調整すればOK)
+# Cache settings
 # =======================================================
 PRICE_TTL_SECONDS = 15 * 60         # yfinanceのキャッシュ（例: 15分）
 FIT_TTL_SECONDS = 24 * 60 * 60      # fit結果のキャッシュ（例: 24時間）
 
 # =======================================================
-# NEW SCORE SETTINGS (あなた提案の「時間距離ベース」スコア)
+# NEW SCORE SETTINGS（時間距離ベース・カレンダー日数）
 # =======================================================
-# どこまでを「近い/遠い」とみなすか（営業日ベースの目安）
-UP_FUTURE_NEAR_DAYS = 30     # t_c が30営業日以内なら、緑の上限付近
-UP_FUTURE_FAR_DAYS  = 180    # t_c が180営業日以上先なら、緑の下限付近
+# SAFE: tc_date が未来。遠いほど安全(低得点)、近いほど黄に近い(高得点)
+UP_FUTURE_NEAR_DAYS = 30
+UP_FUTURE_FAR_DAYS  = 180
 
-UP_PAST_NEAR_DAYS   = 7      # t_c が直近過去（7営業日以内）→黄色の下限付近
-UP_PAST_FAR_DAYS    = 120    # t_c が120営業日以上過去 →黄色の上限付近
+# CAUTION: tc_date が過去。直近過去ほど安全寄り(低得点)、遠い過去ほど赤寄り(高得点)
+UP_PAST_NEAR_DAYS   = 7
+UP_PAST_FAR_DAYS    = 120
 
-DOWN_TC_NEAR_DAYS   = 30     # down_tc が30日以内に迫る → 赤強め
-DOWN_TC_FAR_DAYS    = 120    # down_tc が120日以上先 → 赤弱め（それでも赤）
+# HIGH: down_tc_date が存在。未来に近いほど赤強め、過去に入って時間経過ほど100に近い
+DOWN_TC_NEAR_DAYS   = 30
+DOWN_TC_FAR_DAYS    = 120
 
-DOWN_PAST_NEAR_DAYS = 7      # down_tc が過去に入って間もない → 赤中
-DOWN_PAST_FAR_DAYS  = 60     # down_tc が過去に長く入っている → 100に近づく
+DOWN_PAST_NEAR_DAYS = 7
+DOWN_PAST_FAR_DAYS  = 60
 
 
 # -------------------------------------------------------
@@ -138,7 +139,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
-    tc_days = float(params[4])
+    tc_days = float(params[4])  # カレンダー日数ベース
     tc_date = first_date + timedelta(days=tc_days)
 
     return {
@@ -209,7 +210,7 @@ def fit_lppl_negative_bubble(
     r2_down = 1 - ss_res / ss_tot
 
     first_down_date = down_series.index[0]
-    tc_days = float(params_down[4])
+    tc_days = float(params_down[4])  # カレンダー日数ベース
     tc_bottom_date = first_down_date + timedelta(days=tc_days)
 
     return {
@@ -296,11 +297,10 @@ def fit_lppl_negative_bubble_cached(
 
 
 # =======================================================
-# NEW: Signal & Score (あなた提案の定義)
-#   - green: tc is future
-#   - yellow: tc is past but no down_tc
+# NEW: Signal & Score (日付差分ベース)  ★バグ修正版★
+#   - green: tc_date is future
+#   - yellow: tc_date is past but no down_tc
 #   - red: down_tc exists
-# score: within each regime, increases with "urgency"
 # =======================================================
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -318,11 +318,10 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
     return y0 + t * (y1 - y0)
 
 
-def compute_signal_and_score(
-    last_index: float,
-    tc_index: float,
-    down_tc_date: pd.Timestamp | None,
+def compute_signal_and_score_by_dates(
+    tc_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    down_tc_date: pd.Timestamp | None,
 ) -> tuple[str, int]:
     """
     Returns: (signal_label, score_int)
@@ -330,60 +329,62 @@ def compute_signal_and_score(
       score_int in 0..100
     """
 
+    end_d = end_date.normalize()
+    tc_d = pd.Timestamp(tc_date).normalize()
+
     # 1) RED regime if down_tc exists
     if down_tc_date is not None:
-        delta_days = (down_tc_date.normalize() - end_date.normalize()).days
+        down_d = pd.Timestamp(down_tc_date).normalize()
+        delta = (down_d - end_d).days  # future positive / past negative
 
         # down_tc in the future -> early red (80..95)
-        if delta_days > 0:
-            # closer -> higher
+        if delta > 0:
             s = _lin_map(
-                x=delta_days,
-                x0=DOWN_TC_FAR_DAYS,  # far future -> weaker red
-                x1=DOWN_TC_NEAR_DAYS, # near future -> stronger red
+                x=delta,
+                x0=DOWN_TC_FAR_DAYS,   # far -> weaker red
+                x1=DOWN_TC_NEAR_DAYS,  # near -> stronger red
                 y0=80,
-                y1=95
+                y1=95,
             )
             s = _clamp(s, 80, 95)
             return ("HIGH", int(round(s)))
 
         # down_tc already in the past -> deeper red (90..100)
-        past_days = abs(delta_days)
+        past_days = abs(delta)
         s = _lin_map(
             x=past_days,
             x0=DOWN_PAST_NEAR_DAYS,
             x1=DOWN_PAST_FAR_DAYS,
             y0=90,
-            y1=100
+            y1=100,
         )
         s = _clamp(s, 90, 100)
         return ("HIGH", int(round(s)))
 
-    # 2) No down_tc: decide by tc_index vs now (last_index)
-    gap = tc_index - last_index
+    # 2) No down_tc: decide by tc_date vs end_date
+    gap_days = (tc_d - end_d).days  # future positive / past negative
 
     # GREEN regime: tc in future
-    if gap > 0:
+    if gap_days > 0:
         # far -> low, near -> high (0..59)
         s = _lin_map(
-            x=gap,
+            x=gap_days,
             x0=UP_FUTURE_FAR_DAYS,
             x1=UP_FUTURE_NEAR_DAYS,
             y0=0,
-            y1=59
+            y1=59,
         )
         s = _clamp(s, 0, 59)
         return ("SAFE", int(round(s)))
 
     # YELLOW regime: tc in past
-    past = abs(gap)
-
+    past = abs(gap_days)
     s = _lin_map(
         x=past,
         x0=UP_PAST_NEAR_DAYS,
         x1=UP_PAST_FAR_DAYS,
         y0=60,
-        y1=79
+        y1=79,
     )
     s = _clamp(s, 60, 79)
     return ("CAUTION", int(round(s)))
@@ -497,20 +498,19 @@ def main():
     )
 
     # ===================================================
-    # NEW SCORE: distance-based regime score
+    # NEW SCORE: date-distance-based regime score (FIXED)
     # ===================================================
-    last_index = float(len(price_series) - 1)
-    tc_index = float(bubble_res["tc_days"])
+    tc_date = pd.Timestamp(bubble_res["tc_date"])
+    end_ts = pd.Timestamp(end_date)
 
     down_tc_date = None
     if neg_res.get("ok"):
         down_tc_date = pd.Timestamp(neg_res["tc_date"])
 
-    signal_label, score = compute_signal_and_score(
-        last_index=last_index,
-        tc_index=tc_index,
+    signal_label, score = compute_signal_and_score_by_dates(
+        tc_date=tc_date,
+        end_date=end_ts,
         down_tc_date=down_tc_date,
-        end_date=pd.Timestamp(end_date),
     )
 
     # --- plot ---
