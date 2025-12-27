@@ -9,6 +9,10 @@ import os
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
+#   - Render env var: OS_TOKEN_SECRET
+#   - Query param: ?t=<token>
+# Token format:
+#   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
 import time
 import hmac
@@ -48,6 +52,7 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (False, "")
 
 
+# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
 token = st.query_params.get("t", "")
 
@@ -61,24 +66,32 @@ if not ok:
     st.stop()
 
 
-PRICE_TTL_SECONDS = 15 * 60
-FIT_TTL_SECONDS = 24 * 60 * 60
+# =======================================================
+# Cache settings
+# =======================================================
+PRICE_TTL_SECONDS = 15 * 60         # yfinance cache
+FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
 
 
 # =======================================================
-# SCORE SETTINGS（カレンダー日数ベース）
+# FINAL SCORE SETTINGS (calendar-day distance)
 # =======================================================
+# SAFE (tc_up in future): near -> higher (up to 59), far -> lower (down to 0)
 UP_FUTURE_NEAR_DAYS = 30
 UP_FUTURE_FAR_DAYS  = 180
 
+# CAUTION (tc_up in past, no down_tc): near -> lower (60), far -> higher (79)
 UP_PAST_NEAR_DAYS   = 7
 UP_PAST_FAR_DAYS    = 120
 
-DOWN_TC_NEAR_DAYS   = 30
-DOWN_TC_FAR_DAYS    = 120
+# HIGH (down_tc exists):
+#   - if down_tc in future: near -> higher (90), far -> lower (80)
+#   - if down_tc in past  : near -> 90, far -> 100
+DOWN_FUTURE_NEAR_DAYS = 7
+DOWN_FUTURE_FAR_DAYS  = 60
 
-DOWN_PAST_NEAR_DAYS = 7
-DOWN_PAST_FAR_DAYS  = 60
+DOWN_PAST_NEAR_DAYS   = 7
+DOWN_PAST_FAR_DAYS    = 60
 
 
 # -------------------------------------------------------
@@ -92,12 +105,14 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
+    """Uptrend fit"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
+    # init
     A_init = np.mean(log_price)
     B_init = -1.0
     C_init = 0.1
@@ -107,6 +122,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
+    # bounds
     lower_bounds = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
     upper_bounds = [10, 10, 10, 0.99, N + 250, 25.0, np.pi]
 
@@ -127,7 +143,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot
 
     first_date = price_series.index[0]
-    tc_days = float(params[4])  # カレンダー日数
+    tc_days = float(params[4])  # calendar-day approximation
     tc_date = first_date + timedelta(days=tc_days)
 
     return {
@@ -145,6 +161,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
+    """Downtrend fit (negative bubble)"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -210,6 +227,9 @@ def fit_lppl_negative_bubble(
     }
 
 
+# -------------------------------------------------------
+# Price fetch (cached)
+# -------------------------------------------------------
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
     df = yf.download(
@@ -239,6 +259,9 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
     return s.dropna()
 
 
+# -------------------------------------------------------
+# fit cache helpers
+# -------------------------------------------------------
 def series_cache_key(s: pd.Series) -> str:
     idx = s.index.astype("int64").to_numpy()
     vals = s.to_numpy(dtype="float64")
@@ -275,11 +298,17 @@ def fit_lppl_negative_bubble_cached(
     )
 
 
+# =======================================================
+# FINAL: Phase + time-distance scoring (date-based)
+# =======================================================
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
 def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
+    """
+    Linear map with clamp. Works for x0 < x1.
+    """
     if x0 == x1:
         return y0
     if x <= x0:
@@ -290,33 +319,41 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
     return y0 + t * (y1 - y0)
 
 
-def compute_signal_and_score_by_dates(
-    tc_date: pd.Timestamp,
-    end_date: pd.Timestamp,
-    down_tc_date: pd.Timestamp | None,
-) -> tuple[str, int]:
-    end_d = pd.Timestamp(end_date).normalize()
-    tc_d = pd.Timestamp(tc_date).normalize()
+def compute_signal_and_score(tc_up_date: pd.Timestamp,
+                             end_date: pd.Timestamp,
+                             down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
+    """
+    Returns: (signal_label, score_int)
+      signal_label in {"SAFE","CAUTION","HIGH"}
+      score_int in 0..100
 
-    # -----------------------------
-    # RED: down_tc exists
-    # -----------------------------
+    Rules (final):
+      SAFE   : tc_up > now, score 0..59 (nearer => higher)
+      CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
+      HIGH   : down_tc exists, score 80..100 (more progressed => higher)
+    """
+    now = pd.Timestamp(end_date).normalize()
+    tc_up = pd.Timestamp(tc_up_date).normalize()
+
+    # -----------------------
+    # RED regime: down_tc exists
+    # -----------------------
     if down_tc_date is not None:
-        down_d = pd.Timestamp(down_tc_date).normalize()
-        delta = (down_d - end_d).days  # future:+ / past:-
+        down_tc = pd.Timestamp(down_tc_date).normalize()
+        delta = (down_tc - now).days  # future:+, past:-
 
-        # down_tc future: 80..95 (near -> stronger)
+        # if down_tc is in the future: closer => higher (80..90)
         if delta > 0:
             s = _lin_map(
                 x=delta,
-                x0=DOWN_TC_NEAR_DAYS,
-                x1=DOWN_TC_FAR_DAYS,
-                y0=95,
+                x0=DOWN_FUTURE_NEAR_DAYS,
+                x1=DOWN_FUTURE_FAR_DAYS,
+                y0=90,
                 y1=80,
             )
-            return ("HIGH", int(round(_clamp(s, 80, 95))))
+            return ("HIGH", int(round(_clamp(s, 80, 90))))
 
-        # down_tc past: 90..100 (older -> closer to 100)
+        # if down_tc is in the past: older => higher (90..100)
         past = abs(delta)
         s = _lin_map(
             x=past,
@@ -327,15 +364,15 @@ def compute_signal_and_score_by_dates(
         )
         return ("HIGH", int(round(_clamp(s, 90, 100))))
 
-    # -----------------------------
-    # No down_tc: decide by tc_date
-    # -----------------------------
-    gap_days = (tc_d - end_d).days  # future:+ / past:-
+    # -----------------------
+    # SAFE / CAUTION by tc_up
+    # -----------------------
+    gap = (tc_up - now).days  # future:+, past:-
 
-    # GREEN: tc future → near=59, far=0
-    if gap_days > 0:
+    # SAFE (tc_up in future): near -> 59, far -> 0
+    if gap > 0:
         s = _lin_map(
-            x=gap_days,
+            x=gap,
             x0=UP_FUTURE_NEAR_DAYS,
             x1=UP_FUTURE_FAR_DAYS,
             y0=59,
@@ -343,8 +380,8 @@ def compute_signal_and_score_by_dates(
         )
         return ("SAFE", int(round(_clamp(s, 0, 59))))
 
-    # YELLOW: tc past → near=60, far=79
-    past = abs(gap_days)
+    # CAUTION (tc_up in past): near -> 60, far -> 79
+    past = abs(gap)
     s = _lin_map(
         x=past,
         x0=UP_PAST_NEAR_DAYS,
@@ -355,6 +392,9 @@ def compute_signal_and_score_by_dates(
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
+# -------------------------------------------------------
+# Streamlit app
+# -------------------------------------------------------
 def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
@@ -431,16 +471,20 @@ def main():
 
     peak_date_int = int(pd.Timestamp(peak_date).value)
     neg_res = fit_lppl_negative_bubble_cached(
-        key, vals, idx_int, peak_date_int=peak_date_int, min_points=10, min_drop_ratio=0.03
+        key, vals, idx_int,
+        peak_date_int=peak_date_int,
+        min_points=10,
+        min_drop_ratio=0.03,
     )
 
-    tc_date = pd.Timestamp(bubble_res["tc_date"])
+    tc_up_date = pd.Timestamp(bubble_res["tc_date"])
     end_ts = pd.Timestamp(end_date)
-
     down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
 
-    signal_label, score = compute_signal_and_score_by_dates(
-        tc_date=tc_date, end_date=end_ts, down_tc_date=down_tc_date
+    signal_label, score = compute_signal_and_score(
+        tc_up_date=tc_up_date,
+        end_date=end_ts,
+        down_tc_date=down_tc_date
     )
 
     # --- plot ---
