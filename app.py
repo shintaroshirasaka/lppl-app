@@ -9,10 +9,6 @@ import os
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
-#   - Render env var: OS_TOKEN_SECRET
-#   - Query param: ?t=<token>
-# Token format:
-#   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
 import time
 import hmac
@@ -52,7 +48,6 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (False, "")
 
 
-# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
 token = st.query_params.get("t", "")
 
@@ -66,32 +61,50 @@ if not ok:
     st.stop()
 
 
-# =======================================================
-# Cache settings
-# =======================================================
-PRICE_TTL_SECONDS = 15 * 60         # yfinance cache
-FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
+PRICE_TTL_SECONDS = 15 * 60
+FIT_TTL_SECONDS = 24 * 60 * 60
 
 
 # =======================================================
 # FINAL SCORE SETTINGS (calendar-day distance)
 # =======================================================
-# SAFE (tc_up in future): near -> higher (up to 59), far -> lower (down to 0)
 UP_FUTURE_NEAR_DAYS = 30
 UP_FUTURE_FAR_DAYS  = 180
 
-# CAUTION (tc_up in past, no down_tc): near -> lower (60), far -> higher (79)
 UP_PAST_NEAR_DAYS   = 7
 UP_PAST_FAR_DAYS    = 120
 
-# HIGH (down_tc exists):
-#   - if down_tc in future: near -> higher (90), far -> lower (80)
-#   - if down_tc in past  : near -> 90, far -> 100
 DOWN_FUTURE_NEAR_DAYS = 7
 DOWN_FUTURE_FAR_DAYS  = 60
 
 DOWN_PAST_NEAR_DAYS   = 7
 DOWN_PAST_FAR_DAYS    = 60
+
+
+# -------------------------------------------------------
+# Helpers
+# -------------------------------------------------------
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+
+def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
+    if x0 == x1:
+        return y0
+    if x <= x0:
+        return y0
+    if x >= x1:
+        return y1
+    t = (x - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
+
+
+def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
+    """curve_fitのValueError(初期値bounds外)を確実に潰す"""
+    p0 = np.asarray(p0, dtype=float)
+    lb = np.asarray(lb, dtype=float)
+    ub = np.asarray(ub, dtype=float)
+    return np.minimum(np.maximum(p0, lb + eps), ub - eps)
 
 
 # -------------------------------------------------------
@@ -104,52 +117,17 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
 
 
-def _clip_p0_to_bounds(p0, lower_bounds, upper_bounds, eps: float = 1e-6):
-    lb = np.asarray(lower_bounds, dtype=float)
-    ub = np.asarray(upper_bounds, dtype=float)
-    p0 = np.asarray(p0, dtype=float)
-    # avoid exactly at the boundary (can cause issues for some solvers)
-    return np.minimum(np.maximum(p0, lb + eps), ub - eps), lb, ub
-
-
-def _tc_to_date(index: pd.Index, tc: float) -> pd.Timestamp:
-    """
-    Map tc (in sample steps) to an actual date.
-    - If tc falls within available index range: pick nearest index.
-    - If tc is beyond the range: extend using business days from the last index date.
-    """
-    if len(index) == 0:
-        return pd.Timestamp("1970-01-01")
-
-    tc = float(tc)
-    if tc <= 0:
-        return pd.Timestamp(index[0])
-
-    k = int(round(tc))
-    if k < len(index):
-        return pd.Timestamp(index[k])
-
-    # extend beyond last known date with business days
-    last = pd.Timestamp(index[-1]).normalize()
-    add = k - (len(index) - 1)  # steps beyond last index position
-    # bdate_range includes the start date as first element, hence periods=add+1
-    future = pd.bdate_range(last, periods=add + 1)[-1]
-    return pd.Timestamp(future)
-
-
 def fit_lppl_bubble(price_series: pd.Series):
-    """Uptrend fit"""
+    """Uptrend fit (robust bounds)"""
     price = price_series.values.astype(float)
-
-    if np.any(~np.isfinite(price)) or np.any(price <= 0):
-        raise ValueError("価格データに無効値（NaN/inf/0以下）が含まれるため、ログ変換できません。")
-
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
-    # init
+    # -------------------------
+    # 初期値
+    # -------------------------
     A_init = float(np.mean(log_price))
     B_init = -1.0
     C_init = 0.1
@@ -159,45 +137,45 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # bounds (A はデータ駆動にして「p0がbounds外」を避ける)
-    log_min = float(np.min(log_price))
-    log_max = float(np.max(log_price))
-    margin = 2.0  # lnスケールでの余裕
-    A_lo = log_min - margin
-    A_hi = log_max + margin
+    # -------------------------
+    # ★重要：Aのboundsをデータ依存にする
+    # log(price) が 10 を超えても落ちない
+    # -------------------------
+    A_low = float(np.min(log_price) - 2.0)
+    A_high = float(np.max(log_price) + 2.0)
 
-    lower_bounds = [A_lo, -10, -10, 0.01, N + 1, 2.0, -np.pi]
-    upper_bounds = [A_hi,  10,  10, 0.99, N + 250, 25.0,  np.pi]
+    lower_bounds = [A_low, -20, -20, 0.01, N + 1, 2.0, -np.pi]
+    upper_bounds = [A_high, 20, 20, 0.99, N + 250, 25.0, np.pi]
 
-    # make sure p0 is inside bounds (prevents ValueError)
-    p0, lb, ub = _clip_p0_to_bounds(p0, lower_bounds, upper_bounds)
+    # ★重要：p0を必ずbounds内に押し込む
+    p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
 
     params, _ = curve_fit(
         lppl,
         t,
         log_price,
         p0=p0,
-        bounds=(lb, ub),
+        bounds=(lower_bounds, upper_bounds),
         maxfev=20000,
     )
 
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    ss_res = float(np.sum((log_price - log_fit) ** 2))
-    ss_tot = float(np.sum((log_price - log_price.mean()) ** 2))
-    r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+    ss_res = np.sum((log_price - log_fit) ** 2)
+    ss_tot = np.sum((log_price - log_price.mean()) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    # tc (steps) -> date (more consistent than calendar-day approximation)
-    tc_steps = float(params[4])
-    tc_date = _tc_to_date(price_series.index, tc_steps)
+    first_date = price_series.index[0]
+    tc_days = float(params[4])
+    tc_date = first_date + timedelta(days=tc_days)
 
     return {
         "params": params,
         "price_fit": price_fit,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_steps,  # "steps" (index-based). name kept for compatibility.
+        "tc_days": tc_days,
     }
 
 
@@ -207,7 +185,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """Downtrend fit (negative bubble)"""
+    """Downtrend fit (negative bubble, robust bounds)"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -220,16 +198,14 @@ def fit_lppl_negative_bubble(
         return {"ok": False}
 
     price_down = down_series.values.astype(float)
-
-    if np.any(~np.isfinite(price_down)) or np.any(price_down <= 0):
-        return {"ok": False}
-
     t_down = np.arange(len(price_down), dtype=float)
 
     log_down = np.log(price_down)
     neg_log_down = -log_down
 
     N_down = len(t_down)
+
+    # 初期値
     A_init = float(np.mean(neg_log_down))
     B_init = -1.0
     C_init = 0.1
@@ -239,17 +215,14 @@ def fit_lppl_negative_bubble(
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # bounds (A はデータ駆動)
-    y_min = float(np.min(neg_log_down))
-    y_max = float(np.max(neg_log_down))
-    margin = 2.0
-    A_lo = y_min - margin
-    A_hi = y_max + margin
+    # Aのboundsをデータ依存にする（neg_logでも同様）
+    A_low = float(np.min(neg_log_down) - 2.0)
+    A_high = float(np.max(neg_log_down) + 2.0)
 
-    lower_bounds = [A_lo, -10, -10, 0.01, N_down + 1, 2.0, -np.pi]
-    upper_bounds = [A_hi,  10,  10, 0.99, N_down + 200, 25.0,  np.pi]
+    lower_bounds = [A_low, -20, -20, 0.01, N_down + 1, 2.0, -np.pi]
+    upper_bounds = [A_high, 20, 20, 0.99, N_down + 200, 25.0, np.pi]
 
-    p0, lb, ub = _clip_p0_to_bounds(p0, lower_bounds, upper_bounds)
+    p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
 
     try:
         params_down, _ = curve_fit(
@@ -257,7 +230,7 @@ def fit_lppl_negative_bubble(
             t_down,
             neg_log_down,
             p0=p0,
-            bounds=(lb, ub),
+            bounds=(lower_bounds, upper_bounds),
             maxfev=20000,
         )
     except Exception:
@@ -267,13 +240,13 @@ def fit_lppl_negative_bubble(
     log_fit = -neg_log_fit
     price_fit_down = np.exp(log_fit)
 
-    ss_res = float(np.sum((neg_log_down - neg_log_fit) ** 2))
-    ss_tot = float(np.sum((neg_log_down - neg_log_down.mean()) ** 2))
-    r2_down = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+    ss_res = np.sum((neg_log_down - neg_log_fit) ** 2)
+    ss_tot = np.sum((neg_log_down - neg_log_down.mean()) ** 2)
+    r2_down = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    # tc steps -> date
-    tc_steps = float(params_down[4])
-    tc_bottom_date = _tc_to_date(down_series.index, tc_steps)
+    first_down_date = down_series.index[0]
+    tc_days = float(params_down[4])
+    tc_bottom_date = first_down_date + timedelta(days=tc_days)
 
     return {
         "ok": True,
@@ -281,7 +254,7 @@ def fit_lppl_negative_bubble(
         "price_fit_down": price_fit_down,
         "r2": r2_down,
         "tc_date": tc_bottom_date,
-        "tc_days": tc_steps,  # name kept for compatibility
+        "tc_days": tc_days,
         "params": params_down,
     }
 
@@ -315,15 +288,7 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
         else:
             raise ValueError("終値カラムが見つかりません。")
 
-    s = s.dropna()
-    if s.empty:
-        raise ValueError("価格データが空です。")
-
-    # logを取るので 0以下を除外（またはエラー）
-    if (s <= 0).any():
-        raise ValueError("価格に0以下が含まれています（ログ変換不可）。")
-
-    return s
+    return s.dropna()
 
 
 # -------------------------------------------------------
@@ -368,49 +333,24 @@ def fit_lppl_negative_bubble_cached(
 # =======================================================
 # FINAL: Phase + time-distance scoring (date-based)
 # =======================================================
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
-def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
-    """
-    Linear map with clamp. Works for x0 < x1.
-    """
-    if x0 == x1:
-        return y0
-    if x <= x0:
-        return y0
-    if x >= x1:
-        return y1
-    t = (x - x0) / (x1 - x0)
-    return y0 + t * (y1 - y0)
-
-
 def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
     """
-    Returns: (signal_label, score_int)
-      signal_label in {"SAFE","CAUTION","HIGH"}
-      score_int in 0..100
-
-    Rules (final):
-      SAFE   : tc_up > now, score 0..59 (nearer => higher)
-      CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
-      HIGH   : down_tc exists, score 80..100 (more progressed => higher)
+    SAFE   : tc_up > now, score 0..59 (nearer => higher)
+    CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
+    HIGH   : down_tc exists, score 80..100 (progressed => higher)
     """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
 
-    # -----------------------
-    # RED regime: down_tc exists
-    # -----------------------
+    # HIGH
     if down_tc_date is not None:
         down_tc = pd.Timestamp(down_tc_date).normalize()
         delta = (down_tc - now).days  # future:+, past:-
 
-        # if down_tc is in the future: closer => higher (80..90)
         if delta > 0:
+            # future: near -> 90, far -> 80
             s = _lin_map(
                 x=delta,
                 x0=DOWN_FUTURE_NEAR_DAYS,
@@ -420,7 +360,7 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
             )
             return ("HIGH", int(round(_clamp(s, 80, 90))))
 
-        # if down_tc is in the past: older => higher (90..100)
+        # past: older -> 100
         past = abs(delta)
         s = _lin_map(
             x=past,
@@ -431,13 +371,11 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         )
         return ("HIGH", int(round(_clamp(s, 90, 100))))
 
-    # -----------------------
-    # SAFE / CAUTION by tc_up
-    # -----------------------
+    # SAFE / CAUTION
     gap = (tc_up - now).days  # future:+, past:-
 
-    # SAFE (tc_up in future): near -> 59, far -> 0
     if gap > 0:
+        # SAFE: near -> 59, far -> 0
         s = _lin_map(
             x=gap,
             x0=UP_FUTURE_NEAR_DAYS,
@@ -447,7 +385,7 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         )
         return ("SAFE", int(round(_clamp(s, 0, 59))))
 
-    # CAUTION (tc_up in past): near -> 60, far -> 79
+    # CAUTION: older -> higher
     past = abs(gap)
     s = _lin_map(
         x=past,
@@ -528,12 +466,7 @@ def main():
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
 
-    # --- Up fit (bubble) ---
-    try:
-        bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
-    except Exception as e:
-        st.error(f"Upモデルのフィットに失敗しました: {e}")
-        st.stop()
+    bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
 
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
@@ -553,11 +486,7 @@ def main():
     end_ts = pd.Timestamp(end_date)
     down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
 
-    signal_label, score = compute_signal_and_score(
-        tc_up_date=tc_up_date,
-        end_date=end_ts,
-        down_tc_date=down_tc_date
-    )
+    signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # --- plot ---
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -633,3 +562,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
