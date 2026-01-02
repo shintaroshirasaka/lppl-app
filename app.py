@@ -104,16 +104,53 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
 
 
+def _clip_p0_to_bounds(p0, lower_bounds, upper_bounds, eps: float = 1e-6):
+    lb = np.asarray(lower_bounds, dtype=float)
+    ub = np.asarray(upper_bounds, dtype=float)
+    p0 = np.asarray(p0, dtype=float)
+    # avoid exactly at the boundary (can cause issues for some solvers)
+    return np.minimum(np.maximum(p0, lb + eps), ub - eps), lb, ub
+
+
+def _tc_to_date(index: pd.Index, tc: float) -> pd.Timestamp:
+    """
+    Map tc (in sample steps) to an actual date.
+    - If tc falls within available index range: pick nearest index.
+    - If tc is beyond the range: extend using business days from the last index date.
+    """
+    if len(index) == 0:
+        return pd.Timestamp("1970-01-01")
+
+    tc = float(tc)
+    if tc <= 0:
+        return pd.Timestamp(index[0])
+
+    k = int(round(tc))
+    if k < len(index):
+        return pd.Timestamp(index[k])
+
+    # extend beyond last known date with business days
+    last = pd.Timestamp(index[-1]).normalize()
+    add = k - (len(index) - 1)  # steps beyond last index position
+    # bdate_range includes the start date as first element, hence periods=add+1
+    future = pd.bdate_range(last, periods=add + 1)[-1]
+    return pd.Timestamp(future)
+
+
 def fit_lppl_bubble(price_series: pd.Series):
     """Uptrend fit"""
     price = price_series.values.astype(float)
+
+    if np.any(~np.isfinite(price)) or np.any(price <= 0):
+        raise ValueError("価格データに無効値（NaN/inf/0以下）が含まれるため、ログ変換できません。")
+
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
     # init
-    A_init = np.mean(log_price)
+    A_init = float(np.mean(log_price))
     B_init = -1.0
     C_init = 0.1
     m_init = 0.5
@@ -122,36 +159,45 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # bounds
-    lower_bounds = [-10, -10, -10, 0.01, N + 1, 2.0, -np.pi]
-    upper_bounds = [10, 10, 10, 0.99, N + 250, 25.0, np.pi]
+    # bounds (A はデータ駆動にして「p0がbounds外」を避ける)
+    log_min = float(np.min(log_price))
+    log_max = float(np.max(log_price))
+    margin = 2.0  # lnスケールでの余裕
+    A_lo = log_min - margin
+    A_hi = log_max + margin
+
+    lower_bounds = [A_lo, -10, -10, 0.01, N + 1, 2.0, -np.pi]
+    upper_bounds = [A_hi,  10,  10, 0.99, N + 250, 25.0,  np.pi]
+
+    # make sure p0 is inside bounds (prevents ValueError)
+    p0, lb, ub = _clip_p0_to_bounds(p0, lower_bounds, upper_bounds)
 
     params, _ = curve_fit(
         lppl,
         t,
         log_price,
         p0=p0,
-        bounds=(lower_bounds, upper_bounds),
+        bounds=(lb, ub),
         maxfev=20000,
     )
 
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    ss_res = np.sum((log_price - log_fit) ** 2)
-    ss_tot = np.sum((log_price - log_price.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot
+    ss_res = float(np.sum((log_price - log_fit) ** 2))
+    ss_tot = float(np.sum((log_price - log_price.mean()) ** 2))
+    r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
-    first_date = price_series.index[0]
-    tc_days = float(params[4])  # calendar-day approximation
-    tc_date = first_date + timedelta(days=tc_days)
+    # tc (steps) -> date (more consistent than calendar-day approximation)
+    tc_steps = float(params[4])
+    tc_date = _tc_to_date(price_series.index, tc_steps)
 
     return {
         "params": params,
         "price_fit": price_fit,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_days,
+        "tc_days": tc_steps,  # "steps" (index-based). name kept for compatibility.
     }
 
 
@@ -174,13 +220,17 @@ def fit_lppl_negative_bubble(
         return {"ok": False}
 
     price_down = down_series.values.astype(float)
+
+    if np.any(~np.isfinite(price_down)) or np.any(price_down <= 0):
+        return {"ok": False}
+
     t_down = np.arange(len(price_down), dtype=float)
 
     log_down = np.log(price_down)
     neg_log_down = -log_down
 
     N_down = len(t_down)
-    A_init = np.mean(neg_log_down)
+    A_init = float(np.mean(neg_log_down))
     B_init = -1.0
     C_init = 0.1
     m_init = 0.5
@@ -189,8 +239,17 @@ def fit_lppl_negative_bubble(
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    lower_bounds = [-10, -10, -10, 0.01, N_down + 1, 2.0, -np.pi]
-    upper_bounds = [10, 10, 10, 0.99, N_down + 200, 25.0, np.pi]
+    # bounds (A はデータ駆動)
+    y_min = float(np.min(neg_log_down))
+    y_max = float(np.max(neg_log_down))
+    margin = 2.0
+    A_lo = y_min - margin
+    A_hi = y_max + margin
+
+    lower_bounds = [A_lo, -10, -10, 0.01, N_down + 1, 2.0, -np.pi]
+    upper_bounds = [A_hi,  10,  10, 0.99, N_down + 200, 25.0,  np.pi]
+
+    p0, lb, ub = _clip_p0_to_bounds(p0, lower_bounds, upper_bounds)
 
     try:
         params_down, _ = curve_fit(
@@ -198,7 +257,7 @@ def fit_lppl_negative_bubble(
             t_down,
             neg_log_down,
             p0=p0,
-            bounds=(lower_bounds, upper_bounds),
+            bounds=(lb, ub),
             maxfev=20000,
         )
     except Exception:
@@ -208,13 +267,13 @@ def fit_lppl_negative_bubble(
     log_fit = -neg_log_fit
     price_fit_down = np.exp(log_fit)
 
-    ss_res = np.sum((neg_log_down - neg_log_fit) ** 2)
-    ss_tot = np.sum((neg_log_down - neg_log_down.mean()) ** 2)
-    r2_down = 1 - ss_res / ss_tot
+    ss_res = float(np.sum((neg_log_down - neg_log_fit) ** 2))
+    ss_tot = float(np.sum((neg_log_down - neg_log_down.mean()) ** 2))
+    r2_down = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
-    first_down_date = down_series.index[0]
-    tc_days = float(params_down[4])
-    tc_bottom_date = first_down_date + timedelta(days=tc_days)
+    # tc steps -> date
+    tc_steps = float(params_down[4])
+    tc_bottom_date = _tc_to_date(down_series.index, tc_steps)
 
     return {
         "ok": True,
@@ -222,7 +281,7 @@ def fit_lppl_negative_bubble(
         "price_fit_down": price_fit_down,
         "r2": r2_down,
         "tc_date": tc_bottom_date,
-        "tc_days": tc_days,
+        "tc_days": tc_steps,  # name kept for compatibility
         "params": params_down,
     }
 
@@ -256,7 +315,15 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
         else:
             raise ValueError("終値カラムが見つかりません。")
 
-    return s.dropna()
+    s = s.dropna()
+    if s.empty:
+        raise ValueError("価格データが空です。")
+
+    # logを取るので 0以下を除外（またはエラー）
+    if (s <= 0).any():
+        raise ValueError("価格に0以下が含まれています（ログ変換不可）。")
+
+    return s
 
 
 # -------------------------------------------------------
@@ -461,7 +528,12 @@ def main():
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
 
-    bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
+    # --- Up fit (bubble) ---
+    try:
+        bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
+    except Exception as e:
+        st.error(f"Upモデルのフィットに失敗しました: {e}")
+        st.stop()
 
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
