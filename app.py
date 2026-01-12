@@ -9,6 +9,10 @@ import os
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
+#   - Render env var: OS_TOKEN_SECRET
+#   - Query param: ?t=<token>
+# Token format:
+#   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
 import time
 import hmac
@@ -48,32 +52,40 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (False, "")
 
 
+# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET", "").strip()
 token = st.query_params.get("t", "")
 
+# Auth failure: keep minimal (no red error UI)
 if not OS_TOKEN_SECRET or not token:
-    st.error("Login required.")
     st.stop()
 
 ok, authed_email = verify_token(token, OS_TOKEN_SECRET)
 if not ok:
-    st.error("Login required.")
     st.stop()
 
 
-PRICE_TTL_SECONDS = 15 * 60
-FIT_TTL_SECONDS = 24 * 60 * 60
+# =======================================================
+# Cache settings
+# =======================================================
+PRICE_TTL_SECONDS = 15 * 60         # yfinance cache
+FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
 
 
 # =======================================================
 # FINAL SCORE SETTINGS (calendar-day distance)
 # =======================================================
+# SAFE (tc_up in future): near -> higher (up to 59), far -> lower (down to 0)
 UP_FUTURE_NEAR_DAYS = 30
 UP_FUTURE_FAR_DAYS  = 180
 
+# CAUTION (tc_up in past, no down_tc): near -> lower (60), far -> higher (79)
 UP_PAST_NEAR_DAYS   = 7
 UP_PAST_FAR_DAYS    = 120
 
+# HIGH (down_tc exists):
+#   - if down_tc in future: near -> higher (90), far -> lower (80)
+#   - if down_tc in past  : near -> 90, far -> 100
 DOWN_FUTURE_NEAR_DAYS = 7
 DOWN_FUTURE_FAR_DAYS  = 60
 
@@ -100,6 +112,7 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
 
 
 def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
+    """Prevent ValueError: initial guess outside bounds"""
     p0 = np.asarray(p0, dtype=float)
     lb = np.asarray(lb, dtype=float)
     ub = np.asarray(ub, dtype=float)
@@ -117,12 +130,14 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
+    """Uptrend fit (robust bounds)"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
+    # Initial guess
     A_init = float(np.mean(log_price))
     B_init = -1.0
     C_init = 0.1
@@ -132,6 +147,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
+    # Dynamic bounds for A (prevents failures for high-priced tickers)
     A_low = float(np.min(log_price) - 2.0)
     A_high = float(np.max(log_price) + 2.0)
 
@@ -157,7 +173,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     first_date = price_series.index[0]
-    tc_days = float(params[4])
+    tc_days = float(params[4])  # calendar-day approximation
     tc_date = first_date + timedelta(days=tc_days)
 
     return {
@@ -175,6 +191,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
+    """Downtrend fit (negative bubble, robust bounds)"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -194,6 +211,7 @@ def fit_lppl_negative_bubble(
 
     N_down = len(t_down)
 
+    # Initial guess
     A_init = float(np.mean(neg_log_down))
     B_init = -1.0
     C_init = 0.1
@@ -203,6 +221,7 @@ def fit_lppl_negative_bubble(
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
+    # Dynamic bounds for A
     A_low = float(np.min(neg_log_down) - 2.0)
     A_high = float(np.max(neg_log_down) + 2.0)
 
@@ -247,7 +266,7 @@ def fit_lppl_negative_bubble(
 
 
 # -------------------------------------------------------
-# Price fetch (cached) + STRICT VALIDATION
+# Price fetch (cached) + strict validation
 # -------------------------------------------------------
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
@@ -261,6 +280,7 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
     if df is None or df.empty:
         raise ValueError("INVALID_TICKER_OR_NO_DATA")
 
+    # Handle MultiIndex (common when passing single ticker but yfinance returns multi)
     if isinstance(df.columns, pd.MultiIndex):
         if ("Adj Close", ticker) in df.columns:
             s = df[("Adj Close", ticker)]
@@ -278,7 +298,6 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
 
     s = s.dropna()
 
-    # ---- validate numeric sanity (no NaN/inf/<=0) ----
     if s.empty or len(s) < 30:
         raise ValueError("INVALID_TICKER_OR_NO_DATA")
 
@@ -337,6 +356,11 @@ def fit_lppl_negative_bubble_cached(
 def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
+    """
+    SAFE   : tc_up > now, score 0..59 (nearer => higher)
+    CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
+    HIGH   : down_tc exists, score 80..100 (progressed => higher)
+    """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
 
@@ -398,25 +422,57 @@ def main():
     st.markdown(
         """
         <style>
-        .stApp { background-color: #0b0c0e !important; color: #ffffff !important; }
-        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; }
+        .stApp {
+            background-color: #0b0c0e !important;
+            color: #ffffff !important;
+        }
+        div[data-testid="stMarkdownContainer"] p, label {
+            color: #ffffff !important;
+        }
         input.st-ai, input.st-ah, div[data-baseweb="input"] {
-            background-color: #1a1c1f !important; color: #ffffff !important; border-color: #444 !important;
+            background-color: #1a1c1f !important;
+            color: #ffffff !important;
+            border-color: #444 !important;
         }
         input { color: #ffffff !important; }
         input::placeholder { color: rgba(255,255,255,0.45) !important; }
         div[data-baseweb="input"] svg { fill: #ffffff !important; }
         div[data-testid="stFormSubmitButton"] button {
-            background-color: #222428 !important; color: #ffffff !important; border: 1px solid #555 !important;
+            background-color: #222428 !important;
+            color: #ffffff !important;
+            border: 1px solid #555 !important;
         }
         div[data-testid="stFormSubmitButton"] button:hover {
-            background-color: #444 !important; border-color: #888 !important; color: #ffffff !important;
+            background-color: #444 !important;
+            border-color: #888 !important;
+            color: #ffffff !important;
         }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
+
+        /* ✅ custom black error box */
+        .custom-error {
+            background-color: #141518;
+            border: 1px solid #2a2c30;
+            border-radius: 12px;
+            padding: 14px 18px;
+            color: #ffffff;
+            font-size: 0.95rem;
+            margin-top: 12px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+    def show_error_black(msg: str):
+        st.markdown(
+            f"""
+            <div class="custom-error">
+                {msg}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if os.path.exists("banner.png"):
         st.image("banner.png", use_container_width=True)
@@ -424,7 +480,12 @@ def main():
         st.title("Out-stander")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker", value="", placeholder="e.g., NVDA / 0700.HK / 7203.T")
+        ticker = st.text_input(
+            "Ticker",
+            value="",
+            placeholder="e.g., NVDA / 0700.HK / 7203.T"
+        )
+
         today = date.today()
         default_start = today - timedelta(days=220)
 
@@ -440,19 +501,23 @@ def main():
         st.stop()
 
     if not ticker.strip():
-        st.error("Invalid ticker symbol. Please check and try again.")
+        show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
 
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
     except ValueError as e:
         if str(e) == "INVALID_TICKER_OR_NO_DATA":
-            st.error("Invalid ticker symbol or no price data available for the selected period.")
+            show_error_black("Invalid ticker symbol or no price data.")
             st.stop()
-        st.error("Unexpected error while fetching price data.")
+        show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
     except Exception:
-        st.error("Unexpected error while fetching price data.")
+        show_error_black("Invalid ticker symbol or no price data.")
+        st.stop()
+
+    if len(price_series) < 30:
+        show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
 
     # ---- fit caches ----
@@ -463,7 +528,7 @@ def main():
     try:
         bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
     except Exception:
-        st.error("Unable to fit the uptrend model for this ticker/period.")
+        show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
 
     peak_date = price_series.idxmax()
@@ -491,7 +556,7 @@ def main():
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(price_series.index, price_series.values, color="gray", label=ticker)
+    ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
     ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
 
     ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
@@ -528,35 +593,69 @@ def main():
     col_score, col_gain = st.columns(2)
 
     with col_score:
-        st.markdown(
-            f"""
-            <div style="background-color:#141518;border:1px solid #2a2c30;border-radius:12px;padding:18px 20px 16px 20px;margin-top:8px;">
-              <div style="font-size:0.85rem;color:#a0a2a8;margin-bottom:6px;">Score</div>
-              <div style="display:flex;align-items:baseline;gap:12px;">
-                <div style="font-size:40px;font-weight:700;color:#f5f5f5;">{score}</div>
-                <div style="padding:2px 10px;border-radius:999px;background-color:{risk_color}33;color:{risk_color};font-size:0.85rem;font-weight:600;">
-                  {risk_label}
-                </div>
-              </div>
+        score_card_html = f"""
+        <div style="
+            background-color: #141518;
+            border: 1px solid #2a2c30;
+            border-radius: 12px;
+            padding: 18px 20px 16px 20px;
+            margin-top: 8px;
+        ">
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
+                Score
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            <div style="display: flex; align-items: baseline; gap: 12px;">
+                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">
+                    {score}
+                </div>
+                <div style="
+                    padding: 2px 10px;
+                    border-radius: 999px;
+                    background-color: {risk_color}33;
+                    color: {risk_color};
+                    font-size: 0.85rem;
+                    font-weight: 600;
+                ">
+                    {risk_label}
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(score_card_html, unsafe_allow_html=True)
 
     with col_gain:
-        st.markdown(
-            f"""
-            <div style="background-color:#141518;border:1px solid #2a2c30;border-radius:12px;padding:18px 20px 16px 20px;margin-top:8px;">
-              <div style="font-size:0.85rem;color:#a0a2a8;margin-bottom:6px;">Gain</div>
-              <div style="font-size:36px;font-weight:700;color:#f5f5f5;line-height:1.1;">{gain:.2f}x</div>
-              <div style="font-size:0.9rem;color:#a0a2a8;margin-top:4px;">Start → Peak</div>
-              <div style="margin-top:6px;display:inline-block;padding:2px 10px;border-radius:999px;background-color:#102915;color:#52c41a;font-size:0.85rem;font-weight:500;">
-                {gain_pct:+.1f}%
-              </div>
+        gain_card_html = f"""
+        <div style="
+            background-color: #141518;
+            border: 1px solid #2a2c30;
+            border-radius: 12px;
+            padding: 18px 20px 16px 20px;
+            margin-top: 8px;
+        ">
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
+                Gain
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">
+                {gain:.2f}x
+            </div>
+            <div style="font-size: 0.9rem; color: #a0a2a8; margin-top: 4px;">
+                Start → Peak
+            </div>
+            <div style="
+                margin-top: 6px;
+                display: inline-block;
+                padding: 2px 10px;
+                border-radius: 999px;
+                background-color: #102915;
+                color: #52c41a;
+                font-size: 0.85rem;
+                font-weight: 500;
+            ">
+                {gain_pct:+.1f}%
+            </div>
+        </div>
+        """
+        st.markdown(gain_card_html, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
