@@ -100,7 +100,6 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
 
 
 def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
-    """curve_fitのValueError(初期値bounds外)を確実に潰す"""
     p0 = np.asarray(p0, dtype=float)
     lb = np.asarray(lb, dtype=float)
     ub = np.asarray(ub, dtype=float)
@@ -118,16 +117,12 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """Uptrend fit (robust bounds)"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
 
     N = len(t)
 
-    # -------------------------
-    # 初期値
-    # -------------------------
     A_init = float(np.mean(log_price))
     B_init = -1.0
     C_init = 0.1
@@ -137,17 +132,12 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # -------------------------
-    # ★重要：Aのboundsをデータ依存にする
-    # log(price) が 10 を超えても落ちない
-    # -------------------------
     A_low = float(np.min(log_price) - 2.0)
     A_high = float(np.max(log_price) + 2.0)
 
     lower_bounds = [A_low, -20, -20, 0.01, N + 1, 2.0, -np.pi]
     upper_bounds = [A_high, 20, 20, 0.99, N + 250, 25.0, np.pi]
 
-    # ★重要：p0を必ずbounds内に押し込む
     p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
 
     params, _ = curve_fit(
@@ -185,7 +175,6 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """Downtrend fit (negative bubble, robust bounds)"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -205,7 +194,6 @@ def fit_lppl_negative_bubble(
 
     N_down = len(t_down)
 
-    # 初期値
     A_init = float(np.mean(neg_log_down))
     B_init = -1.0
     C_init = 0.1
@@ -215,7 +203,6 @@ def fit_lppl_negative_bubble(
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # Aのboundsをデータ依存にする（neg_logでも同様）
     A_low = float(np.min(neg_log_down) - 2.0)
     A_high = float(np.max(neg_log_down) + 2.0)
 
@@ -260,7 +247,7 @@ def fit_lppl_negative_bubble(
 
 
 # -------------------------------------------------------
-# Price fetch (cached)
+# Price fetch (cached) + STRICT VALIDATION
 # -------------------------------------------------------
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
@@ -270,8 +257,9 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
         end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
         auto_adjust=False,
     )
-    if df.empty:
-        raise ValueError("価格データが取得できません。")
+
+    if df is None or df.empty:
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
 
     if isinstance(df.columns, pd.MultiIndex):
         if ("Adj Close", ticker) in df.columns:
@@ -279,16 +267,29 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
         elif ("Close", ticker) in df.columns:
             s = df[("Close", ticker)]
         else:
-            raise ValueError("終値カラムが見つかりません。")
+            raise ValueError("INVALID_TICKER_OR_NO_DATA")
     else:
         if "Adj Close" in df.columns:
             s = df["Adj Close"]
         elif "Close" in df.columns:
             s = df["Close"]
         else:
-            raise ValueError("終値カラムが見つかりません。")
+            raise ValueError("INVALID_TICKER_OR_NO_DATA")
 
-    return s.dropna()
+    s = s.dropna()
+
+    # ---- validate numeric sanity (no NaN/inf/<=0) ----
+    if s.empty or len(s) < 30:
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    vals = s.to_numpy(dtype="float64")
+    if not np.all(np.isfinite(vals)):
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    if np.any(vals <= 0):
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    return s
 
 
 # -------------------------------------------------------
@@ -336,11 +337,6 @@ def fit_lppl_negative_bubble_cached(
 def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
-    """
-    SAFE   : tc_up > now, score 0..59 (nearer => higher)
-    CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
-    HIGH   : down_tc exists, score 80..100 (progressed => higher)
-    """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
 
@@ -350,7 +346,6 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         delta = (down_tc - now).days  # future:+, past:-
 
         if delta > 0:
-            # future: near -> 90, far -> 80
             s = _lin_map(
                 x=delta,
                 x0=DOWN_FUTURE_NEAR_DAYS,
@@ -360,7 +355,6 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
             )
             return ("HIGH", int(round(_clamp(s, 80, 90))))
 
-        # past: older -> 100
         past = abs(delta)
         s = _lin_map(
             x=past,
@@ -372,10 +366,9 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         return ("HIGH", int(round(_clamp(s, 90, 100))))
 
     # SAFE / CAUTION
-    gap = (tc_up - now).days  # future:+, past:-
+    gap = (tc_up - now).days
 
     if gap > 0:
-        # SAFE: near -> 59, far -> 0
         s = _lin_map(
             x=gap,
             x0=UP_FUTURE_NEAR_DAYS,
@@ -385,7 +378,6 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         )
         return ("SAFE", int(round(_clamp(s, 0, 59))))
 
-    # CAUTION: older -> higher
     past = abs(gap)
     s = _lin_map(
         x=past,
@@ -432,8 +424,7 @@ def main():
         st.title("Out-stander")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker", value="", placeholder="例: NVDA / 0700.HK / 7203.T")
-
+        ticker = st.text_input("Ticker", value="", placeholder="e.g., NVDA / 0700.HK / 7203.T")
         today = date.today()
         default_start = today - timedelta(days=220)
 
@@ -449,24 +440,31 @@ def main():
         st.stop()
 
     if not ticker.strip():
-        st.error("Tickerを入力してください（例: NVDA / 0700.HK / 7203.T）")
+        st.error("Invalid ticker symbol. Please check and try again.")
         st.stop()
 
     try:
-        price_series = fetch_price_series_cached(ticker, start_date, end_date)
-    except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
+        price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
+    except ValueError as e:
+        if str(e) == "INVALID_TICKER_OR_NO_DATA":
+            st.error("Invalid ticker symbol or no price data available for the selected period.")
+            st.stop()
+        st.error("Unexpected error while fetching price data.")
+        st.stop()
+    except Exception:
+        st.error("Unexpected error while fetching price data.")
         st.stop()
 
-    if len(price_series) < 30:
-        st.error("データが少なすぎます。期間を伸ばしてください。")
-        st.stop()
-
+    # ---- fit caches ----
     key = series_cache_key(price_series)
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
 
-    bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
+    try:
+        bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
+    except Exception:
+        st.error("Unable to fit the uptrend model for this ticker/period.")
+        st.stop()
 
     peak_date = price_series.idxmax()
     peak_price = float(price_series.max())
@@ -488,7 +486,7 @@ def main():
 
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
-    # --- plot ---
+    # ---- plot ----
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
@@ -516,6 +514,7 @@ def main():
 
     st.pyplot(fig)
 
+    # ---- UI signal ----
     if signal_label == "HIGH":
         risk_label = "High"
         risk_color = "#ff4d4f"
@@ -562,4 +561,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
