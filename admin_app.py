@@ -459,6 +459,96 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
 
 
 # -------------------------------------------------------
+# Admin interpretation (decision-making text generator)
+# -------------------------------------------------------
+def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, list[str]]:
+    """
+    投資家向け（実務）に、指標から解釈コメントを自動生成する。
+    返り値: (要約テキスト, 箇条書きコメント)
+    """
+    pdict = bubble_res.get("param_dict", {})
+    r2 = float(bubble_res.get("r2", float("nan")))
+    rmse = float(bubble_res.get("rmse", float("nan")))
+    m = float(pdict.get("m", float("nan")))
+    omega = float(pdict.get("omega", float("nan")))
+    c_over_b = float(pdict.get("abs_C_over_B", float("nan")))
+
+    tc_date = pd.Timestamp(bubble_res.get("tc_date")).normalize()
+    end_norm = pd.Timestamp(end_date).normalize()
+    days_to_tc = int((tc_date - end_norm).days)
+
+    risk_msgs: list[str] = []
+    posture_msgs: list[str] = []
+
+    # tcの近さ/通過
+    if days_to_tc < 0:
+        risk_msgs.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
+        posture_msgs.append("新規ロングは慎重（追随買いは控える）。保有なら部分利確・ヘッジの検討開始。")
+    elif days_to_tc <= 30:
+        risk_msgs.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンが近い）。")
+        posture_msgs.append("新規ロングはサイズを落とす/分割。上がっても追わず、利確・ヘッジの準備。")
+    else:
+        risk_msgs.append(f"t_c まで残り {days_to_tc} 日（近々の転換を断定する段階ではない）。")
+        posture_msgs.append("tcは“ゾーン”として監視。過度な強気の積み増しは避け、上昇の質を点検。")
+
+    # mの解釈
+    if np.isfinite(m):
+        if 0.3 <= m <= 0.6:
+            risk_msgs.append(f"m={m:.2f}：典型的なバブル加速帯域（0.3–0.6）に近い。")
+            posture_msgs.append("過熱局面の可能性。利確の分割開始や、逆指値・ヘッジの優先度を上げる。")
+        elif m >= 0.8:
+            risk_msgs.append(f"m={m:.2f}：上限寄り。境界解（制約に張り付き）で tc の一点予測は信頼しにくい。")
+            posture_msgs.append("tcを一点で信じず、危険ゾーンを“広め（数週間〜数ヶ月）”に取って慎重運用。")
+        else:
+            risk_msgs.append(f"m={m:.2f}：中間帯。典型バブルとは断定しにくいが、構造変化の兆候はあり得る。")
+            posture_msgs.append("指標を単独で決め打ちせず、価格ピーク/出来高/ボラ拡大などと合わせて姿勢調整。")
+
+    # フィット品質（R²とRMSE）
+    if np.isfinite(r2):
+        if r2 >= 0.80:
+            risk_msgs.append(f"R²={r2:.2f}：形状の再現性は高め（ただし予言ではない）。")
+        elif r2 >= 0.60:
+            risk_msgs.append(f"R²={r2:.2f}：形状は一定程度説明できている。")
+        else:
+            risk_msgs.append(f"R²={r2:.2f}：再現性は弱め。シグナル強度は控えめに扱う。")
+
+    if np.isfinite(rmse):
+        risk_msgs.append(f"RMSE(log)={rmse:.3f}：log価格に対する平均誤差の目安（小さいほど安定）。")
+
+    # 振動（ω, |C/B|）
+    if np.isfinite(omega):
+        if 6.0 <= omega <= 13.0:
+            risk_msgs.append(f"ω={omega:.2f}：経験的によく出る帯域。短周期の上下動が出やすい。")
+        else:
+            risk_msgs.append(f"ω={omega:.2f}：振動帯域が典型から外れる。解釈は控えめに。")
+
+    if np.isfinite(c_over_b):
+        if c_over_b >= 1.0:
+            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動項が相対的に強い（値動きが荒れやすい）。")
+            posture_msgs.append("分割利確・逆指値・サイズ縮小が有効。")
+        elif c_over_b >= 0.3:
+            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動は中程度（上下動を織り込みたい局面）。")
+        else:
+            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動は弱め（トレンド寄り）。")
+
+    # まとめ（断定を避けつつ、姿勢の切替を促す）
+    if days_to_tc <= 30:
+        summary = "tc 近傍（または通過）として、今後は『新規で追いかけない』『利確/ヘッジを織り込む』姿勢に切り替える局面。"
+    else:
+        summary = "現時点は『危険ゾーンの監視段階』。過熱の兆候が強まるなら、ロングの積み増しを抑えてリスク管理を前倒し。"
+
+    # 重複除去（順序維持）
+    seen = set()
+    bullets: list[str] = []
+    for x in (risk_msgs + posture_msgs):
+        if x not in seen:
+            bullets.append(x)
+            seen.add(x)
+
+    return summary, bullets
+
+
+# -------------------------------------------------------
 # Streamlit app (ADMIN)
 # -------------------------------------------------------
 def main():
@@ -518,7 +608,6 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # simple header
     st.markdown("## Out-stander (Admin)")
     st.caption(f"Authed: {authed_email}")
 
@@ -704,7 +793,6 @@ def main():
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_up_norm - end_norm).days)
 
-    # Core metrics table
     admin_rows = [
         ["① R² (log space)", float(bubble_res.get("r2", np.nan)), "Fit target is log(price); R² computed in log-space."],
         ["② m", float(pdict.get("m", np.nan)), "Typical 'bubble-like' ranges often cited ~0.3–0.6 (context-dependent)."],
@@ -720,7 +808,6 @@ def main():
     admin_df = pd.DataFrame(admin_rows, columns=["Metric", "Value", "Notes"])
     st.dataframe(admin_df, use_container_width=True)
 
-    # Raw parameter table (A,B,C,m,tc,omega,phi)
     st.markdown("#### Raw parameters (A, B, C, m, tc, ω, φ)")
     raw_params = bubble_res.get("params", np.array([], dtype=float)).astype(float)
     if raw_params.size == 7:
@@ -732,10 +819,12 @@ def main():
     # Simple quality flags (optional but helpful)
     st.markdown("#### Fit quality flags (quick sanity checks)")
     binfo = bubble_res.get("bounds_info", {})
-    A, B, C, m, tc, omega, phi = [float(x) for x in raw_params] if raw_params.size == 7 else [np.nan]*7
+    if raw_params.size == 7:
+        A, B, C, m, tc, omega, phi = [float(x) for x in raw_params]
+    else:
+        A, B, C, m, tc, omega, phi = [np.nan]*7
 
     def near_bound(x, lo, hi, tol=0.02):
-        # within tol fraction of range from either side
         if not np.isfinite(x) or not np.isfinite(lo) or not np.isfinite(hi) or hi == lo:
             return False
         r = (x - lo) / (hi - lo)
@@ -759,6 +848,25 @@ def main():
         st.write(pd.DataFrame({"Flag": flags}))
     else:
         st.write("No obvious red flags from simple heuristics.")
+
+    # =======================================================
+    # ADMIN INTERPRETATION (decision-making)
+    # =======================================================
+    st.markdown("### Admin interpretation (for decision-making)")
+    summary, bullets = admin_interpretation_text(bubble_res, end_date)
+
+    with st.expander("投資判断向けの解釈メモ（管理者のみ）", expanded=True):
+        st.markdown(f"**要約**：{summary}")
+        st.markdown("**ポイント**")
+        st.markdown("\n".join([f"- {b}" for b in bullets]))
+
+        st.markdown("---")
+        st.markdown("**使い方（実務）**")
+        st.markdown(
+            "- tcは『転換日』ではなく、加速構造が崩れやすい**危険ゾーンの中心**。\n"
+            "- 推奨アクション例：**新規買い抑制**、**部分利確**、**ヘッジ開始**、**サイズ調整**。\n"
+            "- mやtcが境界に張り付く場合は、tcを一点で信じず**幅（数週間〜数ヶ月）**で扱う。"
+        )
 
 
 if __name__ == "__main__":
