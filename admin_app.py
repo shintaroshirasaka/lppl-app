@@ -8,11 +8,9 @@ import streamlit as st
 import os
 
 # =======================================================
-# AUTH GATE (ADMIN APP)
-#   - Require signed short-lived token (?t=...)
+# AUTH GATE: Require signed short-lived token (?t=...)
 #   - Render env var: OS_TOKEN_SECRET_ADMIN
-#   - Optional allowlist: ADMIN_EMAILS="a@x.com,b@y.com"
-#
+#   - Query param: ?t=<token>
 # Token format:
 #   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
@@ -85,14 +83,18 @@ FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
 
 # =======================================================
 # FINAL SCORE SETTINGS (calendar-day distance)
-# (same as customer app for consistency)
 # =======================================================
+# SAFE (tc_up in future): near -> higher (up to 59), far -> lower (down to 0)
 UP_FUTURE_NEAR_DAYS = 30
 UP_FUTURE_FAR_DAYS  = 180
 
+# CAUTION (tc_up in past, no down_tc): near -> lower (60), far -> higher (79)
 UP_PAST_NEAR_DAYS   = 7
 UP_PAST_FAR_DAYS    = 120
 
+# HIGH (down_tc exists):
+#   - if down_tc in future: near -> higher (90), far -> lower (80)
+#   - if down_tc in past  : near -> 90, far -> 100
 DOWN_FUTURE_NEAR_DAYS = 7
 DOWN_FUTURE_FAR_DAYS  = 60
 
@@ -119,7 +121,7 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
 
 
 def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
-    """Prevent ValueError: initial guess outside bounds"""
+    """初期値が bounds の外に出て curve_fit が落ちるのを防ぐ"""
     p0 = np.asarray(p0, dtype=float)
     lb = np.asarray(lb, dtype=float)
     ub = np.asarray(ub, dtype=float)
@@ -137,17 +139,7 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """
-    Uptrend fit (robust bounds).
-    Fit target is log(price). Metrics are computed in log-space for consistency.
-    Returns:
-      - params: [A,B,C,m,tc,omega,phi]
-      - r2: R^2 in log-space
-      - rmse: RMSE in log-space
-      - tc_days: tc in index-units (t=0..N-1)
-      - tc_date: first_date + tc_days (calendar-day approximation)
-      - extra: |C/B|, 2pi/omega, etc.
-    """
+    """上昇（バブル）側フィット：log(price) をターゲットに LPPL を当てる"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
@@ -164,7 +156,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     phi_init = 0.0
     p0 = [A_init, B_init, C_init, m_init, tc_init, omega_init, phi_init]
 
-    # Dynamic bounds for A (prevents failures for high-priced tickers)
+    # Dynamic bounds for A
     A_low = float(np.min(log_price) - 2.0)
     A_high = float(np.max(log_price) + 2.0)
 
@@ -185,23 +177,20 @@ def fit_lppl_bubble(price_series: pd.Series):
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
 
-    # R^2 in log space
     ss_res = float(np.sum((log_price - log_fit) ** 2))
     ss_tot = float(np.sum((log_price - log_price.mean()) ** 2))
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    # RMSE in log space
     rmse = float(np.sqrt(np.mean((log_price - log_fit) ** 2)))
 
     first_date = price_series.index[0]
-    tc_days = float(params[4])  # index-units (t grid), treated as "days" in calendar approximation
-    tc_date = first_date + timedelta(days=tc_days)
+    tc_days = float(params[4])  # t=0..N-1 の「データ点単位」
+    tc_date = first_date + timedelta(days=tc_days)  # カレンダー日近似
 
     A, B, C, m, tc, omega, phi = [float(x) for x in params]
     abs_c_over_b = float(abs(C / B)) if abs(B) > 1e-12 else float("inf")
     log_period = float(2.0 * np.pi / omega) if omega != 0 else float("inf")
 
-    # boundary proximity flags (useful for admin QA)
     bounds_info = {
         "A_low": A_low, "A_high": A_high,
         "B_low": -20.0, "B_high": 20.0,
@@ -236,7 +225,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """Downtrend fit (negative bubble, robust bounds)"""
+    """下落（ネガティブ・バブル）側フィット：-log(price) に LPPL を当てる（反転）"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -402,9 +391,9 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
     """
-    SAFE   : tc_up > now, score 0..59 (nearer => higher)
-    CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
-    HIGH   : down_tc exists, score 80..100 (progressed => higher)
+    SAFE   : tc_up > now, score 0..59（近いほど高い）
+    CAUTION: tc_up < now かつ down_tc なし, score 60..79（古いほど高い）
+    HIGH   : down_tc あり, score 80..100（進行度が高いほど高い）
     """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
@@ -459,7 +448,7 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
 
 
 # -------------------------------------------------------
-# Admin interpretation (decision-making text generator)
+# Admin interpretation (decision-making)
 # -------------------------------------------------------
 def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, list[str]]:
     """
@@ -477,61 +466,42 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_date - end_norm).days)
 
-    risk_msgs: list[str] = []
-    posture_msgs: list[str] = []
+    msgs: list[str] = []
 
     # tcの近さ/通過
     if days_to_tc < 0:
-        risk_msgs.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
-        posture_msgs.append("新規ロングは慎重（追随買いは控える）。保有なら部分利確・ヘッジの検討開始。")
+        msgs.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
+        msgs.append("新規ロングは慎重（追随買いは控える）。保有なら部分利確・ヘッジの検討開始。")
     elif days_to_tc <= 30:
-        risk_msgs.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンが近い）。")
-        posture_msgs.append("新規ロングはサイズを落とす/分割。上がっても追わず、利確・ヘッジの準備。")
+        msgs.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンが近い）。")
+        msgs.append("新規ロングはサイズを落とす/分割。上がっても追わず、利確・ヘッジの準備。")
     else:
-        risk_msgs.append(f"t_c まで残り {days_to_tc} 日（近々の転換を断定する段階ではない）。")
-        posture_msgs.append("tcは“ゾーン”として監視。過度な強気の積み増しは避け、上昇の質を点検。")
+        msgs.append(f"t_c まで残り {days_to_tc} 日（近々の転換を断定する段階ではない）。")
+        msgs.append("tcは“ゾーン”として監視。過度な強気の積み増しは避け、上昇の質を点検。")
 
-    # mの解釈
+    # m
     if np.isfinite(m):
         if 0.3 <= m <= 0.6:
-            risk_msgs.append(f"m={m:.2f}：典型的なバブル加速帯域（0.3–0.6）に近い。")
-            posture_msgs.append("過熱局面の可能性。利確の分割開始や、逆指値・ヘッジの優先度を上げる。")
+            msgs.append(f"m={m:.2f}：典型的な“バブル型加速”帯域（0.3–0.6）に近い。")
         elif m >= 0.8:
-            risk_msgs.append(f"m={m:.2f}：上限寄り。境界解（制約に張り付き）で tc の一点予測は信頼しにくい。")
-            posture_msgs.append("tcを一点で信じず、危険ゾーンを“広め（数週間〜数ヶ月）”に取って慎重運用。")
+            msgs.append(f"m={m:.2f}：上限寄り。境界解（制約に張り付き）で t_c の一点予測は信頼しにくい。")
+            msgs.append("t_c を一点で信じず、危険ゾーンを“広め（数週間〜数ヶ月）”に取って運用。")
         else:
-            risk_msgs.append(f"m={m:.2f}：中間帯。典型バブルとは断定しにくいが、構造変化の兆候はあり得る。")
-            posture_msgs.append("指標を単独で決め打ちせず、価格ピーク/出来高/ボラ拡大などと合わせて姿勢調整。")
+            msgs.append(f"m={m:.2f}：中間帯。典型バブルとは断定しにくいが、構造変化の兆候はあり得る。")
 
-    # フィット品質（R²とRMSE）
+    # R2 / RMSE
     if np.isfinite(r2):
-        if r2 >= 0.80:
-            risk_msgs.append(f"R²={r2:.2f}：形状の再現性は高め（ただし予言ではない）。")
-        elif r2 >= 0.60:
-            risk_msgs.append(f"R²={r2:.2f}：形状は一定程度説明できている。")
-        else:
-            risk_msgs.append(f"R²={r2:.2f}：再現性は弱め。シグナル強度は控えめに扱う。")
-
+        msgs.append(f"R²={r2:.2f}：形状は一定程度説明できている（ただし予言ではない）。")
     if np.isfinite(rmse):
-        risk_msgs.append(f"RMSE(log)={rmse:.3f}：log価格に対する平均誤差の目安（小さいほど安定）。")
+        msgs.append(f"RMSE(log)={rmse:.3f}：log価格に対する平均誤差の目安（小さいほど安定）。")
 
-    # 振動（ω, |C/B|）
+    # ω / |C/B|
     if np.isfinite(omega):
-        if 6.0 <= omega <= 13.0:
-            risk_msgs.append(f"ω={omega:.2f}：経験的によく出る帯域。短周期の上下動が出やすい。")
-        else:
-            risk_msgs.append(f"ω={omega:.2f}：振動帯域が典型から外れる。解釈は控えめに。")
-
+        msgs.append(f"ω={omega:.2f}：短周期の上下動（不安定さ）が出やすい帯域。")
     if np.isfinite(c_over_b):
-        if c_over_b >= 1.0:
-            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動項が相対的に強い（値動きが荒れやすい）。")
-            posture_msgs.append("分割利確・逆指値・サイズ縮小が有効。")
-        elif c_over_b >= 0.3:
-            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動は中程度（上下動を織り込みたい局面）。")
-        else:
-            risk_msgs.append(f"|C/B|={c_over_b:.2f}：振動は弱め（トレンド寄り）。")
+        msgs.append(f"|C/B|={c_over_b:.2f}：振動の相対強度（大きいほど上下動が荒れやすい）。")
 
-    # まとめ（断定を避けつつ、姿勢の切替を促す）
+    # まとめ
     if days_to_tc <= 30:
         summary = "tc 近傍（または通過）として、今後は『新規で追いかけない』『利確/ヘッジを織り込む』姿勢に切り替える局面。"
     else:
@@ -540,7 +510,7 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
     # 重複除去（順序維持）
     seen = set()
     bullets: list[str] = []
-    for x in (risk_msgs + posture_msgs):
+    for x in msgs:
         if x not in seen:
             bullets.append(x)
             seen.add(x)
@@ -584,6 +554,7 @@ def main():
         }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
 
+        /* custom error box */
         .custom-error {
             background-color: #141518;
             border: 1px solid #2a2c30;
@@ -608,14 +579,14 @@ def main():
             unsafe_allow_html=True,
         )
 
-    st.markdown("## Out-stander (Admin)")
-    st.caption(f"Authed: {authed_email}")
+    st.markdown("## Out-stander（管理者用）")
+    st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("input_form"):
         ticker = st.text_input(
             "Ticker",
             value="",
-            placeholder="e.g., NVDA / 0700.HK / 7203.T"
+            placeholder="例: NVDA / 0700.HK / 7203.T"
         )
 
         today = date.today()
@@ -633,17 +604,17 @@ def main():
         st.stop()
 
     if not ticker.strip():
-        show_error_black("Invalid ticker symbol or no price data.")
+        show_error_black("Tickerが無効、または価格データが取得できません。")
         st.stop()
 
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
     except Exception:
-        show_error_black("Invalid ticker symbol or no price data.")
+        show_error_black("Tickerが無効、または価格データが取得できません。")
         st.stop()
 
     if len(price_series) < 30:
-        show_error_black("Invalid ticker symbol or no price data.")
+        show_error_black("Tickerが無効、または価格データが取得できません。")
         st.stop()
 
     # ---- fit caches ----
@@ -654,7 +625,7 @@ def main():
     try:
         bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
     except Exception:
-        show_error_black("Fit failed (LPPL uptrend).")
+        show_error_black("フィットに失敗しました（上昇LPPL）。")
         st.stop()
 
     peak_date = price_series.idxmax()
@@ -683,19 +654,19 @@ def main():
     ax.set_facecolor("#0b0c0e")
 
     ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
+    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="上昇モデル")
 
     ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
-               label=f"Turn (up) {pd.Timestamp(bubble_res['tc_date']).date()}")
+               label=f"t_c（上昇） {pd.Timestamp(bubble_res['tc_date']).date()}")
     ax.axvline(peak_date, color="white", linestyle=":",
-               label=f"Peak {pd.Timestamp(peak_date).date()}")
+               label=f"ピーク {pd.Timestamp(peak_date).date()}")
 
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="Down")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
+        ax.plot(down.index, down.values, color="cyan", label="下落（ピーク以降）")
+        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="下落モデル")
         ax.axvline(neg_res["tc_date"], color="green", linestyle="--",
-                   label=f"Turn (down) {pd.Timestamp(neg_res['tc_date']).date()}")
+                   label=f"t_c（下落） {pd.Timestamp(neg_res['tc_date']).date()}")
 
     ax.set_xlabel("Date", color="white")
     ax.set_ylabel("Price", color="white")
@@ -705,7 +676,7 @@ def main():
 
     st.pyplot(fig)
 
-    # ---- UI signal (same style as customer) ----
+    # ---- UI signal ----
     if signal_label == "HIGH":
         risk_label = "High"
         risk_color = "#ff4d4f"
@@ -728,7 +699,7 @@ def main():
             margin-top: 8px;
         ">
             <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Score
+                スコア
             </div>
             <div style="display: flex; align-items: baseline; gap: 12px;">
                 <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">
@@ -759,13 +730,10 @@ def main():
             margin-top: 8px;
         ">
             <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Gain
+                上昇倍率（開始→ピーク）
             </div>
             <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">
                 {gain:.2f}x
-            </div>
-            <div style="font-size: 0.9rem; color: #a0a2a8; margin-top: 4px;">
-                Start → Peak
             </div>
             <div style="
                 margin-top: 6px;
@@ -784,9 +752,9 @@ def main():
         st.markdown(gain_card_html, unsafe_allow_html=True)
 
     # =======================================================
-    # ADMIN METRICS (①〜⑥)
+    # ADMIN METRICS（①〜⑥）
     # =======================================================
-    st.markdown("### Admin metrics (LPPL uptrend)")
+    st.markdown("### 管理者指標（LPPL 上昇モデル）")
 
     pdict = bubble_res.get("param_dict", {})
     tc_up_norm = pd.Timestamp(bubble_res["tc_date"]).normalize()
@@ -794,21 +762,21 @@ def main():
     days_to_tc = int((tc_up_norm - end_norm).days)
 
     admin_rows = [
-        ["① R² (log space)", float(bubble_res.get("r2", np.nan)), "Fit target is log(price); R² computed in log-space."],
-        ["② m", float(pdict.get("m", np.nan)), "Typical 'bubble-like' ranges often cited ~0.3–0.6 (context-dependent)."],
-        ["③ t_c (date, approx)", str(tc_up_norm.date()), "Converted from tc(index-units) via calendar-day approximation."],
-        ["③ t_c (index units)", float(bubble_res.get("tc_days", np.nan)), "tc is on t=0..N-1 grid (data-point units)."],
-        ["④ Days to t_c", days_to_tc, "Computed as (tc_date - end_date).days using normalized dates."],
-        ["⑤ RMSE (log space)", float(bubble_res.get("rmse", np.nan)), "RMSE of log(price) vs log(model) over the fit window."],
-        ["⑥ ω", float(pdict.get("omega", np.nan)), "Angular log-frequency of oscillations in LPPL."],
-        ["⑥ |C/B|", float(pdict.get("abs_C_over_B", np.nan)), "Rough relative oscillation strength; watch B≈0 cases."],
-        ["⑥ 2π/ω", float(pdict.get("log_period_2pi_over_omega", np.nan)), "Oscillation period in log-time units."],
-        ["Fit window N", int(bubble_res.get("N", 0)), "Number of data points used in fit."],
+        ["① R²（対数空間）", float(bubble_res.get("r2", np.nan)), "フィット対象は log(価格)。R² も対数空間で計算。"],
+        ["② m", float(pdict.get("m", np.nan)), "加速の曲率。典型的な“バブル的”範囲は概ね 0.3〜0.6（文脈依存）。"],
+        ["③ t_c（日付・近似）", str(tc_up_norm.date()), "tc（データ点単位）をカレンダー日に近似変換。"],
+        ["③ t_c（データ点単位）", float(bubble_res.get("tc_days", np.nan)), "t=0..N-1 のグリッド上の tc（データ点単位）。"],
+        ["④ t_c までの残日数", days_to_tc, "（tc_date - end_date）を日数で計算（正:未来 / 負:過去）。"],
+        ["⑤ RMSE（対数空間）", float(bubble_res.get("rmse", np.nan)), "log(価格) と log(モデル) のRMSE（小さいほど安定）。"],
+        ["⑥ ω", float(pdict.get("omega", np.nan)), "対数時間における振動の角周波数（大きいほど短周期）。"],
+        ["⑥ |C/B|", float(pdict.get("abs_C_over_B", np.nan)), "振動項の相対強度の目安（B≈0の場合は注意）。"],
+        ["⑥ 2π/ω", float(pdict.get("log_period_2pi_over_omega", np.nan)), "対数時間での周期（log-time units）。"],
+        ["フィット期間 N", int(bubble_res.get("N", 0)), "フィットに使用したデータ点数。"],
     ]
-    admin_df = pd.DataFrame(admin_rows, columns=["Metric", "Value", "Notes"])
+    admin_df = pd.DataFrame(admin_rows, columns=["指標", "値", "解説"])
     st.dataframe(admin_df, use_container_width=True)
 
-    st.markdown("#### Raw parameters (A, B, C, m, tc, ω, φ)")
+    st.markdown("#### 生パラメータ（A, B, C, m, tc, ω, φ）")
     raw_params = bubble_res.get("params", np.array([], dtype=float)).astype(float)
     if raw_params.size == 7:
         raw_df = pd.DataFrame([raw_params], columns=["A", "B", "C", "m", "tc", "omega", "phi"])
@@ -816,8 +784,10 @@ def main():
         raw_df = pd.DataFrame([raw_params])
     st.dataframe(raw_df, use_container_width=True)
 
-    # Simple quality flags (optional but helpful)
-    st.markdown("#### Fit quality flags (quick sanity checks)")
+    # =======================================================
+    # Fit quality flags（簡易サニティチェック）
+    # =======================================================
+    st.markdown("#### フィット品質フラグ（簡易チェック）")
     binfo = bubble_res.get("bounds_info", {})
     if raw_params.size == 7:
         A, B, C, m, tc, omega, phi = [float(x) for x in raw_params]
@@ -825,6 +795,7 @@ def main():
         A, B, C, m, tc, omega, phi = [np.nan]*7
 
     def near_bound(x, lo, hi, tol=0.02):
+        """範囲の端（上下）に tol% 以内で張り付いているか"""
         if not np.isfinite(x) or not np.isfinite(lo) or not np.isfinite(hi) or hi == lo:
             return False
         r = (x - lo) / (hi - lo)
@@ -832,27 +803,27 @@ def main():
 
     flags = []
     if np.isfinite(m) and (m < 0.2 or m > 0.8):
-        flags.append("m is outside common 'bubble-like' band (roughly 0.3–0.6); interpret cautiously.")
+        flags.append("m が一般的な“バブル的帯域”（概ね0.3〜0.6）から外れています。解釈は慎重に。")
     if np.isfinite(B) and B >= 0:
-        flags.append("B is non-negative. For classic upward LPPL on log(price), B is often negative.")
+        flags.append("B が非負です。上昇LPPL（log価格）では B<0 になることが多いです。")
     if near_bound(m, binfo.get("m_low", np.nan), binfo.get("m_high", np.nan)):
-        flags.append("m is near bound (0.01 or 0.99) -> potential boundary solution.")
+        flags.append("m が境界（0.01 もしくは 0.99 付近）に張り付いています → 境界解の可能性。")
     if near_bound(tc, binfo.get("tc_low", np.nan), binfo.get("tc_high", np.nan)):
-        flags.append("tc is near bound -> solution may be pushed by constraints.")
+        flags.append("tc が境界付近に張り付いています → 制約に押されている可能性。")
     if near_bound(omega, binfo.get("omega_low", np.nan), binfo.get("omega_high", np.nan)):
-        flags.append("omega is near bound -> oscillation frequency constrained.")
+        flags.append("omega が境界付近です → 振動周波数が制約で決まっている可能性。")
     if np.isfinite(pdict.get("abs_C_over_B", np.nan)) and pdict.get("abs_C_over_B", 0.0) > 2.0:
-        flags.append("|C/B| is large -> oscillation term may dominate; check visual plausibility.")
+        flags.append("|C/B| が大きいです → 振動項が支配的になり“それっぽい線”になる場合があるため、視覚妥当性を要確認。")
 
     if flags:
-        st.write(pd.DataFrame({"Flag": flags}))
+        st.write(pd.DataFrame({"フラグ": flags}))
     else:
-        st.write("No obvious red flags from simple heuristics.")
+        st.write("単純なヒューリスティックでは明確な赤信号は見当たりません。")
 
     # =======================================================
-    # ADMIN INTERPRETATION (decision-making)
+    # ADMIN INTERPRETATION（投資判断向け）
     # =======================================================
-    st.markdown("### Admin interpretation (for decision-making)")
+    st.markdown("### 投資判断向けの解釈（管理者のみ）")
     summary, bullets = admin_interpretation_text(bubble_res, end_date)
 
     with st.expander("投資判断向けの解釈メモ（管理者のみ）", expanded=True):
@@ -863,9 +834,9 @@ def main():
         st.markdown("---")
         st.markdown("**使い方（実務）**")
         st.markdown(
-            "- tcは『転換日』ではなく、加速構造が崩れやすい**危険ゾーンの中心**。\n"
+            "- tc は『転換日』ではなく、加速構造が崩れやすい**危険ゾーンの中心**。\n"
             "- 推奨アクション例：**新規買い抑制**、**部分利確**、**ヘッジ開始**、**サイズ調整**。\n"
-            "- mやtcが境界に張り付く場合は、tcを一点で信じず**幅（数週間〜数ヶ月）**で扱う。"
+            "- m や tc が境界に張り付く場合は、tc を一点で信じず **幅（数週間〜数ヶ月）** で扱う。"
         )
 
 
