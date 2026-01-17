@@ -80,8 +80,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         filed = x.get("filed")
         
         # セグメント情報の取得
-        # APIの仕様上、segmentキーがある場合とない場合がある
-        # Consolidated（連結）は通常segmentキーがない、または空
         segment_obj = x.get("segment")
 
         if not end or val is None:
@@ -100,17 +98,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
             year_key = int(fy_raw)
         else:
             year_key = int(end_ts.year)
-
-        # セグメント処理
-        dim_key = None
-        member_val = None
-        
-        if include_segments and segment_obj:
-            # segmentはリストやdictの場合があるが、通常はリスト [{'dimension':..., 'value':...}] ではない場合も？
-            # 多くの場合は単一のDimensionが多いが、複数は一旦無視して先頭を取る簡易実装
-            # data.sec.govのJSONでは segment は文字列ではなく構造化されていることが多いが
-            # ここでは簡易的に処理
-            pass 
 
         rows.append(
             {
@@ -235,7 +222,6 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
             continue
         
         # segmentは通常リスト形式 [{'dimension': '...', 'value': '...'}]
-        # 稀にdictの場合もあるかもしれないので対応
         dims = []
         if isinstance(seg, list):
             dims = seg
@@ -262,12 +248,12 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values(["year", "dimension", "member", "filed"]).drop_duplicates(subset=["year", "dimension", "member"], keep="last")
     return out
 
-def build_segment_table(facts_json: dict) -> tuple[dict, dict]:
+def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     売上高（Revenue）に関連するセグメント情報を抽出する
     戻り値: (business_segments_df, geo_segments_df)
     """
-    # 売上タグの候補（セグメント情報は標準のRevenuesタグに付くことが多い）
+    # 売上タグの候補
     revenue_tags = [
         "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "RevenuesNetOfInterestExpense", "SalesRevenueGoodsNet", "SalesRevenueServicesNet"
@@ -286,19 +272,15 @@ def build_segment_table(facts_json: dict) -> tuple[dict, dict]:
             all_seg_rows.append(parsed)
             
     if not all_seg_rows:
-        return {}, {}
+        # 【修正】空の辞書ではなく、空のDataFrameを返す
+        return pd.DataFrame(), pd.DataFrame()
     
     merged = pd.concat(all_seg_rows, ignore_index=True)
     
-    # 重複処理: 同じ年・Dim・Memberで複数のタグがある場合、値が大きい方（＝より包括的なタグ）または優先順位で採用
-    # ここでは簡易的に「値が大きい方」を採用する（部分的な売上タグを除外するため）
+    # 重複処理: 同じ年・Dim・Memberで複数のタグがある場合、値が大きい方（＝より包括的なタグ）を採用
     merged = merged.sort_values("val", ascending=False).drop_duplicates(subset=["year", "dimension", "member"], keep="first")
     
     # 軸（Dimension）による分類
-    # 代表的な軸の名前
-    # Business: StatementBusinessSegmentsAxis, SegmentReportingInformationBySegmentAxis, ProductOrServiceAxis
-    # Geo: StatementGeographicalAxis, EntityGeographicalAxis
-    
     def classify_axis(dim_name: str) -> str:
         d = dim_name.lower()
         if "businesssegments" in d or "segmentreporting" in d or "productor" in d:
@@ -309,13 +291,12 @@ def build_segment_table(facts_json: dict) -> tuple[dict, dict]:
 
     merged["axis_type"] = merged["dimension"].apply(classify_axis)
     
-    # メンバー名のクリーニング (例: "avgo:SemiconductorSolutionsMember" -> "Semiconductor Solutions")
+    # メンバー名のクリーニング
     def clean_member(m: str) -> str:
         if ":" in m:
             m = m.split(":")[1]
         if m.endswith("Member"):
             m = m[:-6]
-        # キャメルケース分割などは大変なので、そのままでも可読性はそれなりにある
         return m
 
     merged["member_clean"] = merged["member"].apply(clean_member)
@@ -360,7 +341,6 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     ax.grid(color="#333333", alpha=0.6, axis="y")
     ax.set_title(title, color="white")
     
-    # 凡例の設定
     ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.0, 1.0))
     
     st.pyplot(fig)
