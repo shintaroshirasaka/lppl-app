@@ -8,8 +8,15 @@ import streamlit as st
 
 from auth_gate import require_admin_token
 
+# =========================
+# SEC settings
+# =========================
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
-SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+SEC_HEADERS = {
+    "User-Agent": SEC_USER_AGENT,
+    "Accept-Encoding": "gzip, deflate",
+    "Host": "data.sec.gov",
+}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -31,6 +38,7 @@ def fetch_ticker_cik_map() -> dict:
     r = requests.get(TICKER_CIK_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=30)
     r.raise_for_status()
     data = r.json()
+
     out = {}
     for _, v in data.items():
         t = str(v.get("ticker", "")).strip().lower()
@@ -49,6 +57,12 @@ def fetch_company_facts(cik10: str) -> dict:
 
 
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+    """
+    年次相当（USD）を抽出：
+    - form: 10-K系（10-K, 10-K/A, 10-K405など）を許可
+    - fp: FY/CY/Q4 を優先（ただし完全依存しない）
+    - year は fy があれば fy を優先、無ければ end.year
+    """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
     rows = []
@@ -71,7 +85,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
 
         annual_fp = fp in {"FY", "CY", "Q4"}
 
-        # 年次キー：fyがあればそれを使う（会計年度の年）
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
             year_key = int(fy_raw)
         else:
@@ -142,9 +155,8 @@ def _pick_best_tag_latest_first(facts_json: dict, candidates: list[str]) -> tupl
 
 
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # Revenue候補：AAPLなどは近年このタグが効きやすい
     revenue_tags = [
-        "RevenueFromContractWithCustomerExcludingAssessedTax",  # 近年の本命になりやすい
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
     ]
@@ -229,6 +241,15 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     return out, meta
 
 
+def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
+    """
+    最新年度を基準に「最新から過去N年」を切り出す
+    """
+    latest_year = int(table["FY"].max())
+    min_year = latest_year - int(n_years) + 1
+    return table[table["FY"] >= min_year].sort_values("FY").reset_index(drop=True)
+
+
 def plot_pl_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
@@ -274,12 +295,12 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 最新年度優先版）")
+    st.markdown("## 長期ファンダ（年次PL / 最新から過去N年表示版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
         ticker = st.text_input("Ticker（米国株）", value="AAPL")
-        years = st.slider("表示する年数（末尾N年）", min_value=3, max_value=15, value=10)
+        years = st.slider("表示する年数（最新から過去N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -305,9 +326,10 @@ def render(authed_email: str):
         st.write(meta)
         st.stop()
 
-    st.caption(f"取得できた年次データ: {len(table)} 年分")
+    st.caption(f"取得できた年次データ: {len(table)} 年分（最新年: {int(table['FY'].max())}）")
 
-    table_disp = table.tail(int(years)).reset_index(drop=True)
+    # ★最新年度を基準にN年分を切り出す
+    table_disp = _slice_latest_n_years(table, int(years))
 
     plot_pl_annual(table_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
 
