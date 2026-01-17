@@ -17,7 +17,6 @@ SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
     "Host": "data.sec.gov",
 }
-
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -57,13 +56,13 @@ def fetch_company_facts(cik10: str) -> dict:
     return r.json()
 
 
-def _extract_annual_series_usd_by_end_year(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
     年次相当（USD）を抽出：
     - form: 10-K系（10-K, 10-K/A, 10-K405など）を許可
-    - fp: FY/CY/Q4 を優先（ただし企業差があるので完全依存しない）
-    - 年次のキーは fy ではなく end(期末日) の year を採用（これが一番安定）
-    戻り: columns=["year","end","val","fp","form","fy_raw"]
+    - fp: FY/CY/Q4 を優先（ただし完全依存しない）
+    - 年次キーは fy があれば fy を優先、無ければ end.year
+    戻り: columns=["year","end","val","fp","form","fy_raw","annual_fp"]
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
@@ -74,11 +73,10 @@ def _extract_annual_series_usd_by_end_year(facts_json: dict, xbrl_tag: str) -> p
         fp = str(x.get("fp", "")).upper().strip()
         end = x.get("end")
         val = x.get("val")
+        fy_raw = x.get("fy", None)
 
         if not end or val is None:
             continue
-
-        # 10-K系だけ採用
         if not form.startswith("10-K"):
             continue
 
@@ -86,18 +84,22 @@ def _extract_annual_series_usd_by_end_year(facts_json: dict, xbrl_tag: str) -> p
         if pd.isna(end_ts):
             continue
 
-        # fpは優先条件（ただし完全依存しない）
-        # 年次っぽいものを優先して残すためのフラグにしておく
         annual_fp = fp in {"FY", "CY", "Q4"}
+
+        # ★年次キー：fyがあればそれを優先（会計年度の“年”として一番分かりやすい）
+        if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+            year_key = int(fy_raw)
+        else:
+            year_key = int(end_ts.year)
 
         rows.append(
             {
-                "year": int(end_ts.year),           # ★ここが主キー
+                "year": year_key,
                 "end": end_ts,
                 "val": _safe_float(val),
                 "fp": fp,
                 "form": form,
-                "fy_raw": x.get("fy", None),
+                "fy_raw": fy_raw,
                 "annual_fp": int(annual_fp),
             }
         )
@@ -107,24 +109,48 @@ def _extract_annual_series_usd_by_end_year(facts_json: dict, xbrl_tag: str) -> p
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
 
-    # 同一年に複数候補がある場合：
-    # 1) annual_fp==1（FY/CY/Q4）を優先
-    # 2) endが遅い（より新しい/確定）を優先
+    # 同一年が複数候補なら：
+    # 1) annual_fp==1（FY/CY/Q4）優先
+    # 2) endが遅い方（より新しい/確定）優先
     df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
     df = df.sort_values("year")
     return df
 
 
-def _pick_first_available_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
+def _pick_best_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
+    """
+    候補タグを全部試し、最も「年次件数が多い」ものを採用。
+    タイブレーク：最新endが新しいものを優先。
+    """
+    best_tag = None
+    best_df = pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+    best_n = -1
+    best_last_end = pd.Timestamp("1900-01-01")
+
     for tag in candidates:
-        df = _extract_annual_series_usd_by_end_year(facts_json, tag)
-        if not df.empty:
-            return tag, df
-    return None, pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+        df = _extract_annual_series_usd(facts_json, tag)
+        if df.empty:
+            continue
+
+        n = len(df)
+        last_end = df["end"].max()
+
+        if (n > best_n) or (n == best_n and last_end > best_last_end):
+            best_tag = tag
+            best_df = df
+            best_n = n
+            best_last_end = last_end
+
+    return best_tag, best_df
 
 
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    revenue_tags = ["Revenues", "SalesRevenueNet"]
+    # Revenueは企業差が大きいので候補を厚めに
+    revenue_tags = [
+        "Revenues",
+        "SalesRevenueNet",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ]
     op_income_tags = ["OperatingIncomeLoss"]
     pretax_tags = [
         "IncomeBeforeIncomeTaxes",
@@ -135,22 +161,21 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     meta = {}
 
-    tag, df_rev = _pick_first_available_tag(facts_json, revenue_tags)
+    tag, df_rev = _pick_best_tag(facts_json, revenue_tags)
     meta["revenue_tag"] = tag
 
-    tag, df_op = _pick_first_available_tag(facts_json, op_income_tags)
+    tag, df_op = _pick_best_tag(facts_json, op_income_tags)
     meta["op_income_tag"] = tag
 
-    tag, df_pt = _pick_first_available_tag(facts_json, pretax_tags)
+    tag, df_pt = _pick_best_tag(facts_json, pretax_tags)
     meta["pretax_tag"] = tag
 
-    tag, df_ni = _pick_first_available_tag(facts_json, net_income_tags)
+    tag, df_ni = _pick_best_tag(facts_json, net_income_tags)
     meta["net_income_tag"] = tag
 
     if df_rev.empty:
         return pd.DataFrame(), meta
 
-    # revenue を軸に year で結合（year=end.year）
     df = df_rev[["year", "end", "val", "fp", "form", "fy_raw"]].rename(
         columns={"val": "revenue", "fp": "fp_rev", "form": "form_rev", "fy_raw": "fy_rev"}
     )
@@ -175,7 +200,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     out = pd.DataFrame(
         {
-            "FY": df["year"].astype(int),                     # 表示上はFY欄に年を出す
+            "FY": df["year"].astype(int),
             "End": df["end"].dt.date.astype(str),
             "Revenue(M$)": df["revenue"].map(_to_musd),
             "OpIncome(M$)": df["op_income"].map(_to_musd),
@@ -184,7 +209,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         }
     )
 
-    # デバッグ情報
+    meta["years"] = df["year"].astype(int).tolist()
     meta["fp_sample"] = {
         "revenue": df["fp_rev"].dropna().unique().tolist(),
         "op_income": df["fp_op"].dropna().unique().tolist(),
@@ -203,9 +228,6 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "pretax": df["fy_pt"].dropna().astype(str).unique().tolist(),
         "net_income": df["fy_ni"].dropna().astype(str).unique().tolist(),
     }
-
-    # 取得した年の一覧（確認用）
-    meta["years"] = df["year"].astype(int).tolist()
 
     return out, meta
 
@@ -245,7 +267,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 def render(authed_email: str):
     st.set_page_config(page_title="Fundamentals (Staging)", layout="wide")
-
     st.markdown(
         """
         <style>
@@ -256,15 +277,11 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / end.yearで複数年取得版）")
+    st.markdown("## 長期ファンダ（年次PL / 最新年度まで拾う版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
-        ticker = st.text_input(
-            "Ticker（米国株）",
-            value="AAPL",
-            placeholder="例: AAPL / MSFT / GOOGL / AMZN / NVDA / AVGO",
-        )
+        ticker = st.text_input("Ticker（米国株）", value="AAPL")
         years = st.slider("表示する年数（末尾N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
@@ -276,40 +293,26 @@ def render(authed_email: str):
         st.error("Tickerを入力してください。")
         st.stop()
 
-    try:
-        m = fetch_ticker_cik_map()
-        cik10 = m.get(t)
-        if not cik10:
-            st.error("このTickerのCIKが見つかりませんでした（米国株のTickerか確認してください）。")
-            st.stop()
-    except Exception as e:
-        st.error(f"Ticker→CIKの取得に失敗しました: {e}")
+    m = fetch_ticker_cik_map()
+    cik10 = m.get(t)
+    if not cik10:
+        st.error("このTickerのCIKが見つかりませんでした。")
         st.stop()
 
-    try:
-        facts = fetch_company_facts(cik10)
-        company_name = facts.get("entityName", ticker.upper())
-    except Exception as e:
-        st.error(f"SECデータ取得に失敗しました: {e}")
-        st.stop()
+    facts = fetch_company_facts(cik10)
+    company_name = facts.get("entityName", ticker.upper())
 
     table, meta = build_pl_annual_table(facts)
-
     if table.empty:
-        st.error("年次PLデータが取得できませんでした（Revenueタグが見つからない等）。")
-        with st.expander("デバッグ", expanded=True):
-            st.write(meta)
-            st.write(f"CIK: {cik10}")
+        st.error("年次PLデータが取得できませんでした。")
+        st.write(meta)
         st.stop()
 
     st.caption(f"取得できた年次データ: {len(table)} 年分")
 
     table_disp = table.tail(int(years)).reset_index(drop=True)
 
-    plot_pl_annual(
-        table_disp,
-        title=f"{company_name} ({ticker.upper()}) - Income Statement (Annual)",
-    )
+    plot_pl_annual(table_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
 
     st.markdown("### 年次PL（百万USD）")
     st.dataframe(
@@ -338,4 +341,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
