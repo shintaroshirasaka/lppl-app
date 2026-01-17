@@ -51,6 +51,9 @@ def fetch_company_facts(cik10: str) -> dict:
     return r.json()
 
 
+# =========================
+# XBRL annual extractor (USD)
+# =========================
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
@@ -87,15 +90,12 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
                 "year": year_key,
                 "end": end_ts,
                 "val": _safe_float(val),
-                "fp": fp,
-                "form": form,
-                "fy_raw": fy_raw,
                 "annual_fp": int(annual_fp),
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
@@ -103,12 +103,12 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     return df
 
 
-def _pick_best_tag_latest_first(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
+def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
     タグ選択（最新年優先→件数→end）
     """
     best_tag = None
-    best_df = pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+    best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
     best_max_year = -1
     best_n = -1
     best_last_end = pd.Timestamp("1900-01-01")
@@ -138,13 +138,9 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
 
 
 # =========================
-# Composite builder (fill by year)
+# Composite (USD) fill-by-year
 # =========================
-def _build_composite_by_year(facts_json: dict, tag_priority: list[str]) -> tuple[pd.DataFrame, dict]:
-    """
-    tag_priority の順に、年ごとに埋める合成系列
-    戻り df: columns=["year","value"]
-    """
+def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> tuple[pd.DataFrame, dict]:
     tag_series = {}
     tag_years = {}
     for tag in tag_priority:
@@ -186,21 +182,13 @@ def _build_composite_by_year(facts_json: dict, tag_priority: list[str]) -> tuple
     return out, meta
 
 
-def _series_map(df: pd.DataFrame) -> dict:
-    if df.empty:
-        return {}
-    return dict(zip(df["year"].astype(int), df["value"].astype(float)))
-
-
 # =========================
-# PL (annual)
+# PL (annual) + Operating margin
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    revenue_priority = [
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
-        "Revenues",
-        "SalesRevenueNet",
-    ]
+    revenue_priority = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
+
+    # NetIncome を合成（空白を減らす）
     net_income_priority = [
         "NetIncomeLoss",
         "ProfitLoss",
@@ -218,51 +206,42 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     meta = {}
 
-    rev_df, rev_meta = _build_composite_by_year(facts_json, revenue_priority)
+    rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority)
     meta["revenue_composite"] = rev_meta
 
-    ni_df, ni_meta = _build_composite_by_year(facts_json, net_income_priority)
+    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, net_income_priority)
     meta["net_income_composite"] = ni_meta
 
-    tag, df_op = _pick_best_tag_latest_first(facts_json, op_income_tags)
-    meta["op_income_tag"] = tag
-
-    tag, df_pt = _pick_best_tag_latest_first(facts_json, pretax_tags)
-    meta["pretax_tag"] = tag
+    op_tag, df_op = _pick_best_tag_latest_first_usd(facts_json, op_income_tags)
+    pt_tag, df_pt = _pick_best_tag_latest_first_usd(facts_json, pretax_tags)
+    meta["op_income_tag"] = op_tag
+    meta["pretax_tag"] = pt_tag
+    meta["net_income_tag"] = "COMPOSITE"
 
     if rev_df.empty:
         return pd.DataFrame(), meta
 
-    years = sorted(set(rev_df["year"].tolist()) | set(df_op["year"].tolist()) | set(df_pt["year"].tolist()) | set(ni_df["year"].tolist()))
-    years = [int(y) for y in years]
-    if not years:
-        return pd.DataFrame(), meta
-
-    rev_map = _series_map(rev_df)
-    ni_map = _series_map(ni_df)
+    rev_map = dict(zip(rev_df["year"].astype(int), rev_df["value"].astype(float)))
+    ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
     op_map = dict(zip(df_op["year"].astype(int), df_op["val"].astype(float))) if not df_op.empty else {}
     pt_map = dict(zip(df_pt["year"].astype(int), df_pt["val"].astype(float))) if not df_pt.empty else {}
-
     end_map = dict(zip(df_op["year"].astype(int), df_op["end"])) if not df_op.empty else {}
 
+    years = sorted(set(rev_map.keys()) | set(op_map.keys()) | set(pt_map.keys()) | set(ni_map.keys()))
     rows = []
     for y in years:
         end = end_map.get(y)
         end_str = str(pd.to_datetime(end).date()) if end is not None and pd.notna(end) else f"{y}-12-31"
-
-        rev = rev_map.get(y, np.nan)
-        op = op_map.get(y, np.nan)
-        pt = pt_map.get(y, np.nan)
-        ni = ni_map.get(y, np.nan)
-
-        rows.append([
-            y,
-            end_str,
-            _to_musd(rev) if np.isfinite(rev) else np.nan,
-            _to_musd(op) if np.isfinite(op) else np.nan,
-            _to_musd(pt) if np.isfinite(pt) else np.nan,
-            _to_musd(ni) if np.isfinite(ni) else np.nan,
-        ])
+        rows.append(
+            [
+                y,
+                end_str,
+                _to_musd(rev_map.get(y, np.nan)) if np.isfinite(rev_map.get(y, np.nan)) else np.nan,
+                _to_musd(op_map.get(y, np.nan)) if np.isfinite(op_map.get(y, np.nan)) else np.nan,
+                _to_musd(pt_map.get(y, np.nan)) if np.isfinite(pt_map.get(y, np.nan)) else np.nan,
+                _to_musd(ni_map.get(y, np.nan)) if np.isfinite(ni_map.get(y, np.nan)) else np.nan,
+            ]
+        )
 
     out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "Pretax(M$)", "NetIncome(M$)"])
     meta["years"] = years
@@ -272,7 +251,6 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 def plot_pl_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
-
     revenue = df["Revenue(M$)"].astype(float).to_numpy()
     op = df["OpIncome(M$)"].astype(float).to_numpy()
     pt = df["Pretax(M$)"].astype(float).to_numpy()
@@ -302,13 +280,8 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 
 def plot_operating_margin(table: pd.DataFrame, title: str):
-    """
-    （１）営業利益率の推移（折れ線）
-      OpIncome / Revenue
-    """
     df = table.copy()
     x = df["FY"].astype(str).tolist()
-
     rev = df["Revenue(M$)"].astype(float).to_numpy()
     op = df["OpIncome(M$)"].astype(float).to_numpy()
 
@@ -331,7 +304,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest year) fallback for missing noncurrent
+# BS (latest) + pies
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -340,7 +313,7 @@ def _latest_year_from_assets(facts_json: dict) -> int | None:
     return int(df["year"].max())
 
 
-def _value_for_year(facts_json: dict, tag_candidates: list[str], year: int) -> tuple[str | None, float]:
+def _value_for_year_usd(facts_json: dict, tag_candidates: list[str], year: int) -> tuple[str | None, float]:
     for tag in tag_candidates:
         df = _extract_annual_series_usd(facts_json, tag)
         if df.empty:
@@ -357,23 +330,23 @@ def _value_for_year(facts_json: dict, tag_candidates: list[str], year: int) -> t
 def build_bs_latest_simple(facts_json: dict, year: int):
     """
     missing対策：
-      AssetsNoncurrent が無い → Assets - AssetsCurrent で補完
-      LiabilitiesNoncurrent が無い → Liabilities - LiabilitiesCurrent で補完
+      AssetsNoncurrent が無い → Assets - AssetsCurrent
+      LiabilitiesNoncurrent が無い → Liabilities - LiabilitiesCurrent
     """
     meta = {"bs_year": year}
 
-    assets_tag, assets_total = _value_for_year(facts_json, ["Assets"], year)
-    liab_tag, liab_total = _value_for_year(facts_json, ["Liabilities"], year)
+    assets_tag, assets_total = _value_for_year_usd(facts_json, ["Assets"], year)
+    liab_tag, liab_total = _value_for_year_usd(facts_json, ["Liabilities"], year)
     meta["assets_total_tag"] = assets_tag
     meta["liabilities_total_tag"] = liab_tag
 
-    ca_tag, ca = _value_for_year(facts_json, ["AssetsCurrent"], year)
-    nca_tag, nca = _value_for_year(facts_json, ["AssetsNoncurrent"], year)
+    ca_tag, ca = _value_for_year_usd(facts_json, ["AssetsCurrent"], year)
+    nca_tag, nca = _value_for_year_usd(facts_json, ["AssetsNoncurrent"], year)
 
-    cl_tag, cl = _value_for_year(facts_json, ["LiabilitiesCurrent"], year)
-    ncl_tag, ncl = _value_for_year(facts_json, ["LiabilitiesNoncurrent"], year)
+    cl_tag, cl = _value_for_year_usd(facts_json, ["LiabilitiesCurrent"], year)
+    ncl_tag, ncl = _value_for_year_usd(facts_json, ["LiabilitiesNoncurrent"], year)
 
-    eq_tag, eq = _value_for_year(
+    eq_tag, eq = _value_for_year_usd(
         facts_json,
         ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
         year,
@@ -423,11 +396,13 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
+    # Assets（下：非流動、上：流動）
     bottom = 0.0
     ax.bar(0, vals["Noncurrent Assets (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Assets")
     bottom += vals["Noncurrent Assets (M$)"]
     ax.bar(0, vals["Current Assets (M$)"], bottom=bottom, alpha=0.7, label="Current Assets")
 
+    # L+E（下：純資産、中：非流動負債、上：流動負債）
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
     bottom += vals["Equity (M$)"]
@@ -445,35 +420,134 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     st.pyplot(fig)
 
 
+def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
+    pos = [(n, float(v)) for n, v in items if np.isfinite(v) and float(v) > 0]
+    pos.sort(key=lambda x: x[1], reverse=True)
+    top = pos[:3]
+    top_sum = sum(v for _, v in top)
+    other = max(total - top_sum, 0.0) if np.isfinite(total) else sum(v for _, v in pos[3:])
+    labels = [n for n, _ in top]
+    sizes = [v for _, v in top]
+    if other > 0:
+        labels.append("Other")
+        sizes.append(other)
+    if sum(sizes) <= 0:
+        return (["No data"], [1.0])
+    return labels, sizes
+
+
+def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]:
+    meta = {"year": year}
+
+    _, total_assets = _value_for_year_usd(facts_json, ["Assets"], year)
+    _, total_liab = _value_for_year_usd(facts_json, ["Liabilities"], year)
+    _, total_eq = _value_for_year_usd(
+        facts_json,
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+        year,
+    )
+    total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
+
+    # A: Assets top3
+    asset_candidates = [
+        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue",
+                                "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]),
+        ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet"]),
+        ("Inventory", ["InventoryNet"]),
+        ("PPE (Net)", ["PropertyPlantAndEquipmentNet"]),
+        ("Goodwill", ["Goodwill"]),
+        ("Intangibles", ["IntangibleAssetsNetExcludingGoodwill"]),
+    ]
+    asset_items = []
+    for name, tags in asset_candidates:
+        used, v = _value_for_year_usd(facts_json, tags, year)
+        meta[f"asset_{name}_tag"] = used
+        if np.isfinite(v):
+            asset_items.append((name, v))
+
+    if not np.isfinite(total_assets) or total_assets <= 0:
+        total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
+    a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
+
+    # B: L+E accounts top3 (no big headings)
+    le_candidates = [
+        ("Accounts Payable", ["AccountsPayableCurrent"]),
+        ("Deferred Revenue / Contract Liabilities", ["ContractWithCustomerLiabilityCurrent",
+                                                     "ContractWithCustomerLiabilityNoncurrent",
+                                                     "DeferredRevenueCurrent",
+                                                     "DeferredRevenueNoncurrent"]),
+        ("Long-term Debt (Noncurrent)", ["LongTermDebtNoncurrent",
+                                         "LongTermDebtAndCapitalLeaseObligationsNoncurrent"]),
+        ("Long-term Debt (Current)", ["LongTermDebtCurrent",
+                                      "LongTermDebtAndCapitalLeaseObligationsCurrent"]),
+        ("Other Current Liabilities", ["OtherLiabilitiesCurrent"]),
+        ("Other Noncurrent Liabilities", ["OtherLiabilitiesNoncurrent"]),
+        ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
+        ("Additional Paid-in Capital", ["AdditionalPaidInCapital"]),
+        ("AOCI", ["AccumulatedOtherComprehensiveIncomeLossNetOfTax"]),
+        ("Common Stock", ["CommonStockValue"]),
+    ]
+    le_items = []
+    for name, tags in le_candidates:
+        used, v = _value_for_year_usd(facts_json, tags, year)
+        meta[f"le_{name}_tag"] = used
+        if np.isfinite(v) and v > 0:
+            le_items.append((name, v))
+
+    if not np.isfinite(total_le) or total_le <= 0:
+        total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
+    b_labels, b_sizes = _top3_plus_other(le_items, total_le)
+
+    return (
+        {"labels": a_labels, "sizes": a_sizes, "total": total_assets},
+        {"labels": b_labels, "sizes": b_sizes, "total": total_le},
+        meta,
+    )
+
+
+def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
+    col1, col2 = st.columns(2)
+
+    def _pie(ax, labels, sizes, title):
+        ax.pie(sizes, labels=labels, autopct=lambda p: f"{p:.0f}%", startangle=90, textprops={"color": "white"})
+        ax.set_title(title, color="white")
+
+    with col1:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"A: Assets Top3 + Other ({year})")
+        st.pyplot(fig)
+
+    with col2:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: L+E Top3 + Other ({year})")
+        st.pyplot(fig)
+
+
 # =========================
-# CF (annual) - same years as PL slider
+# CF (annual) - 4 line series
 # =========================
 def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     cfo_tags = ["NetCashProvidedByUsedInOperatingActivities"]
     cfi_tags = ["NetCashProvidedByUsedInInvestingActivities"]
     cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
-    capex_tags = [
-        "PaymentsToAcquirePropertyPlantAndEquipment",
-        "PaymentsToAcquireProductiveAssets",
-        "PaymentsToAcquireFixedAssets",
-    ]
+    capex_tags = ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireFixedAssets"]
 
-    tag, df_cfo = _pick_best_tag_latest_first(facts_json, cfo_tags)
+    tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags)
     meta["cfo_tag"] = tag
-    tag, df_cfi = _pick_best_tag_latest_first(facts_json, cfi_tags)
+    tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags)
     meta["cfi_tag"] = tag
-    tag, df_cff = _pick_best_tag_latest_first(facts_json, cff_tags)
+    tag, df_cff = _pick_best_tag_latest_first_usd(facts_json, cff_tags)
     meta["cff_tag"] = tag
-    tag, df_capex = _pick_best_tag_latest_first(facts_json, capex_tags)
+    tag, df_capex = _pick_best_tag_latest_first_usd(facts_json, capex_tags)
     meta["capex_tag"] = tag
 
-    years = sorted(
-        set(df_cfo["year"].astype(int).tolist())
-        | set(df_cfi["year"].astype(int).tolist())
-        | set(df_cff["year"].astype(int).tolist())
-        | set(df_capex["year"].astype(int).tolist())
-    )
+    years = sorted(set(df_cfo["year"].tolist()) | set(df_cfi["year"].tolist()) | set(df_cff["year"].tolist()) | set(df_capex["year"].tolist()))
+    years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
 
@@ -500,14 +574,9 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         if np.isfinite(cfo) and np.isfinite(capex_out):
             fcf = cfo + capex_out
 
-        end = None
-        if not df_cfo.empty and (df_cfo["year"] == y).any():
-            end = df_cfo[df_cfo["year"] == y]["end"].iloc[-1]
-        end_str = str(pd.to_datetime(end).date()) if end is not None else f"{y}-12-31"
+        rows.append([y, _to_musd(cfo), _to_musd(cfi), _to_musd(cff), _to_musd(fcf)])
 
-        rows.append([y, end_str, _to_musd(cfo), _to_musd(cfi), _to_musd(cff), _to_musd(fcf)])
-
-    out = pd.DataFrame(rows, columns=["FY", "End", "CFO(M$)", "CFI(M$)", "CFF(M$)", "FCF(M$)"])
+    out = pd.DataFrame(rows, columns=["FY", "CFO(M$)", "CFI(M$)", "CFF(M$)", "FCF(M$)"])
     meta["years"] = years
     return out, meta
 
@@ -515,7 +584,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 def plot_cf_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
-
     cfo = df["CFO(M$)"].astype(float).to_numpy()
     cfi = df["CFI(M$)"].astype(float).to_numpy()
     cff = df["CFF(M$)"].astype(float).to_numpy()
@@ -525,48 +593,36 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(x, cfo, label="CFO (Operating CF)", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cfi, label="CFI (Investing CF)", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cff, label="CFF (Financing CF)", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, fcf, label="FCF (CFO + CapEx)", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cfo, label="CFO", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, fcf, label="FCF", linewidth=2.5, marker="o", markersize=6)
 
     ax.set_ylabel("Million USD", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
     ax.set_title(title, color="white")
     ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
-    ax.tick_params(axis="x", rotation=0, colors="white")
     st.pyplot(fig)
 
 
 # =========================
-# RPO / Contract liabilities (annual)
+# RPO tab
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
+    rpo_candidates = ["RemainingPerformanceObligation", "TransactionPriceAllocatedToRemainingPerformanceObligations", "RemainingPerformanceObligationRevenue"]
+    contract_liab_candidates = ["ContractWithCustomerLiability", "DeferredRevenue"]
+    contract_liab_current_candidates = ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent"]
 
-    rpo_candidates = [
-        "RemainingPerformanceObligation",
-        "TransactionPriceAllocatedToRemainingPerformanceObligations",
-        "RemainingPerformanceObligationRevenue",
-    ]
-    contract_liab_candidates = [
-        "ContractWithCustomerLiability",
-        "DeferredRevenue",
-    ]
-    contract_liab_current_candidates = [
-        "ContractWithCustomerLiabilityCurrent",
-        "DeferredRevenueCurrent",
-    ]
-
-    tag, df_rpo = _pick_best_tag_latest_first(facts_json, rpo_candidates)
+    tag, df_rpo = _pick_best_tag_latest_first_usd(facts_json, rpo_candidates)
     meta["rpo_tag"] = tag
-    tag, df_cl = _pick_best_tag_latest_first(facts_json, contract_liab_candidates)
+    tag, df_cl = _pick_best_tag_latest_first_usd(facts_json, contract_liab_candidates)
     meta["contract_liab_tag"] = tag
-    tag, df_cl_cur = _pick_best_tag_latest_first(facts_json, contract_liab_current_candidates)
+    tag, df_clc = _pick_best_tag_latest_first_usd(facts_json, contract_liab_current_candidates)
     meta["contract_liab_current_tag"] = tag
 
-    years = sorted(set(df_rpo["year"].tolist()) | set(df_cl["year"].tolist()) | set(df_cl_cur["year"].tolist()))
+    years = sorted(set(df_rpo["year"].tolist()) | set(df_cl["year"].tolist()) | set(df_clc["year"].tolist()))
     years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
@@ -581,10 +637,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     rows = []
     for y in years:
-        rpo = val_at(df_rpo, y)
-        cl = val_at(df_cl, y)
-        clc = val_at(df_cl_cur, y)
-        rows.append([y, _to_musd(rpo), _to_musd(cl), _to_musd(clc)])
+        rows.append([y, _to_musd(val_at(df_rpo, y)), _to_musd(val_at(df_cl, y)), _to_musd(val_at(df_clc, y))])
 
     out = pd.DataFrame(rows, columns=["FY", "RPO(M$)", "ContractLiab(M$)", "ContractLiabCurrent(M$)"])
     meta["years"] = years
@@ -594,7 +647,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 def plot_rpo_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
-
     rpo = df["RPO(M$)"].astype(float).to_numpy()
     cl = df["ContractLiab(M$)"].astype(float).to_numpy()
     clc = df["ContractLiabCurrent(M$)"].astype(float).to_numpy()
@@ -615,56 +667,40 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     ax.grid(color="#333333", alpha=0.6)
     ax.set_title(title, color="white")
     ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
-    ax.tick_params(axis="x", rotation=0, colors="white")
     st.pyplot(fig)
 
 
 # =========================
-# Ratios tab: ROA / ROE / Inventory Turnover
+# Ratios: ROA/ROE + Inventory Turnover
 # =========================
-def _annual_series_map(facts_json: dict, tag_candidates: list[str]) -> tuple[str | None, dict]:
-    tag, df = _pick_best_tag_latest_first(facts_json, tag_candidates)
+def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str]) -> tuple[str | None, dict]:
+    tag, df = _pick_best_tag_latest_first_usd(facts_json, tag_candidates)
     m = dict(zip(df["year"].astype(int), df["val"].astype(float))) if not df.empty else {}
     return tag, m
 
 
 def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    """
-    ROA = NetIncome / avg(Assets)
-    ROE = NetIncome / avg(Equity)
-    Inventory Turnover = COGS / avg(Inventory)
-    """
     meta = {}
 
-    # Net income（PLと同じ合成方針）
-    ni_priority = [
-        "NetIncomeLoss",
-        "ProfitLoss",
-        "NetIncomeLossAvailableToCommonStockholdersBasic",
-        "IncomeLossFromContinuingOperations",
-    ]
-    ni_df, ni_meta = _build_composite_by_year(facts_json, ni_priority)
+    ni_priority = ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "IncomeLossFromContinuingOperations"]
+    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority)
     meta["net_income_composite"] = ni_meta
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
 
-    # Assets total
-    assets_tag, assets_map = _annual_series_map(facts_json, ["Assets"])
+    assets_tag, assets_map = _annual_series_map_usd(facts_json, ["Assets"])
     meta["assets_tag"] = assets_tag
 
-    # Equity total
-    eq_tag, eq_map = _annual_series_map(
+    eq_tag, eq_map = _annual_series_map_usd(
         facts_json,
         ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
     )
     meta["equity_tag"] = eq_tag
 
-    # Inventory
-    inv_tag, inv_map = _annual_series_map(facts_json, ["InventoryNet"])
+    inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet"])
     meta["inventory_tag"] = inv_tag
 
-    # COGS (industry dependent)
     cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold"]
-    cogs_tag, cogs_map = _annual_series_map(facts_json, cogs_candidates)
+    cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates)
     meta["cogs_tag"] = cogs_tag
 
     years = sorted(set(ni_map.keys()) | set(assets_map.keys()) | set(eq_map.keys()) | set(inv_map.keys()) | set(cogs_map.keys()))
@@ -737,31 +773,102 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
 
 
 # =========================
-# EPS tab
+# EPS (unit-aware) — FIXED
 # =========================
-def build_eps_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
-    EPS（基本）を年次推移で。
-    企業差があるので候補タグを複数。
+    EPSは units が USD ではなく USD/shares などになりがち。
+    units を総当たりして「10-K 年次」を拾い、最適 unit を選ぶ。
     """
-    meta = {}
-    eps_priority = [
-        "EarningsPerShareBasic",
-        "EarningsPerShareBasicAndDiluted",
-        "EarningsPerShareDiluted",
-    ]
-    eps_df, eps_meta = _build_composite_by_year(facts_json, eps_priority)
-    meta["eps_composite"] = eps_meta
+    us = facts_json.get("facts", {}).get("us-gaap", {})
+    tag_obj = us.get(xbrl_tag, {})
+    units = tag_obj.get("units", {})
+    if not units:
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit"])
 
-    if eps_df.empty:
+    rows = []
+    for unit_key, node in units.items():
+        for x in node:
+            form = str(x.get("form", "")).upper().strip()
+            fp = str(x.get("fp", "")).upper().strip()
+            end = x.get("end")
+            val = x.get("val")
+            fy_raw = x.get("fy", None)
+            if not end or val is None:
+                continue
+            if not form.startswith("10-K"):
+                continue
+            end_ts = pd.to_datetime(end, errors="coerce")
+            if pd.isna(end_ts):
+                continue
+            annual_fp = fp in {"FY", "CY", "Q4"}
+            if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+                year_key = int(fy_raw)
+            else:
+                year_key = int(end_ts.year)
+            rows.append({"year": year_key, "end": end_ts, "val": _safe_float(val), "annual_fp": int(annual_fp), "unit": unit_key})
+
+    if not rows:
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit"])
+
+    df = pd.DataFrame(rows).dropna(subset=["val"])
+
+    def unit_score(u: str) -> int:
+        u2 = u.lower().replace(" ", "")
+        # よくある EPS 単位
+        if "usd/shares" in u2 or "usd/share" in u2 or "usd/shr" in u2 or "usdper" in u2:
+            return 3
+        if "usd" in u2:
+            return 1
+        return 0
+
+    unit_counts = df.groupby("unit")["year"].count().to_dict()
+    unit_max_year = df.groupby("unit")["year"].max().to_dict()
+
+    units_sorted = sorted(
+        unit_counts.keys(),
+        key=lambda u: (unit_score(u), unit_max_year.get(u, -1), unit_counts.get(u, 0)),
+        reverse=True,
+    )
+    best_unit = units_sorted[0]
+    df_best = df[df["unit"] == best_unit].copy()
+    df_best = df_best.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
+    df_best = df_best.sort_values("year")
+    df_best["unit_best"] = best_unit
+    return df_best[["year", "end", "val", "unit_best"]]
+
+
+def build_eps_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+    meta = {}
+    eps_tags = ["EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted", "EarningsPerShareDiluted"]
+
+    best_df = pd.DataFrame()
+    best_tag = None
+
+    for tag in eps_tags:
+        df = _extract_eps_series_any_unit(facts_json, tag)
+        if df.empty:
+            continue
+        if best_df.empty:
+            best_df = df
+            best_tag = tag
+        else:
+            if int(df["year"].max()) > int(best_df["year"].max()) or (int(df["year"].max()) == int(best_df["year"].max()) and len(df) > len(best_df)):
+                best_df = df
+                best_tag = tag
+
+    meta["eps_tag"] = best_tag
+    if best_df.empty:
+        meta["eps_composite"] = {"available_tags": []}
         return pd.DataFrame(), meta
 
-    out = pd.DataFrame({"FY": eps_df["year"].astype(int), "EPS": eps_df["value"].astype(float)})
-    meta["years"] = out["FY"].astype(int).tolist()
+    meta["eps_unit"] = best_df["unit_best"].iloc[-1]
+    out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val"].astype(float)})
+    meta["years"] = out["FY"].tolist()
     return out, meta
 
 
-def plot_eps(table: pd.DataFrame, title: str):
+def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     eps = df["EPS"].astype(float).to_numpy()
@@ -771,7 +878,7 @@ def plot_eps(table: pd.DataFrame, title: str):
     ax.set_facecolor("#0b0c0e")
 
     ax.plot(x, eps, label="EPS", linewidth=2.5, marker="o", markersize=6)
-    ax.set_ylabel("USD", color="white")
+    ax.set_ylabel(unit_label, color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
     ax.set_title(title, color="white")
@@ -799,7 +906,7 @@ def render(authed_email: str):
 
     with st.form("input_form"):
         ticker = st.text_input("Ticker（米国株）", value="AVGO")
-        n_years = st.slider("期間（PL/CF/RPO/回転率/EPS 共通：最新から過去N年）", min_value=3, max_value=15, value=10)
+        n_years = st.slider("期間（共通：最新から過去N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -838,18 +945,12 @@ def render(authed_email: str):
         st.markdown("### 年次PL（百万USD）")
         st.dataframe(
             pl_disp.style.format(
-                {
-                    "Revenue(M$)": "{:,.0f}",
-                    "OpIncome(M$)": "{:,.0f}",
-                    "Pretax(M$)": "{:,.0f}",
-                    "NetIncome(M$)": "{:,.0f}",
-                }
+                {"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "Pretax(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}
             ),
             use_container_width=True,
             hide_index=True,
         )
 
-        # （１）営業利益率 推移
         st.markdown("### 営業利益率の推移（%）")
         plot_operating_margin(pl_disp, f"{company_name} ({ticker.upper()}) - Operating Margin (%)")
 
@@ -865,15 +966,15 @@ def render(authed_email: str):
 
         snap, bs_meta = build_bs_latest_simple(facts, year)
         st.caption(f"BS: 最新年 {year}")
+
         plot_bs_bar(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
 
-        st.markdown("### BS（最新年 / 百万USD）")
-        snap_disp = snap.copy()
-        snap_disp["Value"] = snap_disp["Value"].map(lambda v: f"{v:,.0f}" if isinstance(v, (int, float)) and np.isfinite(v) else str(v))
-        st.dataframe(snap_disp, use_container_width=True, hide_index=True)
+        # ★ 円グラフ A/B
+        assets_pie, le_pie, pie_meta = build_bs_pies_latest(facts, year)
+        plot_two_pies(assets_pie, le_pie, year)
 
-        with st.expander("BSデバッグ", expanded=False):
-            st.write(bs_meta)
+        with st.expander("BSデバッグ（タグ採用状況）", expanded=False):
+            st.write({"bs": bs_meta, "pies": pie_meta})
 
     # ---- CF ----
     with tab_cf:
@@ -885,18 +986,12 @@ def render(authed_email: str):
 
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
         st.caption(f"CF: 表示 {len(cf_disp)} 年（最新年: {int(cf_table['FY'].max())}）")
+
         plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
 
         st.markdown("### 年次CF（百万USD）")
         st.dataframe(
-            cf_disp.style.format(
-                {
-                    "CFO(M$)": "{:,.0f}",
-                    "CFI(M$)": "{:,.0f}",
-                    "CFF(M$)": "{:,.0f}",
-                    "FCF(M$)": "{:,.0f}",
-                }
-            ),
+            cf_disp.style.format({"CFO(M$)": "{:,.0f}", "CFI(M$)": "{:,.0f}", "CFF(M$)": "{:,.0f}", "FCF(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
@@ -913,22 +1008,12 @@ def render(authed_email: str):
             st.write(rpo_meta)
             st.stop()
 
-        latest = int(rpo_table["FY"].max())
-        miny = latest - int(n_years) + 1
-        rpo_disp = rpo_table[rpo_table["FY"] >= miny].sort_values("FY").reset_index(drop=True)
-
-        st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {latest}）")
+        rpo_disp = _slice_latest_n_years(rpo_table, int(n_years))
+        st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {int(rpo_table['FY'].max())}）")
         plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
 
-        st.markdown("### 受注残 / RPO（百万USD）")
         st.dataframe(
-            rpo_disp.style.format(
-                {
-                    "RPO(M$)": "{:,.0f}",
-                    "ContractLiab(M$)": "{:,.0f}",
-                    "ContractLiabCurrent(M$)": "{:,.0f}",
-                }
-            ),
+            rpo_disp.style.format({"RPO(M$)": "{:,.0f}", "ContractLiab(M$)": "{:,.0f}", "ContractLiabCurrent(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
@@ -936,7 +1021,7 @@ def render(authed_email: str):
         with st.expander("RPOデバッグ（採用タグ）", expanded=False):
             st.write(rpo_meta)
 
-    # ---- Turnover / ROA ROE ----
+    # ---- Turnover / ROA / ROE / Inventory turnover ----
     with tab_turn:
         rat_table, rat_meta = build_ratios_table(facts)
         if rat_table.empty:
@@ -944,8 +1029,7 @@ def render(authed_email: str):
             st.write(rat_meta)
             st.stop()
 
-        rat_disp = _slice_latest_n_years(rat_table.rename(columns={"FY": "FY"}), int(n_years))
-        # _slice_latest_n_yearsはFY列を使うのでそのままでOK
+        rat_disp = _slice_latest_n_years(rat_table, int(n_years))
         st.caption(f"回転率: 表示 {len(rat_disp)} 年（最新年: {int(rat_table['FY'].max())}）")
 
         st.markdown("### ROA / ROE（%）推移")
@@ -954,24 +1038,14 @@ def render(authed_email: str):
         st.markdown("### 棚卸資産回転率（回）推移")
         plot_inventory_turnover(rat_disp, f"{company_name} ({ticker.upper()}) - Inventory Turnover (x)")
 
-        st.markdown("### 指標一覧")
         st.dataframe(
-            rat_disp.style.format(
-                {
-                    "ROA(%)": "{:.2f}",
-                    "ROE(%)": "{:.2f}",
-                    "InventoryTurnover(x)": "{:.2f}",
-                }
-            ),
+            rat_disp.style.format({"ROA(%)": "{:.2f}", "ROE(%)": "{:.2f}", "InventoryTurnover(x)": "{:.2f}"}),
             use_container_width=True,
             hide_index=True,
         )
 
         with st.expander("回転率デバッグ（採用タグ）", expanded=False):
             st.write(rat_meta)
-            st.markdown("- **ROA** = NetIncome / avg(Assets)")
-            st.markdown("- **ROE** = NetIncome / avg(Equity)")
-            st.markdown("- **棚卸資産回転率** = COGS / avg(Inventory)（COGSはCostOfRevenue優先）")
 
     # ---- EPS ----
     with tab_eps:
@@ -981,19 +1055,15 @@ def render(authed_email: str):
             st.write(eps_meta)
             st.stop()
 
-        eps_disp = _slice_latest_n_years(eps_table.rename(columns={"FY": "FY"}), int(n_years))
-        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}）")
+        eps_disp = _slice_latest_n_years(eps_table, int(n_years))
+        unit_label = eps_meta.get("eps_unit", "USD/share")
+        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}")
 
-        plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS")
+        plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS", unit_label="USD/share")
 
-        st.markdown("### EPS（USD）")
-        st.dataframe(
-            eps_disp.style.format({"EPS": "{:.2f}"}),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
 
-        with st.expander("EPSデバッグ（採用タグ）", expanded=False):
+        with st.expander("EPSデバッグ", expanded=False):
             st.write(eps_meta)
 
 
@@ -1004,3 +1074,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
