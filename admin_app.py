@@ -191,6 +191,67 @@ def render_bubble_flow(r2: float, m: float, omega: float):
 
 
 # -------------------------------------------------------
+# (FIX) admin_interpretation_text  ※NameError対策：必ず定義
+# -------------------------------------------------------
+def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, list[str]]:
+    """
+    管理者向け：投資判断に使うための簡易解釈
+    返り値: (要約, 箇条書き)
+    """
+    pdict = bubble_res.get("param_dict", {})
+    r2 = float(bubble_res.get("r2", float("nan")))
+    rmse = float(bubble_res.get("rmse", float("nan")))
+    m = float(pdict.get("m", float("nan")))
+    omega = float(pdict.get("omega", float("nan")))
+    c_over_b = float(pdict.get("abs_C_over_B", float("nan")))
+
+    tc_date = pd.Timestamp(bubble_res.get("tc_date")).normalize()
+    end_norm = pd.Timestamp(end_date).normalize()
+    days_to_tc = int((tc_date - end_norm).days)
+
+    bullets: list[str] = []
+
+    # 終盤度（tc）
+    if days_to_tc < 0:
+        bullets.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
+        bullets.append("新規の追随買いは控えめに。保有なら部分利確・ヘッジを検討。")
+    elif days_to_tc <= 30:
+        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンが近い）。")
+        bullets.append("新規ロングは慎重（サイズ縮小・分割）。利確/ヘッジ準備。")
+    else:
+        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンは監視段階）。")
+
+    # バブル判定（R²→m→ω）
+    verdict, _ = bubble_judgement(r2, m, omega)
+    bullets.append(f"バブル判定（R²→m→ω）：{verdict}")
+
+    # 補助（信頼度/注意喚起）
+    if np.isfinite(r2) and r2 < 0.65:
+        bullets.append(f"R²={r2:.2f}：形状が弱め→判定保留寄り。")
+    if np.isfinite(m) and m >= 0.85:
+        bullets.append(f"m={m:.2f}：上限寄り→境界解の疑い（tc一点は信じすぎない）。")
+    if np.isfinite(omega) and omega >= 18:
+        bullets.append(f"ω={omega:.2f}：短周期すぎ→ノイズ追随の疑い（バブル“風”注意）。")
+
+    if np.isfinite(rmse):
+        bullets.append(f"RMSE(log)={rmse:.3f}：フィット安定度の目安（小さいほど安定）。")
+    if np.isfinite(c_over_b) and c_over_b >= 2.0:
+        bullets.append(f"|C/B|={c_over_b:.2f}：振動項が強すぎ→“それっぽいフィット”の疑い。")
+
+    # 要約（短く）
+    if verdict == "バブル的な上昇":
+        summary = "バブル的上昇（m帯域＋R²十分＋ω典型）。追随買いは抑え、利確/ヘッジを織り込む局面。"
+    elif verdict.startswith("バブル“風”"):
+        summary = "バブル“風”（形はそれっぽいが注意要素あり）。追随買いは慎重、リスク管理を前倒し。"
+    elif verdict == "通常の上昇寄り":
+        summary = "典型バブルとは言いにくい（mが帯域外）。ただしtcが近いなら姿勢調整は有効。"
+    else:
+        summary = "LPPL形状が弱く判定保留。期間変更・他指標との併用推奨。"
+
+    return summary, bullets
+
+
+# -------------------------------------------------------
 # LPPL-like model
 # -------------------------------------------------------
 def lppl(t, A, B, C, m, tc, omega, phi):
@@ -801,7 +862,7 @@ def main():
     # =======================================================
     # Fit quality flags（簡易サニティチェック）
     # =======================================================
-    st.markdown("#### フィット品質フラグ（簡易チェック）")
+    st.markdown("#### フィット品質フラグ（簡易サニティチェック）")
     binfo = bubble_res.get("bounds_info", {})
     if raw_params.size == 7:
         A_, B_, C_, m_, tc_, omega_, phi_ = [float(x) for x in raw_params]
@@ -832,7 +893,7 @@ def main():
         st.write("単純なヒューリスティックでは明確な赤信号は見当たりません。")
 
     # =======================================================
-    # （既存）投資判断メモ（そのまま残す）
+    # 投資判断メモ（管理者のみ）
     # =======================================================
     st.markdown("### 投資判断向けの解釈（管理者のみ）")
     summary, bullets = admin_interpretation_text(bubble_res, end_date)
@@ -853,4 +914,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
