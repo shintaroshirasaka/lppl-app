@@ -8,15 +8,8 @@ import streamlit as st
 
 from auth_gate import require_admin_token
 
-# =========================
-# SEC settings
-# =========================
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
-SEC_HEADERS = {
-    "User-Agent": SEC_USER_AGENT,
-    "Accept-Encoding": "gzip, deflate",
-    "Host": "data.sec.gov",
-}
+SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -38,7 +31,6 @@ def fetch_ticker_cik_map() -> dict:
     r = requests.get(TICKER_CIK_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=30)
     r.raise_for_status()
     data = r.json()
-
     out = {}
     for _, v in data.items():
         t = str(v.get("ticker", "")).strip().lower()
@@ -59,9 +51,9 @@ def fetch_company_facts(cik10: str) -> dict:
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
     年次相当（USD）を抽出：
-    - form: 10-K系（10-K, 10-K/A, 10-K405など）を許可
-    - fp: FY/CY/Q4 を優先（ただし完全依存しない）
-    - year は fy があれば fy を優先、無ければ end.year
+    - form: 10-K系（10-K, 10-K/A, 10-K405など）
+    - year: fy があれば fy、無ければ end.year
+    - 同一年重複は annual_fp優先→end新しい方
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
@@ -106,8 +98,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
-
-    # 同一年が複数候補：annual_fp優先→endが新しいもの
     df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
     df = df.sort_values("year")
     return df
@@ -115,10 +105,10 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
 
 def _pick_best_tag_latest_first(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
-    タグ選択ルール（長期投資向け）：
-      1) 最新年 max(year) が最大のタグを優先
-      2) 年数 len(df) が多いタグを優先
-      3) 最新 end が新しいタグを優先
+    タグ選択：
+      1) 最新年 max(year) が最大
+      2) 年数が多い
+      3) 最新endが新しい
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
@@ -135,27 +125,71 @@ def _pick_best_tag_latest_first(facts_json: dict, candidates: list[str]) -> tupl
         n = int(len(df))
         last_end = df["end"].max()
 
-        better = False
-        if max_year > best_max_year:
-            better = True
-        elif max_year == best_max_year:
-            if n > best_n:
-                better = True
-            elif n == best_n and last_end > best_last_end:
-                better = True
-
-        if better:
-            best_tag = tag
-            best_df = df
-            best_max_year = max_year
-            best_n = n
-            best_last_end = last_end
+        if (max_year > best_max_year) or (max_year == best_max_year and (n > best_n or (n == best_n and last_end > best_last_end))):
+            best_tag, best_df = tag, df
+            best_max_year, best_n, best_last_end = max_year, n, last_end
 
     return best_tag, best_df
 
 
+def _build_revenue_composite(facts_json: dict, revenue_tags: list[str]) -> tuple[pd.DataFrame, dict]:
+    """
+    Revenueを“年ごとに最良タグで埋める”合成系列を作る。
+    - 各タグから年次系列を抽出
+    - yearをindexにして、優先順で埋める（後勝ち/前勝ちを制御）
+    ここでは「最新側のタグを優先」したいので、優先順は
+      1) RevenueFromContractWithCustomerExcludingAssessedTax（近年）
+      2) Revenues
+      3) SalesRevenueNet（古い）
+    """
+    # まず各タグの年次系列を取り、辞書に保存
+    tag_series = {}
+    tag_years = {}
+    for tag in revenue_tags:
+        df = _extract_annual_series_usd(facts_json, tag)
+        if df.empty:
+            continue
+        s = df.set_index("year")["val"].sort_index()
+        tag_series[tag] = s
+        tag_years[tag] = s.index.tolist()
+
+    if not tag_series:
+        return pd.DataFrame(), {"revenue_available_tags": []}
+
+    # すべてのyearの集合を作る（union）
+    all_years = sorted(set().union(*[s.index for s in tag_series.values()]))
+
+    # 合成：優先順に「値があれば採用」
+    composite = pd.Series(index=all_years, dtype="float64")
+    chosen_tag = pd.Series(index=all_years, dtype="object")
+
+    for y in all_years:
+        val = np.nan
+        used = None
+        for tag in revenue_tags:  # 優先順
+            s = tag_series.get(tag)
+            if s is None:
+                continue
+            if y in s.index and np.isfinite(s.loc[y]):
+                val = float(s.loc[y])
+                used = tag
+                break
+        composite.loc[y] = val
+        chosen_tag.loc[y] = used
+
+    meta = {
+        "revenue_available_tags": list(tag_series.keys()),
+        "revenue_years_by_tag": tag_years,
+        "revenue_chosen_tag_by_year": chosen_tag.dropna().to_dict(),
+    }
+
+    out = pd.DataFrame({"year": composite.index.astype(int), "revenue": composite.values})
+    return out, meta
+
+
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    revenue_tags = [
+    # Revenueは合成（これが今回の肝）
+    revenue_priority = [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
@@ -170,9 +204,11 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     meta = {}
 
-    tag, df_rev = _pick_best_tag_latest_first(facts_json, revenue_tags)
-    meta["revenue_tag"] = tag
+    # Revenue合成
+    df_rev_comp, rev_meta = _build_revenue_composite(facts_json, revenue_priority)
+    meta["revenue_composite"] = rev_meta
 
+    # 利益系は“最新優先”で単一タグ選択
     tag, df_op = _pick_best_tag_latest_first(facts_json, op_income_tags)
     meta["op_income_tag"] = tag
 
@@ -182,35 +218,44 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     tag, df_ni = _pick_best_tag_latest_first(facts_json, net_income_tags)
     meta["net_income_tag"] = tag
 
-    if df_rev.empty:
+    if df_rev_comp.empty:
         return pd.DataFrame(), meta
 
-    df = df_rev[["year", "end", "val", "fp", "form", "fy_raw"]].rename(
-        columns={"val": "revenue", "fp": "fp_rev", "form": "form_rev", "fy_raw": "fy_rev"}
-    )
+    # Revenue合成を軸にする（yearで結合）
+    df = df_rev_comp.copy()
 
-    for name, d, fp_col, form_col, fy_col in [
-        ("op_income", df_op, "fp_op", "form_op", "fy_op"),
-        ("pretax", df_pt, "fp_pt", "form_pt", "fy_pt"),
-        ("net_income", df_ni, "fp_ni", "form_ni", "fy_ni"),
-    ]:
-        if d.empty:
-            df[name] = np.nan
-            df[fp_col] = None
-            df[form_col] = None
-            df[fy_col] = None
-        else:
-            tmp = d[["year", "val", "fp", "form", "fy_raw"]].rename(
-                columns={"val": name, "fp": fp_col, "form": form_col, "fy_raw": fy_col}
-            )
-            df = df.merge(tmp, on="year", how="left")
+    # 期末日 end は op_income 側から持つ（なければ空でもOK）
+    if not df_op.empty:
+        df = df.merge(df_op[["year", "end", "fp", "form", "fy_raw"]].rename(
+            columns={"fp":"fp_op","form":"form_op","fy_raw":"fy_op"}
+        ), on="year", how="left")
+        df = df.merge(df_op[["year", "val"]].rename(columns={"val":"op_income"}), on="year", how="left")
+    else:
+        df["op_income"] = np.nan
+
+    if not df_pt.empty:
+        df = df.merge(df_pt[["year", "val"]].rename(columns={"val":"pretax"}), on="year", how="left")
+    else:
+        df["pretax"] = np.nan
+
+    if not df_ni.empty:
+        df = df.merge(df_ni[["year", "val"]].rename(columns={"val":"net_income"}), on="year", how="left")
+    else:
+        df["net_income"] = np.nan
 
     df = df.sort_values("year")
+
+    # endが無い年は年末ダミーに（表示崩れ防止）
+    if "end" not in df.columns:
+        df["end"] = pd.NaT
+    df["end"] = pd.to_datetime(df["end"], errors="coerce")
+    df["end_str"] = df["end"].dt.date.astype(str)
+    df.loc[df["end"].isna(), "end_str"] = df["year"].astype(str) + "-12-31"
 
     out = pd.DataFrame(
         {
             "FY": df["year"].astype(int),
-            "End": df["end"].dt.date.astype(str),
+            "End": df["end_str"],
             "Revenue(M$)": df["revenue"].map(_to_musd),
             "OpIncome(M$)": df["op_income"].map(_to_musd),
             "Pretax(M$)": df["pretax"].map(_to_musd),
@@ -218,33 +263,11 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         }
     )
 
-    meta["years"] = df["year"].astype(int).tolist()
-    meta["fp_sample"] = {
-        "revenue": df["fp_rev"].dropna().unique().tolist(),
-        "op_income": df["fp_op"].dropna().unique().tolist(),
-        "pretax": df["fp_pt"].dropna().unique().tolist(),
-        "net_income": df["fp_ni"].dropna().unique().tolist(),
-    }
-    meta["form_sample"] = {
-        "revenue": df["form_rev"].dropna().unique().tolist(),
-        "op_income": df["form_op"].dropna().unique().tolist(),
-        "pretax": df["form_pt"].dropna().unique().tolist(),
-        "net_income": df["form_ni"].dropna().unique().tolist(),
-    }
-    meta["fy_raw_sample"] = {
-        "revenue": df["fy_rev"].dropna().astype(str).unique().tolist(),
-        "op_income": df["fy_op"].dropna().astype(str).unique().tolist(),
-        "pretax": df["fy_pt"].dropna().astype(str).unique().tolist(),
-        "net_income": df["fy_ni"].dropna().astype(str).unique().tolist(),
-    }
-
+    meta["years"] = out["FY"].astype(int).tolist()
     return out, meta
 
 
 def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
-    """
-    最新年度を基準に「最新から過去N年」を切り出す
-    """
     latest_year = int(table["FY"].max())
     min_year = latest_year - int(n_years) + 1
     return table[table["FY"] >= min_year].sort_values("FY").reset_index(drop=True)
@@ -295,7 +318,7 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 最新から過去N年表示版）")
+    st.markdown("## 長期ファンダ（年次PL / Revenue合成で最新からN年）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
@@ -311,8 +334,7 @@ def render(authed_email: str):
         st.error("Tickerを入力してください。")
         st.stop()
 
-    m = fetch_ticker_cik_map()
-    cik10 = m.get(t)
+    cik10 = fetch_ticker_cik_map().get(t)
     if not cik10:
         st.error("このTickerのCIKが見つかりませんでした。")
         st.stop()
@@ -328,7 +350,6 @@ def render(authed_email: str):
 
     st.caption(f"取得できた年次データ: {len(table)} 年分（最新年: {int(table['FY'].max())}）")
 
-    # ★最新年度を基準にN年分を切り出す
     table_disp = _slice_latest_n_years(table, int(years))
 
     plot_pl_annual(table_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
@@ -347,7 +368,7 @@ def render(authed_email: str):
         hide_index=True,
     )
 
-    with st.expander("デバッグ情報（採用したXBRLタグ）", expanded=False):
+    with st.expander("デバッグ情報（タグ合成の内訳など）", expanded=False):
         st.write(meta)
         st.write(f"CIK: {cik10}")
         st.write(f"SEC_USER_AGENT: {SEC_USER_AGENT}")
