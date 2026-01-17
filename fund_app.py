@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
+import yfinance as yf  # 追加: 株式分割情報の取得用
 
 from auth_gate import require_admin_token
 
@@ -297,7 +298,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest) + pies (復活)
+# BS (latest) + pies
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -750,18 +751,52 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
 
 
 # =========================
-# EPS (unit-aware) — FIXED
+# EPS (unit-aware) + STOCK SPLIT ADJUSTMENT
 # =========================
+def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> pd.Series:
+    """
+    yfinanceから株式分割情報を取得し、各日付時点のデータにかけるべき補正係数を計算する。
+    例: 1/10分割(10株に増える)の場合、ratio=10.0、それ以前のEPSは 1/10 にする。
+    """
+    if not ticker:
+        return pd.Series(1.0, index=date_index)
+
+    try:
+        t = yf.Ticker(ticker)
+        splits = t.splits  # Series (Date -> Split Ratio)
+        
+        factors = pd.Series(1.0, index=date_index)
+        
+        if splits.empty:
+            return factors
+
+        # yfinanceのsplit ratioは「1株が何株になったか」
+        # 例: 1:10分割なら ratio=10.0。
+        # 古いEPS（株数が少なかった頃）は値が大きいので、 (1 / ratio) を掛けて小さくする。
+        for split_date, ratio in splits.items():
+            split_date = pd.to_datetime(split_date).tz_localize(None)
+            # この日付より「前」のデータに係数を適用
+            mask = factors.index.tz_localize(None) < split_date
+            
+            if ratio > 0:
+                factors.loc[mask] *= (1.0 / ratio)
+                
+        return factors
+
+    except Exception as e:
+        print(f"Split fetch error: {e}")
+        return pd.Series(1.0, index=date_index)
+
+
 def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
-    EPSは units が USD ではなく USD/shares などになりがち。
-    units を総当たりして「10-K 年次」を拾い、最適 unit を選ぶ。
+    EPS抽出（filed日付を考慮して最新データを優先）
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     tag_obj = us.get(xbrl_tag, {})
     units = tag_obj.get("units", {})
     if not units:
-        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit"])
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit", "filed"])
 
     rows = []
     for unit_key, node in units.items():
@@ -771,22 +806,37 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
             end = x.get("end")
             val = x.get("val")
             fy_raw = x.get("fy", None)
-            if not end or val is None:
+            filed = x.get("filed") # 追加
+
+            if not end or val is None or not filed:
                 continue
             if not form.startswith("10-K"):
                 continue
+
             end_ts = pd.to_datetime(end, errors="coerce")
-            if pd.isna(end_ts):
+            filed_ts = pd.to_datetime(filed, errors="coerce") # 追加
+
+            if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
+
             annual_fp = fp in {"FY", "CY", "Q4"}
+
             if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
                 year_key = int(fy_raw)
             else:
                 year_key = int(end_ts.year)
-            rows.append({"year": year_key, "end": end_ts, "val": _safe_float(val), "annual_fp": int(annual_fp), "unit": unit_key})
+
+            rows.append({
+                "year": year_key,
+                "end": end_ts,
+                "val": _safe_float(val),
+                "annual_fp": int(annual_fp),
+                "unit": unit_key,
+                "filed": filed_ts
+            })
 
     if not rows:
-        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit"])
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit", "filed"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
 
@@ -808,13 +858,14 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
     )
     best_unit = units_sorted[0]
     df_best = df[df["unit"] == best_unit].copy()
-    df_best = df_best.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
-    df_best = df_best.sort_values("year")
+    
+    # 年(year) -> 提出日(filed) の順に昇順ソートし、最新のfiledを残す
+    df_best = df_best.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
     df_best["unit_best"] = best_unit
     return df_best[["year", "end", "val", "unit_best"]]
 
 
-def build_eps_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataFrame, dict]:
     meta = {}
     eps_tags = ["EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted", "EarningsPerShareDiluted"]
 
@@ -840,8 +891,18 @@ def build_eps_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         meta["eps_composite"] = {"available_tags": []}
         return pd.DataFrame(), meta
 
+    # 分割調整（Yahoo Finance連携）
+    if ticker_symbol:
+        best_df["end"] = pd.to_datetime(best_df["end"])
+        factors = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(best_df["end"]))
+        best_df["val_adjusted"] = best_df["val"] * factors.values
+        meta["split_adjusted"] = True
+    else:
+        best_df["val_adjusted"] = best_df["val"]
+        meta["split_adjusted"] = False
+
     meta["eps_unit"] = best_df["unit_best"].iloc[-1]
-    out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val"].astype(float)})
+    out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val_adjusted"].astype(float)})
     meta["years"] = out["FY"].tolist()
     return out, meta
 
@@ -855,7 +916,7 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(x, eps, label="EPS", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, eps, label="EPS (Adjusted)", linewidth=2.5, marker="o", markersize=6)
     ax.set_ylabel(unit_label, color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
@@ -996,14 +1057,17 @@ def render(authed_email: str):
             st.write(rat_meta)
 
     with tab_eps:
-        eps_table, eps_meta = build_eps_table(facts)
+        # 修正: tickerシンボルを渡す
+        eps_table, eps_meta = build_eps_table(facts, ticker_symbol=t)
         if eps_table.empty:
             st.error("EPSが取得できませんでした。")
             st.write(eps_meta)
             st.stop()
         eps_disp = _slice_latest_n_years(eps_table, int(n_years))
         unit_label = eps_meta.get("eps_unit", "USD/share")
-        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}")
+        # 調整済みであることを表示
+        split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
+        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}{split_note}")
         plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS", unit_label="USD/share")
         st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
         with st.expander("EPSデバッグ", expanded=False):
