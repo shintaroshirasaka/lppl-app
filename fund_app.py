@@ -8,9 +8,6 @@ import streamlit as st
 
 from auth_gate import require_admin_token
 
-# =========================
-# SEC settings
-# =========================
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -298,116 +295,250 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (Balance Sheet) - Latest year only
+# BS (Balance Sheet) - Latest year only, with breakdown
 # =========================
-def build_bs_latest_snapshot(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+def _value_at_year(facts_json: dict, candidates: list[str], year: int) -> tuple[str | None, float]:
     """
-    BSは最新年の1年だけを返す（Assets / Liabilities / Equity / Cash）
+    candidatesの中から、指定yearで値が取れる最初のタグを返す（値も返す）
     """
-    assets_tags = ["Assets"]
-    liabilities_tags = ["Liabilities"]
-    equity_tags = ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]
-    cash_tags = ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]
+    for tag in candidates:
+        df = _extract_annual_series_usd(facts_json, tag)
+        if df.empty:
+            continue
+        r = df[df["year"] == year]
+        if r.empty:
+            continue
+        v = float(r["val"].iloc[-1])
+        if np.isfinite(v):
+            return tag, v
+    return None, np.nan
 
-    meta = {}
 
-    tag, df_assets = _pick_best_tag_latest_first(facts_json, assets_tags)
-    meta["assets_tag"] = tag
+def build_bs_latest_breakdown(facts_json: dict, threshold_ratio: float = 0.10) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """
+    最新年BSを、内訳つきで返す。
+    - threshold_ratio: 総資産に対してこの比率以上の科目を個別表示、それ以外はOtherへ
+    戻り:
+      assets_breakdown_df: columns=["Group","Item","Value(M$)","ShareOfAssets"]
+      le_breakdown_df:     columns=["Group","Item","Value(M$)","ShareOfAssets"]
+      meta
+    """
+    meta = {"threshold_ratio": threshold_ratio}
 
-    tag, df_liab = _pick_best_tag_latest_first(facts_json, liabilities_tags)
-    meta["liabilities_tag"] = tag
-
-    tag, df_eq = _pick_best_tag_latest_first(facts_json, equity_tags)
-    meta["equity_tag"] = tag
-
-    tag, df_cash = _pick_best_tag_latest_first(facts_json, cash_tags)
-    meta["cash_tag"] = tag
-
+    # まず最新年を決める（Assetsの最新年）
+    assets_tag, df_assets = _pick_best_tag_latest_first(facts_json, ["Assets"])
+    meta["assets_tag"] = assets_tag
     if df_assets.empty:
-        return pd.DataFrame(), meta
+        return pd.DataFrame(), pd.DataFrame(), meta
 
-    # できれば 3要素（Assets/Liab/Equity）が揃う年を優先
-    years_assets = set(df_assets["year"].astype(int).tolist())
-    years_liab = set(df_liab["year"].astype(int).tolist()) if not df_liab.empty else set()
-    years_eq = set(df_eq["year"].astype(int).tolist()) if not df_eq.empty else set()
+    bs_year = int(df_assets["year"].max())
+    meta["bs_year"] = bs_year
 
-    common = years_assets & years_liab & years_eq
-    if common:
-        year = max(common)
-    else:
-        year = int(df_assets["year"].max())
+    total_assets = float(df_assets[df_assets["year"] == bs_year]["val"].iloc[-1])
+    if not np.isfinite(total_assets) or total_assets <= 0:
+        return pd.DataFrame(), pd.DataFrame(), meta
 
-    def pick_val(df: pd.DataFrame, year: int) -> float:
-        if df.empty:
-            return np.nan
-        r = df[df["year"] == year]
-        if r.empty:
-            return np.nan
-        return float(r["val"].iloc[-1])
+    # --- Assets components (候補タグは複数持つ) ---
+    asset_items = [
+        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue",
+                                "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]),
+        ("Receivables", ["AccountsReceivableNetCurrent",
+                         "AccountsReceivableNet",
+                         "ReceivablesNetCurrent"]),
+        ("Inventory", ["InventoryNet"]),
+        ("Other Current Assets", ["OtherAssetsCurrent"]),
+        ("PPE (Net)", ["PropertyPlantAndEquipmentNet"]),
+        ("Goodwill", ["Goodwill"]),
+        ("Intangibles", ["IntangibleAssetsNetExcludingGoodwill",
+                         "IntangibleAssetsNetIncludingGoodwill"]),
+        ("Other Noncurrent Assets", ["OtherAssetsNoncurrent",
+                                     "OtherAssets",
+                                     "NoncurrentAssets"]),
+    ]
 
-    def pick_end(df: pd.DataFrame, year: int):
-        if df.empty:
-            return pd.NaT
-        r = df[df["year"] == year]
-        if r.empty:
-            return pd.NaT
-        return pd.to_datetime(r["end"].iloc[-1], errors="coerce")
+    # --- Liabilities components ---
+    liab_items = [
+        ("Current Liabilities", ["LiabilitiesCurrent"]),
+        ("Long-term Debt", ["LongTermDebtNoncurrent",
+                            "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
+                            "LongTermDebt"]),
+        ("Other Noncurrent Liabilities", ["LiabilitiesNoncurrent",
+                                          "OtherLiabilitiesNoncurrent"]),
+    ]
 
-    assets = pick_val(df_assets, year)
-    liab = pick_val(df_liab, year)
-    equity = pick_val(df_eq, year)
-    cash = pick_val(df_cash, year)
+    # --- Equity ---
+    equity_items = [
+        ("Equity", ["StockholdersEquity",
+                    "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]),
+    ]
 
-    end = pick_end(df_assets, year)
-    end_str = str(end.date()) if pd.notna(end) else f"{year}-12-31"
-
-    snap = pd.DataFrame(
-        [
-            ["FY", year],
-            ["End", end_str],
-            ["Assets (M$)", _to_musd(assets) if np.isfinite(assets) else np.nan],
-            ["Liabilities (M$)", _to_musd(liab) if np.isfinite(liab) else np.nan],
-            ["Equity (M$)", _to_musd(equity) if np.isfinite(equity) else np.nan],
-            ["Cash (M$)", _to_musd(cash) if np.isfinite(cash) else np.nan],
-        ],
-        columns=["Item", "Value"],
+    # 主要3つ（Liabilities/Equity/Assets）も取っておく（整合チェック）
+    liab_tag, df_liab = _pick_best_tag_latest_first(facts_json, ["Liabilities"])
+    eq_tag, df_eq = _pick_best_tag_latest_first(
+        facts_json,
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
     )
+    meta["liabilities_tag"] = liab_tag
+    meta["equity_tag"] = eq_tag
 
-    meta["bs_year"] = year
-    meta["bs_common_years_exists"] = bool(common)
-    return snap, meta
+    # ========== build assets breakdown ==========
+    a_rows = []
+    a_sum = 0.0
+    for name, tags in asset_items:
+        used_tag, v = _value_at_year(facts_json, tags, bs_year)
+        meta[f"asset_tag_{name}"] = used_tag
+        if np.isfinite(v) and v > 0:
+            a_sum += v
+            a_rows.append((name, v))
+
+    # 合計がTotalAssetsを超えたり不足したりするので、差分はOtherへ吸収
+    # ただし “10%ルール”で表示するのは後段で
+    residual_assets = total_assets - a_sum
+    if np.isfinite(residual_assets):
+        a_rows.append(("Other (Residual)", residual_assets))
+
+    assets_df = pd.DataFrame(a_rows, columns=["Item", "ValueUSD"])
+    assets_df["ShareOfAssets"] = assets_df["ValueUSD"] / total_assets
+
+    # 10%未満をOtherへまとめる（Residualも含めて）
+    big = assets_df[assets_df["ShareOfAssets"] >= threshold_ratio].copy()
+    small = assets_df[assets_df["ShareOfAssets"] < threshold_ratio].copy()
+    other_val = float(small["ValueUSD"].sum()) if not small.empty else 0.0
+
+    final_assets = big[["Item", "ValueUSD"]].copy()
+    if abs(other_val) > 1e-6:
+        final_assets = pd.concat([final_assets, pd.DataFrame([["Other (< threshold)", other_val]], columns=["Item","ValueUSD"])], ignore_index=True)
+
+    final_assets["Group"] = "Assets"
+    final_assets["Value(M$)"] = final_assets["ValueUSD"].map(_to_musd)
+    final_assets["ShareOfAssets"] = final_assets["ValueUSD"] / total_assets
+    final_assets = final_assets[["Group","Item","Value(M$)","ShareOfAssets"]]
+
+    # ========== build liabilities+equity breakdown ==========
+    # Liabilities total（最新年）
+    liab_total = np.nan
+    if not df_liab.empty and (df_liab["year"] == bs_year).any():
+        liab_total = float(df_liab[df_liab["year"] == bs_year]["val"].iloc[-1])
+
+    eq_total = np.nan
+    if not df_eq.empty and (df_eq["year"] == bs_year).any():
+        eq_total = float(df_eq[df_eq["year"] == bs_year]["val"].iloc[-1])
+
+    # 内訳：負債（上）を分解
+    l_rows = []
+    l_sum = 0.0
+    for name, tags in liab_items:
+        used_tag, v = _value_at_year(facts_json, tags, bs_year)
+        meta[f"liab_tag_{name}"] = used_tag
+        if np.isfinite(v) and v > 0:
+            l_sum += v
+            l_rows.append((name, v))
+
+    if np.isfinite(liab_total):
+        residual_liab = liab_total - l_sum
+        if np.isfinite(residual_liab):
+            l_rows.append(("Other Liabilities (Residual)", residual_liab))
+    else:
+        # Liabilities合計が取れない場合：内訳合計を合計扱いにする
+        liab_total = l_sum
+
+    liab_df = pd.DataFrame(l_rows, columns=["Item","ValueUSD"])
+    liab_df["ShareOfAssets"] = liab_df["ValueUSD"] / total_assets
+
+    # Equity（下）は基本1項目（10%未満でも表示してOKだが、要件は「内訳は10%超」）
+    e_rows = []
+    for name, tags in equity_items:
+        used_tag, v = _value_at_year(facts_json, tags, bs_year)
+        meta[f"equity_tag_{name}"] = used_tag
+        if np.isfinite(v):
+            e_rows.append((name, v))
+
+    eq_df = pd.DataFrame(e_rows, columns=["Item","ValueUSD"])
+    if eq_df.empty and np.isfinite(eq_total):
+        eq_df = pd.DataFrame([["Equity", eq_total]], columns=["Item","ValueUSD"])
+    eq_df["ShareOfAssets"] = eq_df["ValueUSD"] / total_assets
+
+    # 10%未満の負債内訳をOtherへ
+    big_l = liab_df[liab_df["ShareOfAssets"] >= threshold_ratio].copy()
+    small_l = liab_df[liab_df["ShareOfAssets"] < threshold_ratio].copy()
+    other_l_val = float(small_l["ValueUSD"].sum()) if not small_l.empty else 0.0
+
+    final_liab = big_l[["Item","ValueUSD"]].copy()
+    if abs(other_l_val) > 1e-6:
+        final_liab = pd.concat([final_liab, pd.DataFrame([["Other Liabilities (< threshold)", other_l_val]], columns=["Item","ValueUSD"])], ignore_index=True)
+
+    final_liab["Group"] = "Liabilities"
+    final_liab["Value(M$)"] = final_liab["ValueUSD"].map(_to_musd)
+    final_liab["ShareOfAssets"] = final_liab["ValueUSD"] / total_assets
+    final_liab = final_liab[["Group","Item","Value(M$)","ShareOfAssets"]]
+
+    # Equityは“下”に置きたいのでGroupはEquity
+    final_eq = eq_df.copy()
+    final_eq["Group"] = "Equity"
+    final_eq["Value(M$)"] = final_eq["ValueUSD"].map(_to_musd)
+    final_eq = final_eq[["Group","Item","Value(M$)","ShareOfAssets"]]
+
+    le_df = pd.concat([final_eq, final_liab], ignore_index=True)
+
+    meta["total_assets_usd"] = total_assets
+    meta["liabilities_total_usd"] = liab_total
+    meta["equity_total_usd"] = eq_total
+
+    return final_assets, le_df, meta
 
 
-def plot_bs_latest(snap: pd.DataFrame, title: str):
+def plot_bs_stacked(assets_df: pd.DataFrame, le_df: pd.DataFrame, title: str):
     """
-    最新年のBSを「資産」と「負債+資本（積み上げ）」で1枚にする
+    左：資産（内訳積み上げ）
+    右：負債（上）＋純資産（下）（内訳積み上げ）
     """
-    get = dict(zip(snap["Item"], snap["Value"]))
-    assets = float(get.get("Assets (M$)", np.nan))
-    liab = float(get.get("Liabilities (M$)", np.nan))
-    equity = float(get.get("Equity (M$)", np.nan))
+    # 並び順：資産は大きい順（見やすい）
+    a = assets_df.copy()
+    a["abs"] = a["Value(M$)"].abs()
+    a = a.sort_values("abs", ascending=False).drop(columns=["abs"])
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    # 右側：Equityを“下”、Liabilitiesを“上”
+    eq = le_df[le_df["Group"] == "Equity"].copy()
+    li = le_df[le_df["Group"] == "Liabilities"].copy()
+    li["abs"] = li["Value(M$)"].abs()
+    li = li.sort_values("abs", ascending=False).drop(columns=["abs"])
+
+    fig, ax = plt.subplots(figsize=(9, 6))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    x = ["Assets", "Liabilities+Equity"]
+    x_assets = 0
+    x_le = 1
 
-    # 左バー：Assets
-    ax.bar([0], [assets], alpha=0.55)
+    # --- Assets stack (bottom-up) ---
+    bottom = 0.0
+    for _, r in a.iterrows():
+        v = float(r["Value(M$)"])
+        ax.bar([x_assets], [v], bottom=[bottom], alpha=0.65, label=f"A: {r['Item']}")
+        bottom += v
 
-    # 右バー：Liabilities + Equity を積み上げ
-    ax.bar([1], [liab], alpha=0.55, label="Liabilities")
-    ax.bar([1], [equity], bottom=[liab], alpha=0.55, label="Equity")
+    # --- Liabilities+Equity stack (Equity bottom, Liabilities on top) ---
+    bottom = 0.0
+    # Equity bottom
+    for _, r in eq.iterrows():
+        v = float(r["Value(M$)"])
+        ax.bar([x_le], [v], bottom=[bottom], alpha=0.65, label=f"E: {r['Item']}")
+        bottom += v
+    # Liabilities on top
+    for _, r in li.iterrows():
+        v = float(r["Value(M$)"])
+        ax.bar([x_le], [v], bottom=[bottom], alpha=0.65, label=f"L: {r['Item']}")
+        bottom += v
 
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(x, color="white")
+    ax.set_xticks([x_assets, x_le])
+    ax.set_xticklabels(["Assets", "Liabilities + Equity"], color="white")
     ax.set_ylabel("Million USD", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
     ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
 
+    # 凡例は長くなりやすいので右側へ
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.02, 1.0))
     st.pyplot(fig)
 
 
@@ -426,12 +557,14 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（PL 年次 / BS 最新年）")
+    st.markdown("## 長期ファンダ（PL 年次 / BS 最新年 内訳つき）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
         ticker = st.text_input("Ticker（米国株）", value="AAPL")
         years = st.slider("PL: 表示する年数（最新から過去N年）", min_value=3, max_value=15, value=10)
+        # BS内訳：総資産比で何%以上を出すか（要件は10%）
+        bs_threshold = st.slider("BS: 内訳表示の閾値（総資産比）", min_value=0.05, max_value=0.30, value=0.10, step=0.01)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -482,33 +615,36 @@ def render(authed_email: str):
             st.write(meta)
 
     with tab_bs:
-        snap, meta_bs = build_bs_latest_snapshot(facts)
-        if snap.empty:
+        assets_df, le_df, meta_bs = build_bs_latest_breakdown(facts, threshold_ratio=float(bs_threshold))
+        if assets_df.empty or le_df.empty:
             st.error("BSデータが取得できませんでした（Assetsが取れない等）。")
             st.write(meta_bs)
             st.stop()
 
-        bs_year = int(dict(zip(snap["Item"], snap["Value"]))["FY"])
-        st.caption(f"BS: 最新年 {bs_year} のみ表示")
+        st.caption(f"BS: 最新年 {meta_bs.get('bs_year')}（総資産比 {bs_threshold*100:.0f}% 以上を個別表示）")
 
-        plot_bs_latest(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
+        plot_bs_stacked(
+            assets_df,
+            le_df,
+            f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest, Breakdown)",
+        )
 
-        st.markdown("### BS（最新年 / 百万USD）")
-        # 表を見やすく
-        snap_disp = snap.copy()
-        # FY/Endは文字列なのでそのまま、数値は整形
-        def fmt(v):
-            if isinstance(v, (int, np.integer)):
-                return str(v)
-            if isinstance(v, float) and np.isfinite(v):
-                return f"{v:,.0f}"
-            return str(v)
+        st.markdown("### 資産内訳（最新年 / 百万USD）")
+        a_disp = assets_df.copy()
+        a_disp["Value(M$)"] = a_disp["Value(M$)"].astype(float).map(lambda v: f"{v:,.0f}" if np.isfinite(v) else "")
+        a_disp["ShareOfAssets"] = a_disp["ShareOfAssets"].map(lambda x: f"{x*100:.1f}%" if np.isfinite(x) else "")
+        st.dataframe(a_disp, use_container_width=True, hide_index=True)
 
-        snap_disp["Value"] = snap_disp["Value"].map(fmt)
-        st.dataframe(snap_disp, use_container_width=True, hide_index=True)
+        st.markdown("### 負債・純資産内訳（最新年 / 百万USD）")
+        le_disp = le_df.copy()
+        le_disp["Value(M$)"] = le_disp["Value(M$)"].astype(float).map(lambda v: f"{v:,.0f}" if np.isfinite(v) else "")
+        le_disp["ShareOfAssets"] = le_disp["ShareOfAssets"].map(lambda x: f"{x*100:.1f}%" if np.isfinite(x) else "")
+        st.dataframe(le_disp, use_container_width=True, hide_index=True)
 
         with st.expander("BSデバッグ（採用タグなど）", expanded=False):
             st.write(meta_bs)
+            st.write(f"CIK: {cik10}")
+            st.write(f"SEC_USER_AGENT: {SEC_USER_AGENT}")
 
 
 def main():
