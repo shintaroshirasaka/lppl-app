@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
-import yfinance as yf  # 追加: 株式分割情報の取得用
+import yfinance as yf
 
 from auth_gate import require_admin_token
 
@@ -753,39 +753,39 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
 # =========================
 # EPS (unit-aware) + STOCK SPLIT ADJUSTMENT
 # =========================
-def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> pd.Series:
+def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> tuple[pd.Series, dict]:
     """
     yfinanceから株式分割情報を取得し、各日付時点のデータにかけるべき補正係数を計算する。
-    例: 1/10分割(10株に増える)の場合、ratio=10.0、それ以前のEPSは 1/10 にする。
+    【重要】yfinanceはティッカーが大文字でないとデータを返さないことが多い。
     """
+    factors = pd.Series(1.0, index=date_index)
+    
     if not ticker:
-        return pd.Series(1.0, index=date_index)
+        return factors, {}
 
     try:
-        t = yf.Ticker(ticker)
+        # Tickerを大文字に強制変換して問い合わせ
+        t = yf.Ticker(ticker.upper())
         splits = t.splits  # Series (Date -> Split Ratio)
         
-        factors = pd.Series(1.0, index=date_index)
-        
+        split_debug = {}
         if splits.empty:
-            return factors
+            return factors, {"msg": "No splits found by yfinance"}
 
-        # yfinanceのsplit ratioは「1株が何株になったか」
-        # 例: 1:10分割なら ratio=10.0。
-        # 古いEPS（株数が少なかった頃）は値が大きいので、 (1 / ratio) を掛けて小さくする。
+        # デバッグ用に辞書化
+        split_debug = {str(d.date()): r for d, r in splits.items()}
+
         for split_date, ratio in splits.items():
             split_date = pd.to_datetime(split_date).tz_localize(None)
-            # この日付より「前」のデータに係数を適用
             mask = factors.index.tz_localize(None) < split_date
             
             if ratio > 0:
                 factors.loc[mask] *= (1.0 / ratio)
                 
-        return factors
+        return factors, split_debug
 
     except Exception as e:
-        print(f"Split fetch error: {e}")
-        return pd.Series(1.0, index=date_index)
+        return factors, {"error": str(e)}
 
 
 def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
@@ -806,7 +806,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
             end = x.get("end")
             val = x.get("val")
             fy_raw = x.get("fy", None)
-            filed = x.get("filed") # 追加
+            filed = x.get("filed")
 
             if not end or val is None or not filed:
                 continue
@@ -814,7 +814,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
                 continue
 
             end_ts = pd.to_datetime(end, errors="coerce")
-            filed_ts = pd.to_datetime(filed, errors="coerce") # 追加
+            filed_ts = pd.to_datetime(filed, errors="coerce")
 
             if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
@@ -894,9 +894,13 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     # 分割調整（Yahoo Finance連携）
     if ticker_symbol:
         best_df["end"] = pd.to_datetime(best_df["end"])
-        factors = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(best_df["end"]))
+        
+        # 関数内部で大文字変換を行うように修正済み
+        factors, split_debug = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(best_df["end"]))
+        
         best_df["val_adjusted"] = best_df["val"] * factors.values
         meta["split_adjusted"] = True
+        meta["split_history"] = split_debug # デバッグ情報を追加
     else:
         best_df["val_adjusted"] = best_df["val"]
         meta["split_adjusted"] = False
@@ -1081,6 +1085,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
