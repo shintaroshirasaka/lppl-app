@@ -146,15 +146,8 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
     return table[table["FY"] >= min_year].sort_values("FY").reset_index(drop=True)
 
 
-def _series_by_year(facts_json: dict, tag: str) -> pd.Series:
-    df = _extract_annual_series_usd(facts_json, tag)
-    if df.empty:
-        return pd.Series(dtype="float64")
-    return df.set_index("year")["val"].sort_index()
-
-
 # =========================
-# PL: Revenue composite
+# PL: Revenue composite + plot
 # =========================
 def _build_revenue_composite(facts_json: dict, revenue_tags: list[str]) -> tuple[pd.DataFrame, dict]:
     tag_series = {}
@@ -302,7 +295,7 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS: latest-year bar + pies A/B (existing)
+# BS: latest-year bar + pies A/B
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -448,7 +441,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
-    # B: L+E "accounts" top3 (no big headings)
+    # B: L+E accounts top3 (no big headings)
     le_candidates = [
         ("Accounts Payable", ["AccountsPayableCurrent"]),
         ("Accrued Liabilities", ["AccruedLiabilitiesCurrent"]),
@@ -478,12 +471,10 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 
     if not np.isfinite(total_le) or total_le <= 0:
         total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
-
     b_labels, b_sizes = _top3_plus_other(le_items, total_le)
 
     assets_pie = {"labels": a_labels, "sizes": a_sizes, "total": total_assets}
     le_pie = {"labels": b_labels, "sizes": b_sizes, "total": total_le}
-
     return assets_pie, le_pie, meta
 
 
@@ -525,11 +516,9 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
       (2) CFI
       (3) CFF
       (4) FCF = CFO + CapEx_outflow
-    CapExは多くの場合マイナス。正の場合は -abs に補正して outflow 化する。
     """
     meta = {}
 
-    # 代表タグ（企業差があるので候補を複数）
     cfo_tags = ["NetCashProvidedByUsedInOperatingActivities"]
     cfi_tags = ["NetCashProvidedByUsedInInvestingActivities"]
     cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
@@ -539,7 +528,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "PaymentsToAcquireFixedAssets",
     ]
 
-    # 各系列をbest_tagで取る（最新優先）
     tag, df_cfo = _pick_best_tag_latest_first(facts_json, cfo_tags)
     meta["cfo_tag"] = tag
     tag, df_cfi = _pick_best_tag_latest_first(facts_json, cfi_tags)
@@ -549,7 +537,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     tag, df_capex = _pick_best_tag_latest_first(facts_json, capex_tags)
     meta["capex_tag"] = tag
 
-    # 年の集合（union）
     years = sorted(
         set(df_cfo["year"].astype(int).tolist())
         | set(df_cfi["year"].astype(int).tolist())
@@ -574,7 +561,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cff = val_at(df_cff, y)
         capex = val_at(df_capex, y)
 
-        # CapEx outflow 化（通常は負）
         capex_out = np.nan
         if np.isfinite(capex):
             capex_out = capex if capex < 0 else -abs(capex)
@@ -583,7 +569,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         if np.isfinite(cfo) and np.isfinite(capex_out):
             fcf = cfo + capex_out
 
-        # end は CFO側を優先
         end = None
         if not df_cfo.empty and (df_cfo["year"] == y).any():
             end = df_cfo[df_cfo["year"] == y]["end"].iloc[-1]
@@ -643,8 +628,8 @@ def render(authed_email: str):
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker（米国株）", value="AAPL")
-        pl_years = st.slider("年数（PL/CF 共通：最新から過去N年）", min_value=3, max_value=15, value=10)
+        ticker = st.text_input("Ticker（米国株）", value="AVGO")
+        n_years = st.slider("年数（PL/CF 共通：最新から過去N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -665,7 +650,6 @@ def render(authed_email: str):
 
     tab_pl, tab_bs, tab_cf = st.tabs(["PL（年次）", "BS（最新年）", "CF（年次）"])
 
-    # ---- PL ----
     with tab_pl:
         table, meta = build_pl_annual_table(facts)
         if table.empty:
@@ -673,7 +657,7 @@ def render(authed_email: str):
             st.write(meta)
             st.stop()
 
-        table_disp = _slice_latest_n_years(table, int(pl_years))
+        table_disp = _slice_latest_n_years(table, int(n_years))
         st.caption(f"PL: 表示 {len(table_disp)} 年（最新年: {int(table['FY'].max())}）")
 
         plot_pl_annual(table_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
@@ -695,7 +679,6 @@ def render(authed_email: str):
         with st.expander("PLデバッグ", expanded=False):
             st.write(meta)
 
-    # ---- BS ----
     with tab_bs:
         year = _latest_year_from_assets(facts)
         if year is None:
@@ -726,7 +709,6 @@ def render(authed_email: str):
         with st.expander("BSデバッグ（タグ採用状況）", expanded=False):
             st.write({"bs": meta_bs, "pies": meta_pie})
 
-    # ---- CF ----
     with tab_cf:
         cf_table, cf_meta = build_cf_annual_table(facts)
         if cf_table.empty:
@@ -734,7 +716,7 @@ def render(authed_email: str):
             st.write(cf_meta)
             st.stop()
 
-        cf_disp = _slice_latest_n_years(cf_table, int(pl_years))
+        cf_disp = _slice_latest_n_years(cf_table, int(n_years))
         st.caption(f"CF: 表示 {len(cf_disp)} 年（最新年: {int(cf_table['FY'].max())}）")
 
         plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
@@ -755,9 +737,7 @@ def render(authed_email: str):
 
         with st.expander("CFデバッグ（採用タグ）", expanded=False):
             st.write(cf_meta)
-            st.markdown(
-                "- **FCF定義**: FCF = CFO + CapEx（CapExは通常マイナス。正符号の場合は -abs に補正）"
-            )
+            st.markdown("- **FCF定義**: FCF = CFO + CapEx（CapExは通常マイナス。正符号の場合は -abs に補正）")
 
 
 def main():
@@ -767,4 +747,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
