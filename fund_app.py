@@ -1,6 +1,5 @@
 # fund_app.py
 import os
-import time
 import requests
 import pandas as pd
 import numpy as np
@@ -12,7 +11,7 @@ from auth_gate import require_admin_token
 # =========================
 # SEC settings
 # =========================
-# SECはUser-Agent必須（連絡先を含むのが推奨）
+# SECはUser-Agent推奨（連絡先を含める）
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
 SEC_HEADERS = {
     "User-Agent": SEC_USER_AGENT,
@@ -20,7 +19,7 @@ SEC_HEADERS = {
     "Host": "data.sec.gov",
 }
 
-# Ticker->CIK 対応表（SEC公式JSON）
+# Ticker -> CIK 対応表（SEC公式JSON）
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -49,7 +48,6 @@ def fetch_ticker_cik_map() -> dict:
     data = r.json()
 
     out = {}
-    # company_tickers.json は { "0": {"cik_str":..., "ticker":..., "title":...}, "1": ... } 形式
     for _, v in data.items():
         t = str(v.get("ticker", "")).strip().lower()
         cik = str(v.get("cik_str", "")).strip()
@@ -78,7 +76,6 @@ def _extract_fy_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
     rows = []
     for x in node:
-        # fp == FY を年次として採用。10-Kが多い
         if x.get("fp") == "FY" and x.get("fy") and x.get("end") and x.get("val") is not None:
             rows.append(
                 {
@@ -92,7 +89,6 @@ def _extract_fy_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["fy", "end", "val", "form"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"]).sort_values("fy")
-    # FYが重複することがあるので、最新（後に出た）を優先して1つに
     df = df.drop_duplicates(subset=["fy"], keep="last")
     return df
 
@@ -112,13 +108,14 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     """
     年次PL（売上・営業利益・税前利益・純利益）を作る
     戻り: (table_df, meta)
-    table_df columns:
-      ["FY","End","Revenue(M$)","OpIncome(M$)","Pretax(M$)","NetIncome(M$)"]
     """
-    # タグ候補（企業差を吸収するため複数持つ）
     revenue_tags = ["Revenues", "SalesRevenueNet"]
     op_income_tags = ["OperatingIncomeLoss"]
-    pretax_tags = ["IncomeBeforeIncomeTaxes", "PretaxIncome", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems"]
+    pretax_tags = [
+        "IncomeBeforeIncomeTaxes",
+        "PretaxIncome",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems",
+    ]
     net_income_tags = ["NetIncomeLoss"]
 
     meta = {}
@@ -135,8 +132,12 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     tag, df_ni = _pick_first_available_tag(facts_json, net_income_tags)
     meta["net_income_tag"] = tag
 
-    # FYで結合（存在する年だけ揃える：MVPは内積でOK）
+    if df_rev.empty:
+        # 売上が取れないとグラフの軸が成立しないのでここで終了
+        return pd.DataFrame(), meta
+
     df = df_rev[["fy", "end", "val"]].rename(columns={"val": "revenue"})
+
     for name, d in [
         ("op_income", df_op),
         ("pretax", df_pt),
@@ -147,8 +148,8 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         else:
             df = df.merge(d[["fy", "val"]].rename(columns={"val": name}), on="fy", how="left")
 
-    # 表示用整形
     df = df.sort_values("fy")
+
     out = pd.DataFrame(
         {
             "FY": df["fy"].astype(int),
@@ -159,45 +160,44 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
             "NetIncome(M$)": df["net_income"].map(_to_musd),
         }
     )
-
     return out, meta
 
 
 def plot_pl_annual(table: pd.DataFrame, title: str):
     """
     売上（棒・右軸）＋利益（折れ線・左軸）
+    暗背景でも“くっきり”見える版
     """
     df = table.copy()
-
-    # 末尾N年だけ見たい場合はここで絞れる（まずは全表示）
     x = df["FY"].astype(str).tolist()
 
-    revenue = df["Revenue(M$)"].to_numpy(dtype=float)
-    op = df["OpIncome(M$)"].to_numpy(dtype=float)
-    pt = df["Pretax(M$)"].to_numpy(dtype=float)
-    ni = df["NetIncome(M$)"].to_numpy(dtype=float)
+    revenue = df["Revenue(M$)"].astype(float).to_numpy()
+    op = df["OpIncome(M$)"].astype(float).to_numpy()
+    pt = df["Pretax(M$)"].astype(float).to_numpy()
+    ni = df["NetIncome(M$)"].astype(float).to_numpy()
 
-    fig, ax_left = plt.subplots(figsize=(11, 5))
+    fig, ax_left = plt.subplots(figsize=(12, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax_left.set_facecolor("#0b0c0e")
 
-    # 利益：折れ線（左軸）
-    ax_left.plot(x, op, label="Operating Income", marker="o")
-    ax_left.plot(x, pt, label="Pretax Income", marker="o")
-    ax_left.plot(x, ni, label="Net Income", marker="o")
+    # 折れ線（利益）
+    ax_left.plot(x, op, label="Operating Income", linewidth=2.5, marker="o", markersize=6)
+    ax_left.plot(x, pt, label="Pretax Income", linewidth=2.5, marker="o", markersize=6)
+    ax_left.plot(x, ni, label="Net Income", linewidth=2.5, marker="o", markersize=6)
+
     ax_left.set_ylabel("Profit (Million USD)", color="white")
     ax_left.tick_params(colors="white")
-    ax_left.grid(color="#333333")
-    ax_left.set_title(title, color="white")
+    ax_left.grid(color="#333333", alpha=0.6)
 
-    # 売上：棒（右軸）
+    # 棒（売上）
     ax_right = ax_left.twinx()
-    ax_right.bar(x, revenue, alpha=0.25, label="Revenue")
+    ax_right.bar(x, revenue, alpha=0.55, width=0.6, label="Revenue")
     ax_right.set_ylabel("Revenue (Million USD)", color="white")
     ax_right.tick_params(colors="white")
 
-    # 凡例（左だけでもOKだが分かりやすく）
+    ax_left.set_title(title, color="white")
     ax_left.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax_left.tick_params(axis="x", rotation=0, colors="white")
 
     st.pyplot(fig)
 
@@ -205,7 +205,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 def render(authed_email: str):
     st.set_page_config(page_title="Fundamentals (Staging)", layout="wide")
 
-    # 既存のadmin_app.pyに寄せた簡易ダーク背景（必要なら拡張）
     st.markdown(
         """
         <style>
@@ -216,11 +215,15 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 最小実装）")
+    st.markdown("## 長期ファンダ（年次PL / 棒＋折れ線くっきり版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
-        ticker = st.text_input("Ticker（米国株）", value="AVGO", placeholder="例: AAPL / NVDA / AVGO")
+        ticker = st.text_input(
+            "Ticker（米国株）",
+            value="AAPL",
+            placeholder="例: AAPL / MSFT / GOOGL / AMZN / NVDA / AVGO",
+        )
         years = st.slider("表示する年数（末尾N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
@@ -256,14 +259,21 @@ def render(authed_email: str):
 
     if table.empty:
         st.error("年次PLデータが取得できませんでした（Revenueタグが見つからない等）。")
-        st.write("debug:", meta)
+        with st.expander("デバッグ", expanded=True):
+            st.write(meta)
+            st.write(f"CIK: {cik10}")
         st.stop()
+
+    st.caption(f"取得できた年次データ: {len(table)} 年分")
 
     # 末尾N年に絞る
     table_disp = table.tail(int(years)).reset_index(drop=True)
 
     # Plot
-    plot_pl_annual(table_disp, title=f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
+    plot_pl_annual(
+        table_disp,
+        title=f"{company_name} ({ticker.upper()}) - Income Statement (Annual)",
+    )
 
     # Table
     st.markdown("### 年次PL（百万USD）")
@@ -280,7 +290,6 @@ def render(authed_email: str):
         hide_index=True,
     )
 
-    # メタ情報（使ってるタグ）
     with st.expander("デバッグ情報（採用したXBRLタグ）", expanded=False):
         st.write(meta)
         st.write(f"CIK: {cik10}")
@@ -294,4 +303,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
