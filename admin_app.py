@@ -123,6 +123,272 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
     return np.minimum(np.maximum(p0, lb + eps), ub - eps)
 
 
+# =======================================================
+# (ADD) Mid-term Quant Table (A~J + Threshold + Judgement)
+#   - Integrated under LPPL outputs in UI
+# =======================================================
+MID_TH = {
+    # ① 相場適合性
+    "A_R_ok": 0.70,     "A_R_ng": 0.40,
+    "B_R2_ok": 0.50,    "B_R2_ng": 0.20,
+    "C_beta_ok_low": 0.80, "C_beta_ok_high": 1.50,
+    "C_beta_ng_low": 0.50, "C_beta_ng_high": 2.00,
+
+    # ② 成果効率
+    "E_cmgr_ok": 0.0075, "E_cmgr_ng": 0.0000,
+    "F_sharpe_ok": 1.00, "F_sharpe_ng": 0.50,
+
+    # Max Drawdown thresholds
+    "G_mdd_ok": -0.15,   "G_mdd_ng": -0.30,
+
+    # F2/F3 alpha thresholds
+    "F2_alpha_ok": 0.05, "F2_alpha_ng": 0.00,
+    "F3_alpha_ok": 0.05, "F3_alpha_ng": 0.00,
+
+    # ③ 因果監視
+    "H_R2_ok": 0.25,     "H_R2_ng": 0.10,
+    "I_beta_ok_low": 0.60, "I_beta_ok_high": 1.40,
+    "I_beta_ng_low": 0.30, "I_beta_ng_high": 2.00,
+    "J_vol_ok": 0.25,    "J_vol_ng": 0.40,
+}
+
+
+def _mid_beta_r2(x: pd.Series, y: pd.Series):
+    beta = np.cov(x, y, ddof=1)[0, 1] / np.var(x, ddof=1)
+    slope, intercept = np.polyfit(x, y, 1)
+    y_hat = slope * x + intercept
+    ss_res = np.sum((y - y_hat) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2 = 1 - ss_res / ss_tot
+    return beta, r2
+
+
+def _mid_fmt_value(metric: str, v: float) -> str:
+    if metric.startswith("E: CMGR"):
+        return f"{v*100:.2f}%"
+    if metric in ["D: Max Drawdown", "F2: Alpha (Relative Outperformance vs Benchmark)"]:
+        return f"{v*100:.2f}%"
+    if metric.startswith("F: Sharpe"):
+        return f"{v:.2f}"
+    if metric.startswith("F3: Alpha"):
+        return f"{v*100:.2f}%"
+    if metric.startswith("D: Deviation Vol"):
+        return f"{v:.2f} (pp)"
+    if metric.startswith("J: Rolling Vol"):
+        return f"{v*100:.2f}%"
+    return f"{v:.4f}"
+
+
+def _mid_judge(metric: str, value: float, dev: pd.DataFrame, bench: str, window: int) -> str:
+    if metric == "A: Deviation R":
+        if value >= MID_TH["A_R_ok"]: return "OK"
+        if value < MID_TH["A_R_ng"]:  return "NG"
+        return "注意"
+
+    if metric == "B: Deviation R²":
+        if value >= MID_TH["B_R2_ok"]: return "OK"
+        if value < MID_TH["B_R2_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("C: Deviation β"):
+        if MID_TH["C_beta_ok_low"] <= value <= MID_TH["C_beta_ok_high"]: return "OK"
+        if value < MID_TH["C_beta_ng_low"] or value > MID_TH["C_beta_ng_high"]: return "NG"
+        return "注意"
+
+    if metric.startswith("D: Deviation Vol"):
+        bench_latest = dev[bench].rolling(window).std(ddof=1).dropna().iloc[-1]
+        ratio = value / bench_latest if bench_latest != 0 else np.nan
+        if ratio <= 1.5: return "OK"
+        if ratio > 2.5:  return "NG"
+        return "注意"
+
+    if metric == "D: Max Drawdown":
+        if value >= MID_TH["G_mdd_ok"]: return "OK"
+        if value < MID_TH["G_mdd_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("E: CMGR"):
+        if value >= MID_TH["E_cmgr_ok"]: return "OK"
+        if value < MID_TH["E_cmgr_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("F: Sharpe"):
+        if value >= MID_TH["F_sharpe_ok"]: return "OK"
+        if value < MID_TH["F_sharpe_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("F2: Alpha"):
+        if value >= MID_TH["F2_alpha_ok"]: return "OK"
+        if value < MID_TH["F2_alpha_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("F3: Alpha"):
+        if value >= MID_TH["F3_alpha_ok"]: return "OK"
+        if value < MID_TH["F3_alpha_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("H: Rolling R²"):
+        if value >= MID_TH["H_R2_ok"]: return "OK"
+        if value < MID_TH["H_R2_ng"]:  return "NG"
+        return "注意"
+
+    if metric.startswith("I: Rolling β"):
+        if MID_TH["I_beta_ok_low"] <= value <= MID_TH["I_beta_ok_high"]: return "OK"
+        if value < MID_TH["I_beta_ng_low"] or value > MID_TH["I_beta_ng_high"]: return "NG"
+        return "注意"
+
+    if metric.startswith("J: Rolling Vol"):
+        if value <= MID_TH["J_vol_ok"]: return "OK"
+        if value > MID_TH["J_vol_ng"]:  return "NG"
+        return "注意"
+
+    return "注意"
+
+
+def _mid_threshold_text(metric: str) -> str:
+    if metric == "A: Deviation R":
+        return f"OK≥{MID_TH['A_R_ok']:.2f} / NG<{MID_TH['A_R_ng']:.2f}"
+    if metric == "B: Deviation R²":
+        return f"OK≥{MID_TH['B_R2_ok']:.2f} / NG<{MID_TH['B_R2_ng']:.2f}"
+    if metric.startswith("C: Deviation β"):
+        return f"OK:{MID_TH['C_beta_ok_low']:.2f}–{MID_TH['C_beta_ok_high']:.2f} / NG<{MID_TH['C_beta_ng_low']:.2f} or >{MID_TH['C_beta_ng_high']:.2f}"
+    if metric.startswith("D: Deviation Vol"):
+        return "OK:（株÷指数）≤1.5 / NG>2.5"
+    if metric == "D: Max Drawdown":
+        return f"OK≥{MID_TH['G_mdd_ok']*100:.0f}% / NG<{MID_TH['G_mdd_ng']*100:.0f}%"
+    if metric.startswith("E: CMGR"):
+        return f"OK≥{MID_TH['E_cmgr_ok']*100:.2f}%/月 / NG<{MID_TH['E_cmgr_ng']*100:.2f}%/月"
+    if metric.startswith("F: Sharpe"):
+        return f"OK≥{MID_TH['F_sharpe_ok']:.2f} / NG<{MID_TH['F_sharpe_ng']:.2f}"
+    if metric.startswith("F2: Alpha"):
+        return f"OK≥{MID_TH['F2_alpha_ok']*100:.0f}% / NG<{MID_TH['F2_alpha_ng']*100:.0f}%"
+    if metric.startswith("F3: Alpha"):
+        return f"OK≥{MID_TH['F3_alpha_ok']*100:.0f}% / NG<{MID_TH['F3_alpha_ng']*100:.0f}%"
+    if metric.startswith("H: Rolling R²"):
+        return f"OK≥{MID_TH['H_R2_ok']:.2f} / NG<{MID_TH['H_R2_ng']:.2f}"
+    if metric.startswith("I: Rolling β"):
+        return f"OK:{MID_TH['I_beta_ok_low']:.2f}–{MID_TH['I_beta_ok_high']:.2f} / NG<{MID_TH['I_beta_ng_low']:.2f} or >{MID_TH['I_beta_ng_high']:.2f}"
+    if metric.startswith("J: Rolling Vol"):
+        return f"OK≤{MID_TH['J_vol_ok']*100:.0f}% / NG>{MID_TH['J_vol_ng']*100:.0f}%"
+    return "-"
+
+
+@st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
+def fetch_prices_pair_cached(ticker: str, bench: str, start_date: date, end_date: date) -> pd.DataFrame:
+    end_exclusive = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    df = yf.download(
+        [ticker, bench],
+        start=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
+        end=end_exclusive,
+        auto_adjust=True,
+        progress=False,
+    )
+    if df is None or df.empty:
+        raise ValueError("NO_DATA_PAIR")
+
+    close = df["Close"] if "Close" in df.columns else None
+    if close is None or close.empty:
+        raise ValueError("NO_CLOSE_PAIR")
+
+    close = close.dropna()
+    if close.empty or len(close) < 30:
+        raise ValueError("NO_DATA_PAIR")
+
+    return close
+
+
+def build_midterm_quant_table(
+    ticker: str,
+    bench: str,
+    start_date: date,
+    end_date: date,
+    window: int = 20,
+) -> pd.DataFrame:
+    prices = fetch_prices_pair_cached(ticker, bench, start_date, end_date)
+    if len(prices) < window + 10:
+        raise ValueError("Not enough data points for mid-term table.")
+
+    base = prices.iloc[0]
+    index100 = prices / base * 100
+    dev = index100 - 100
+    ret = np.log(prices / prices.shift(1)).dropna()
+
+    # ① 相場適合性
+    A_R = dev[ticker].corr(dev[bench])
+    B_R2 = A_R ** 2
+    C_beta, _ = _mid_beta_r2(dev[bench], dev[ticker])
+    D_vol_latest = dev[ticker].rolling(window).std(ddof=1).dropna().iloc[-1]
+
+    # ② 成果効率
+    start_dt = prices.index[0].date()
+    end_dt = prices.index[-1].date()
+    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+    months = max(months, 1)
+
+    E_cmgr = (prices[ticker].iloc[-1] / prices[ticker].iloc[0]) ** (1 / months) - 1
+    F_sharpe = ret[ticker].mean() / ret[ticker].std(ddof=1) * np.sqrt(252)
+
+    p = prices[ticker]
+    dd = p / p.cummax() - 1
+    max_dd = dd.min()
+    max_dd_date = dd.idxmin().date()
+
+    ticker_total = prices[ticker].iloc[-1] / prices[ticker].iloc[0]
+    bench_total = prices[bench].iloc[-1] / prices[bench].iloc[0]
+    F2_alpha_rel = (ticker_total / bench_total) - 1
+
+    X = ret[bench]
+    Y = ret[ticker]
+    beta_daily = np.cov(X, Y, ddof=1)[0, 1] / np.var(X, ddof=1)
+    alpha_daily = Y.mean() - beta_daily * X.mean()
+    F3_alpha_annual = alpha_daily * 252
+
+    # ③ 因果監視（最新値）
+    roll_r = ret[ticker].rolling(window).corr(ret[bench])
+    H_R2_latest = (roll_r ** 2).dropna().iloc[-1]
+    I_beta_latest = (ret[ticker].rolling(window).cov(ret[bench]) / ret[bench].rolling(window).var(ddof=1)).dropna().iloc[-1]
+    J_vol_annual_latest = (ret[ticker].rolling(window).std(ddof=1) * np.sqrt(252)).dropna().iloc[-1]
+
+    rows = [
+        ("① 相場適合性", "A: Deviation R", A_R, _mid_threshold_text("A: Deviation R"),
+         "指数との中長期トレンドの類似度（高いほど同じ動き）"),
+        ("① 相場適合性", "B: Deviation R²", B_R2, _mid_threshold_text("B: Deviation R²"),
+         "トレンド変動の説明力（指数で説明できる割合）"),
+        ("① 相場適合性", f"C: Deviation β (vs {bench})", C_beta, _mid_threshold_text(f"C: Deviation β (vs {bench})"),
+         "乖離空間での感応度（指数に対してどれだけ動くか）"),
+        ("① 相場適合性", f"D: Deviation Vol (rolling {window})", D_vol_latest, _mid_threshold_text(f"D: Deviation Vol (rolling {window})"),
+         "乖離の標準偏差（乖離のブレ幅）"),
+        ("① 相場適合性", "D: Max Drawdown", max_dd, _mid_threshold_text("D: Max Drawdown"),
+         f"最大下落率（最悪日: {max_dd_date}）"),
+
+        ("② 成果効率", f"E: CMGR (monthly, ~{months} months)", E_cmgr, _mid_threshold_text(f"E: CMGR (monthly, ~{months} months)"),
+         "月次複利成長率"),
+        ("② 成果効率", "F: Sharpe (annualized, log returns, rf=0)", F_sharpe, _mid_threshold_text("F: Sharpe (annualized, log returns, rf=0)"),
+         "リスク調整後リターン（大きいほど効率的）"),
+        ("② 成果効率", "F2: Alpha (Relative Outperformance vs Benchmark)", F2_alpha_rel, _mid_threshold_text("F2: Alpha (Relative Outperformance vs Benchmark)"),
+         "期間全体の指数に対する超過収益"),
+        ("② 成果効率", "F3: Alpha (Regression, daily -> annualized)", F3_alpha_annual, _mid_threshold_text("F3: Alpha (Regression, daily -> annualized)"),
+         "市場要因を差し引いたα（回帰）"),
+
+        ("③ 因果監視", f"H: Rolling R² (daily, {window})", H_R2_latest, _mid_threshold_text(f"H: Rolling R² (daily, {window})"),
+         "直近で指数との関係が維持されているか"),
+        ("③ 因果監視", f"I: Rolling β (daily, {window})", I_beta_latest, _mid_threshold_text(f"I: Rolling β (daily, {window})"),
+         "直近β（過剰反応/鈍化の監視）"),
+        ("③ 因果監視", f"J: Rolling Vol (annualized, {window})", J_vol_annual_latest, _mid_threshold_text(f"J: Rolling Vol (annualized, {window})"),
+         "直近の年率ボラ（リスク局面の確認）"),
+    ]
+
+    df = pd.DataFrame(rows, columns=["Block", "Metric", "Value", "Threshold", "Note"])
+    df["Judgement"] = [
+        _mid_judge(m, v, dev=dev, bench=bench, window=window)
+        for m, v in zip(df["Metric"], df["Value"])
+    ]
+
+    df_display = df.copy()
+    df_display["Value"] = [_mid_fmt_value(m, v) for m, v in zip(df["Metric"], df["Value"])]
+    return df_display
+
+
 # -------------------------------------------------------
 # (NEW) Bubble decision flow (R² -> m -> ω)
 # -------------------------------------------------------
@@ -911,9 +1177,37 @@ def main():
             "- 結果が「バブル的/バブル風」なら、新規追随買いを控え、部分利確・ヘッジ・サイズ調整を検討。"
         )
 
+    # =======================================================
+    # (ADD) Mid-term Quant 判定表（LPPLの下に表示）
+    # =======================================================
+    st.markdown("---")
+    with st.expander("Mid-term Quant 判定表（A〜J + Threshold + Judgement）", expanded=False):
+        col_b1, col_b2 = st.columns([2, 1])
+        with col_b1:
+            bench = st.text_input("Benchmark（指数）", value="^GSPC", help="例: ^GSPC / ^IXIC / ^N225")
+        with col_b2:
+            window = st.number_input("WINDOW", min_value=5, max_value=120, value=20, step=1)
+
+        try:
+            df_mid = build_midterm_quant_table(
+                ticker=ticker.strip(),
+                bench=bench.strip(),
+                start_date=start_date,
+                end_date=end_date,
+                window=int(window),
+            )
+            st.dataframe(
+                df_mid[["Block", "Metric", "Value", "Threshold", "Judgement", "Note"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+        except Exception as e:
+            show_error_black(f"判定表の生成に失敗しました: {e}")
+
 
 if __name__ == "__main__":
     main()
+
 
 
 
