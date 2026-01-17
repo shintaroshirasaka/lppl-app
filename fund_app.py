@@ -142,7 +142,7 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
 # =========================
 def _build_composite_by_year(facts_json: dict, tag_priority: list[str]) -> tuple[pd.DataFrame, dict]:
     """
-    tag_priority の順に、年ごとに埋める合成系列を作る
+    tag_priority の順に、年ごとに埋める合成系列
     戻り df: columns=["year","value"]
     """
     tag_series = {}
@@ -186,17 +186,21 @@ def _build_composite_by_year(facts_json: dict, tag_priority: list[str]) -> tuple
     return out, meta
 
 
+def _series_map(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {}
+    return dict(zip(df["year"].astype(int), df["value"].astype(float)))
+
+
 # =========================
 # PL (annual)
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # Revenue (既存の強い方針)
     revenue_priority = [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
     ]
-    # NetIncome（空白対策：複数タグ合成）
     net_income_priority = [
         "NetIncomeLoss",
         "ProfitLoss",
@@ -229,34 +233,35 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     if rev_df.empty:
         return pd.DataFrame(), meta
 
-    # union years
     years = sorted(set(rev_df["year"].tolist()) | set(df_op["year"].tolist()) | set(df_pt["year"].tolist()) | set(ni_df["year"].tolist()))
+    years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
 
-    # maps
-    rev_map = dict(zip(rev_df["year"], rev_df["value"]))
-    ni_map = dict(zip(ni_df["year"], ni_df["value"]))
-    op_map = dict(zip(df_op["year"], df_op["val"])) if not df_op.empty else {}
-    pt_map = dict(zip(df_pt["year"], df_pt["val"])) if not df_pt.empty else {}
+    rev_map = _series_map(rev_df)
+    ni_map = _series_map(ni_df)
+    op_map = dict(zip(df_op["year"].astype(int), df_op["val"].astype(float))) if not df_op.empty else {}
+    pt_map = dict(zip(df_pt["year"].astype(int), df_pt["val"].astype(float))) if not df_pt.empty else {}
 
-    # end date pref: op_income
-    end_map = {}
-    if not df_op.empty:
-        end_map = dict(zip(df_op["year"], df_op["end"]))
+    end_map = dict(zip(df_op["year"].astype(int), df_op["end"])) if not df_op.empty else {}
 
     rows = []
     for y in years:
         end = end_map.get(y)
         end_str = str(pd.to_datetime(end).date()) if end is not None and pd.notna(end) else f"{y}-12-31"
 
+        rev = rev_map.get(y, np.nan)
+        op = op_map.get(y, np.nan)
+        pt = pt_map.get(y, np.nan)
+        ni = ni_map.get(y, np.nan)
+
         rows.append([
             y,
             end_str,
-            _to_musd(rev_map.get(y, np.nan)) if np.isfinite(rev_map.get(y, np.nan)) else np.nan,
-            _to_musd(op_map.get(y, np.nan)) if np.isfinite(op_map.get(y, np.nan)) else np.nan,
-            _to_musd(pt_map.get(y, np.nan)) if np.isfinite(pt_map.get(y, np.nan)) else np.nan,
-            _to_musd(ni_map.get(y, np.nan)) if np.isfinite(ni_map.get(y, np.nan)) else np.nan,
+            _to_musd(rev) if np.isfinite(rev) else np.nan,
+            _to_musd(op) if np.isfinite(op) else np.nan,
+            _to_musd(pt) if np.isfinite(pt) else np.nan,
+            _to_musd(ni) if np.isfinite(ni) else np.nan,
         ])
 
     out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "Pretax(M$)", "NetIncome(M$)"])
@@ -296,8 +301,37 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     st.pyplot(fig)
 
 
+def plot_operating_margin(table: pd.DataFrame, title: str):
+    """
+    （１）営業利益率の推移（折れ線）
+      OpIncome / Revenue
+    """
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+
+    rev = df["Revenue(M$)"].astype(float).to_numpy()
+    op = df["OpIncome(M$)"].astype(float).to_numpy()
+
+    margin = np.full_like(rev, np.nan, dtype=float)
+    for i in range(len(rev)):
+        if np.isfinite(rev[i]) and rev[i] != 0 and np.isfinite(op[i]):
+            margin[i] = op[i] / rev[i] * 100.0
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, margin, linewidth=2.5, marker="o", markersize=6, label="Operating Margin (%)")
+    ax.set_ylabel("%", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    st.pyplot(fig)
+
+
 # =========================
-# BS (latest year) with fallback for missing noncurrent
+# BS (latest year) fallback for missing noncurrent
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -328,7 +362,6 @@ def build_bs_latest_simple(facts_json: dict, year: int):
     """
     meta = {"bs_year": year}
 
-    # totals (for fallback)
     assets_tag, assets_total = _value_for_year(facts_json, ["Assets"], year)
     liab_tag, liab_total = _value_for_year(facts_json, ["Liabilities"], year)
     meta["assets_total_tag"] = assets_tag
@@ -346,11 +379,9 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         year,
     )
 
-    # fallback noncurrent assets
     if (not np.isfinite(nca)) and np.isfinite(assets_total) and np.isfinite(ca):
         nca = assets_total - ca
         nca_tag = "CALC:Assets-AssetsCurrent"
-    # fallback noncurrent liabilities
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
@@ -365,7 +396,6 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         }
     )
 
-    # NaNは0として棒グラフを壊さない
     ca_m = _to_musd(ca) if np.isfinite(ca) else 0.0
     nca_m = _to_musd(nca) if np.isfinite(nca) else 0.0
     cl_m = _to_musd(cl) if np.isfinite(cl) else 0.0
@@ -383,7 +413,6 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         ],
         columns=["Item", "Value"],
     )
-
     return snap, meta
 
 
@@ -394,13 +423,11 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    # Assets（下：非流動、上：流動）
     bottom = 0.0
     ax.bar(0, vals["Noncurrent Assets (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Assets")
     bottom += vals["Noncurrent Assets (M$)"]
     ax.bar(0, vals["Current Assets (M$)"], bottom=bottom, alpha=0.7, label="Current Assets")
 
-    # L+E（下：純資産、中：非流動負債、上：流動負債）
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
     bottom += vals["Equity (M$)"]
@@ -513,22 +540,16 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO / Backlog tab (annual) - AVGO first
+# RPO / Contract liabilities (annual)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    """
-    RPO / Contract Liabilities / Deferred Revenue の年次推移
-    取れた系列だけ表示する方針。
-    """
     meta = {}
 
-    # RPO: 企業によってタグ揺れがあるため候補を複数
     rpo_candidates = [
         "RemainingPerformanceObligation",
         "TransactionPriceAllocatedToRemainingPerformanceObligations",
         "RemainingPerformanceObligationRevenue",
     ]
-    # Contract liabilities / deferred revenue
     contract_liab_candidates = [
         "ContractWithCustomerLiability",
         "DeferredRevenue",
@@ -538,7 +559,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "DeferredRevenueCurrent",
     ]
 
-    # それぞれ「最新優先」で1タグ採用
     tag, df_rpo = _pick_best_tag_latest_first(facts_json, rpo_candidates)
     meta["rpo_tag"] = tag
     tag, df_cl = _pick_best_tag_latest_first(facts_json, contract_liab_candidates)
@@ -564,7 +584,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         rpo = val_at(df_rpo, y)
         cl = val_at(df_cl, y)
         clc = val_at(df_cl_cur, y)
-
         rows.append([y, _to_musd(rpo), _to_musd(cl), _to_musd(clc)])
 
     out = pd.DataFrame(rows, columns=["FY", "RPO(M$)", "ContractLiab(M$)", "ContractLiabCurrent(M$)"])
@@ -584,7 +603,6 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    # 取れている系列だけ描く（全部NaNなら描かない）
     if np.isfinite(rpo).any():
         ax.plot(x, rpo, label="RPO", linewidth=2.5, marker="o", markersize=6)
     if np.isfinite(cl).any():
@@ -598,6 +616,166 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     ax.set_title(title, color="white")
     ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
     ax.tick_params(axis="x", rotation=0, colors="white")
+    st.pyplot(fig)
+
+
+# =========================
+# Ratios tab: ROA / ROE / Inventory Turnover
+# =========================
+def _annual_series_map(facts_json: dict, tag_candidates: list[str]) -> tuple[str | None, dict]:
+    tag, df = _pick_best_tag_latest_first(facts_json, tag_candidates)
+    m = dict(zip(df["year"].astype(int), df["val"].astype(float))) if not df.empty else {}
+    return tag, m
+
+
+def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+    """
+    ROA = NetIncome / avg(Assets)
+    ROE = NetIncome / avg(Equity)
+    Inventory Turnover = COGS / avg(Inventory)
+    """
+    meta = {}
+
+    # Net income（PLと同じ合成方針）
+    ni_priority = [
+        "NetIncomeLoss",
+        "ProfitLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+        "IncomeLossFromContinuingOperations",
+    ]
+    ni_df, ni_meta = _build_composite_by_year(facts_json, ni_priority)
+    meta["net_income_composite"] = ni_meta
+    ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
+
+    # Assets total
+    assets_tag, assets_map = _annual_series_map(facts_json, ["Assets"])
+    meta["assets_tag"] = assets_tag
+
+    # Equity total
+    eq_tag, eq_map = _annual_series_map(
+        facts_json,
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+    )
+    meta["equity_tag"] = eq_tag
+
+    # Inventory
+    inv_tag, inv_map = _annual_series_map(facts_json, ["InventoryNet"])
+    meta["inventory_tag"] = inv_tag
+
+    # COGS (industry dependent)
+    cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold"]
+    cogs_tag, cogs_map = _annual_series_map(facts_json, cogs_candidates)
+    meta["cogs_tag"] = cogs_tag
+
+    years = sorted(set(ni_map.keys()) | set(assets_map.keys()) | set(eq_map.keys()) | set(inv_map.keys()) | set(cogs_map.keys()))
+    if not years:
+        return pd.DataFrame(), meta
+
+    def avg_two(m: dict, y: int) -> float:
+        v = m.get(y, np.nan)
+        vp = m.get(y - 1, np.nan)
+        if np.isfinite(v) and np.isfinite(vp):
+            return (v + vp) / 2.0
+        return v if np.isfinite(v) else np.nan
+
+    rows = []
+    for y in years:
+        ni = ni_map.get(y, np.nan)
+        a_avg = avg_two(assets_map, y)
+        e_avg = avg_two(eq_map, y)
+        inv_avg = avg_two(inv_map, y)
+        cogs = cogs_map.get(y, np.nan)
+
+        roa = (ni / a_avg) if np.isfinite(ni) and np.isfinite(a_avg) and a_avg != 0 else np.nan
+        roe = (ni / e_avg) if np.isfinite(ni) and np.isfinite(e_avg) and e_avg != 0 else np.nan
+        inv_turn = (cogs / inv_avg) if np.isfinite(cogs) and np.isfinite(inv_avg) and inv_avg != 0 else np.nan
+
+        rows.append([y, roa * 100 if np.isfinite(roa) else np.nan, roe * 100 if np.isfinite(roe) else np.nan, inv_turn])
+
+    out = pd.DataFrame(rows, columns=["FY", "ROA(%)", "ROE(%)", "InventoryTurnover(x)"])
+    meta["years"] = years
+    return out, meta
+
+
+def plot_roa_roe(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    roa = df["ROA(%)"].astype(float).to_numpy()
+    roe = df["ROE(%)"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, roa, label="ROA (%)", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, roe, label="ROE (%)", linewidth=2.5, marker="o", markersize=6)
+
+    ax.set_ylabel("%", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    st.pyplot(fig)
+
+
+def plot_inventory_turnover(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    it = df["InventoryTurnover(x)"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, it, label="Inventory Turnover (x)", linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel("x", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    st.pyplot(fig)
+
+
+# =========================
+# EPS tab
+# =========================
+def build_eps_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
+    """
+    EPS（基本）を年次推移で。
+    企業差があるので候補タグを複数。
+    """
+    meta = {}
+    eps_priority = [
+        "EarningsPerShareBasic",
+        "EarningsPerShareBasicAndDiluted",
+        "EarningsPerShareDiluted",
+    ]
+    eps_df, eps_meta = _build_composite_by_year(facts_json, eps_priority)
+    meta["eps_composite"] = eps_meta
+
+    if eps_df.empty:
+        return pd.DataFrame(), meta
+
+    out = pd.DataFrame({"FY": eps_df["year"].astype(int), "EPS": eps_df["value"].astype(float)})
+    meta["years"] = out["FY"].astype(int).tolist()
+    return out, meta
+
+
+def plot_eps(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    eps = df["EPS"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, eps, label="EPS", linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel("USD", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
     st.pyplot(fig)
 
 
@@ -616,12 +794,12 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（PL / BS / CF / 受注残・RPO）")
+    st.markdown("## 長期ファンダ（PL / BS / CF / 受注残・RPO / 回転率 / EPS）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("input_form"):
         ticker = st.text_input("Ticker（米国株）", value="AVGO")
-        n_years = st.slider("年数（PL/CF/RPO 共通：最新から過去N年）", min_value=3, max_value=15, value=10)
+        n_years = st.slider("期間（PL/CF/RPO/回転率/EPS 共通：最新から過去N年）", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -640,8 +818,11 @@ def render(authed_email: str):
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
-    tab_pl, tab_bs, tab_cf, tab_rpo = st.tabs(["PL（年次）", "BS（最新年）", "CF（年次）", "受注残 / RPO"])
+    tab_pl, tab_bs, tab_cf, tab_rpo, tab_turn, tab_eps = st.tabs(
+        ["PL（年次）", "BS（最新年）", "CF（年次）", "受注残 / RPO", "回転率", "EPS"]
+    )
 
+    # ---- PL ----
     with tab_pl:
         pl_table, pl_meta = build_pl_annual_table(facts)
         if pl_table.empty:
@@ -651,6 +832,7 @@ def render(authed_email: str):
 
         pl_disp = _slice_latest_n_years(pl_table, int(n_years))
         st.caption(f"PL: 表示 {len(pl_disp)} 年（最新年: {int(pl_table['FY'].max())}）")
+
         plot_pl_annual(pl_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
 
         st.markdown("### 年次PL（百万USD）")
@@ -667,9 +849,14 @@ def render(authed_email: str):
             hide_index=True,
         )
 
+        # （１）営業利益率 推移
+        st.markdown("### 営業利益率の推移（%）")
+        plot_operating_margin(pl_disp, f"{company_name} ({ticker.upper()}) - Operating Margin (%)")
+
         with st.expander("PLデバッグ", expanded=False):
             st.write(pl_meta)
 
+    # ---- BS ----
     with tab_bs:
         year = _latest_year_from_assets(facts)
         if year is None:
@@ -682,12 +869,13 @@ def render(authed_email: str):
 
         st.markdown("### BS（最新年 / 百万USD）")
         snap_disp = snap.copy()
-        snap_disp["Value"] = snap_disp["Value"].map(lambda v: f"{v:,.0f}" if isinstance(v, (int,float)) and np.isfinite(v) else str(v))
+        snap_disp["Value"] = snap_disp["Value"].map(lambda v: f"{v:,.0f}" if isinstance(v, (int, float)) and np.isfinite(v) else str(v))
         st.dataframe(snap_disp, use_container_width=True, hide_index=True)
 
         with st.expander("BSデバッグ", expanded=False):
             st.write(bs_meta)
 
+    # ---- CF ----
     with tab_cf:
         cf_table, cf_meta = build_cf_annual_table(facts)
         if cf_table.empty:
@@ -717,6 +905,7 @@ def render(authed_email: str):
             st.write(cf_meta)
             st.markdown("- **FCF定義**: FCF = CFO + CapEx（CapExは通常マイナス。正符号の場合は -abs に補正）")
 
+    # ---- RPO ----
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
         if rpo_table.empty:
@@ -724,14 +913,9 @@ def render(authed_email: str):
             st.write(rpo_meta)
             st.stop()
 
-        rpo_disp = _slice_latest_n_years(rpo_table.rename(columns={"FY": "FY"}), int(n_years))
-        # _slice_latest_n_yearsは FY 列を前提にしているので合わせる
-        rpo_disp = rpo_table.copy()
-        rpo_disp = rpo_disp.sort_values("FY")
-        # 最新からN年
-        latest = int(rpo_disp["FY"].max())
+        latest = int(rpo_table["FY"].max())
         miny = latest - int(n_years) + 1
-        rpo_disp = rpo_disp[rpo_disp["FY"] >= miny].reset_index(drop=True)
+        rpo_disp = rpo_table[rpo_table["FY"] >= miny].sort_values("FY").reset_index(drop=True)
 
         st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {latest}）")
         plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
@@ -751,6 +935,66 @@ def render(authed_email: str):
 
         with st.expander("RPOデバッグ（採用タグ）", expanded=False):
             st.write(rpo_meta)
+
+    # ---- Turnover / ROA ROE ----
+    with tab_turn:
+        rat_table, rat_meta = build_ratios_table(facts)
+        if rat_table.empty:
+            st.error("回転率・ROA/ROEの計算に必要なデータが取得できませんでした。")
+            st.write(rat_meta)
+            st.stop()
+
+        rat_disp = _slice_latest_n_years(rat_table.rename(columns={"FY": "FY"}), int(n_years))
+        # _slice_latest_n_yearsはFY列を使うのでそのままでOK
+        st.caption(f"回転率: 表示 {len(rat_disp)} 年（最新年: {int(rat_table['FY'].max())}）")
+
+        st.markdown("### ROA / ROE（%）推移")
+        plot_roa_roe(rat_disp, f"{company_name} ({ticker.upper()}) - ROA / ROE (%)")
+
+        st.markdown("### 棚卸資産回転率（回）推移")
+        plot_inventory_turnover(rat_disp, f"{company_name} ({ticker.upper()}) - Inventory Turnover (x)")
+
+        st.markdown("### 指標一覧")
+        st.dataframe(
+            rat_disp.style.format(
+                {
+                    "ROA(%)": "{:.2f}",
+                    "ROE(%)": "{:.2f}",
+                    "InventoryTurnover(x)": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("回転率デバッグ（採用タグ）", expanded=False):
+            st.write(rat_meta)
+            st.markdown("- **ROA** = NetIncome / avg(Assets)")
+            st.markdown("- **ROE** = NetIncome / avg(Equity)")
+            st.markdown("- **棚卸資産回転率** = COGS / avg(Inventory)（COGSはCostOfRevenue優先）")
+
+    # ---- EPS ----
+    with tab_eps:
+        eps_table, eps_meta = build_eps_table(facts)
+        if eps_table.empty:
+            st.error("EPSが取得できませんでした。")
+            st.write(eps_meta)
+            st.stop()
+
+        eps_disp = _slice_latest_n_years(eps_table.rename(columns={"FY": "FY"}), int(n_years))
+        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}）")
+
+        plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS")
+
+        st.markdown("### EPS（USD）")
+        st.dataframe(
+            eps_disp.style.format({"EPS": "{:.2f}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("EPSデバッグ（採用タグ）", expanded=False):
+            st.write(eps_meta)
 
 
 def main():
