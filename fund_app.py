@@ -57,11 +57,13 @@ def fetch_company_facts(cik10: str) -> dict:
     return r.json()
 
 
-def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+def _extract_annual_series_usd_by_end_year(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
-    年次相当を抽出（USD）
-    - form は 10-K に“完全一致”ではなく、10-K系（10-K/A 等）を許可
-    - fp は FY/CY/Q4 を年次として扱う
+    年次相当（USD）を抽出：
+    - form: 10-K系（10-K, 10-K/A, 10-K405など）を許可
+    - fp: FY/CY/Q4 を優先（ただし企業差があるので完全依存しない）
+    - 年次のキーは fy ではなく end(期末日) の year を採用（これが一番安定）
+    戻り: columns=["year","end","val","fp","form","fy_raw"]
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
@@ -70,44 +72,55 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     for x in node:
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
+        end = x.get("end")
+        val = x.get("val")
 
-        # ★ここが今回の修正点：10-K系を許可（10-K/A 等）
-        is_10k_family = form.startswith("10-K")
+        if not end or val is None:
+            continue
 
-        if (
-            is_10k_family
-            and fp in {"FY", "CY", "Q4"}
-            and x.get("fy")
-            and x.get("end")
-            and x.get("val") is not None
-        ):
-            rows.append(
-                {
-                    "fy": int(x["fy"]),
-                    "end": pd.to_datetime(x["end"]),
-                    "val": _safe_float(x["val"]),
-                    "fp": fp,
-                    "form": form,
-                }
-            )
+        # 10-K系だけ採用
+        if not form.startswith("10-K"):
+            continue
+
+        end_ts = pd.to_datetime(end, errors="coerce")
+        if pd.isna(end_ts):
+            continue
+
+        # fpは優先条件（ただし完全依存しない）
+        # 年次っぽいものを優先して残すためのフラグにしておく
+        annual_fp = fp in {"FY", "CY", "Q4"}
+
+        rows.append(
+            {
+                "year": int(end_ts.year),           # ★ここが主キー
+                "end": end_ts,
+                "val": _safe_float(val),
+                "fp": fp,
+                "form": form,
+                "fy_raw": x.get("fy", None),
+                "annual_fp": int(annual_fp),
+            }
+        )
 
     if not rows:
-        return pd.DataFrame(columns=["fy", "end", "val", "fp", "form"])
+        return pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
 
-    # 同一年が複数ある場合：endが遅いもの（≒最新/確定）を採用
-    df = df.sort_values(["fy", "end"]).drop_duplicates(subset=["fy"], keep="last")
-    df = df.sort_values("fy")
+    # 同一年に複数候補がある場合：
+    # 1) annual_fp==1（FY/CY/Q4）を優先
+    # 2) endが遅い（より新しい/確定）を優先
+    df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
+    df = df.sort_values("year")
     return df
 
 
 def _pick_first_available_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     for tag in candidates:
-        df = _extract_annual_series_usd(facts_json, tag)
+        df = _extract_annual_series_usd_by_end_year(facts_json, tag)
         if not df.empty:
             return tag, df
-    return None, pd.DataFrame(columns=["fy", "end", "val", "fp", "form"])
+    return None, pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
 
 
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
@@ -137,28 +150,32 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     if df_rev.empty:
         return pd.DataFrame(), meta
 
-    df = df_rev[["fy", "end", "val", "fp", "form"]].rename(
-        columns={"val": "revenue", "fp": "fp_rev", "form": "form_rev"}
+    # revenue を軸に year で結合（year=end.year）
+    df = df_rev[["year", "end", "val", "fp", "form", "fy_raw"]].rename(
+        columns={"val": "revenue", "fp": "fp_rev", "form": "form_rev", "fy_raw": "fy_rev"}
     )
 
-    for name, d, fp_col, form_col in [
-        ("op_income", df_op, "fp_op", "form_op"),
-        ("pretax", df_pt, "fp_pt", "form_pt"),
-        ("net_income", df_ni, "fp_ni", "form_ni"),
+    for name, d, fp_col, form_col, fy_col in [
+        ("op_income", df_op, "fp_op", "form_op", "fy_op"),
+        ("pretax", df_pt, "fp_pt", "form_pt", "fy_pt"),
+        ("net_income", df_ni, "fp_ni", "form_ni", "fy_ni"),
     ]:
         if d.empty:
             df[name] = np.nan
             df[fp_col] = None
             df[form_col] = None
+            df[fy_col] = None
         else:
-            tmp = d[["fy", "val", "fp", "form"]].rename(columns={"val": name, "fp": fp_col, "form": form_col})
-            df = df.merge(tmp, on="fy", how="left")
+            tmp = d[["year", "val", "fp", "form", "fy_raw"]].rename(
+                columns={"val": name, "fp": fp_col, "form": form_col, "fy_raw": fy_col}
+            )
+            df = df.merge(tmp, on="year", how="left")
 
-    df = df.sort_values("fy")
+    df = df.sort_values("year")
 
     out = pd.DataFrame(
         {
-            "FY": df["fy"].astype(int),
+            "FY": df["year"].astype(int),                     # 表示上はFY欄に年を出す
             "End": df["end"].dt.date.astype(str),
             "Revenue(M$)": df["revenue"].map(_to_musd),
             "OpIncome(M$)": df["op_income"].map(_to_musd),
@@ -167,6 +184,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         }
     )
 
+    # デバッグ情報
     meta["fp_sample"] = {
         "revenue": df["fp_rev"].dropna().unique().tolist(),
         "op_income": df["fp_op"].dropna().unique().tolist(),
@@ -179,6 +197,15 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "pretax": df["form_pt"].dropna().unique().tolist(),
         "net_income": df["form_ni"].dropna().unique().tolist(),
     }
+    meta["fy_raw_sample"] = {
+        "revenue": df["fy_rev"].dropna().astype(str).unique().tolist(),
+        "op_income": df["fy_op"].dropna().astype(str).unique().tolist(),
+        "pretax": df["fy_pt"].dropna().astype(str).unique().tolist(),
+        "net_income": df["fy_ni"].dropna().astype(str).unique().tolist(),
+    }
+
+    # 取得した年の一覧（確認用）
+    meta["years"] = df["year"].astype(int).tolist()
 
     return out, meta
 
@@ -229,7 +256,7 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 複数年データ取得版）")
+    st.markdown("## 長期ファンダ（年次PL / end.yearで複数年取得版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
