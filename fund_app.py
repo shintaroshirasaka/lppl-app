@@ -51,50 +51,87 @@ def fetch_company_facts(cik10: str) -> dict:
     return r.json()
 
 
-def _extract_latest_value(facts_json: dict, tags: list[str]) -> tuple[str | None, float, int, pd.Timestamp | None]:
+def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
-    指定タグ群から「最新年」の値を1つ返す
-    戻り: (採用タグ, 値, 年, end)
+    年次相当（USD）を抽出：
+    - form: 10-K系（10-K, 10-K/A, 10-K405など）
+    - year: fyがあればfy、無ければend.year
+    - 同一年重複は annual_fp優先→end新しい方
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
+    node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    rows = []
 
-    best_year = -1
-    best_val = np.nan
-    best_tag = None
-    best_end = None
+    for x in node:
+        form = str(x.get("form", "")).upper().strip()
+        fp = str(x.get("fp", "")).upper().strip()
+        end = x.get("end")
+        val = x.get("val")
+        fy_raw = x.get("fy", None)
 
-    for tag in tags:
-        node = us.get(tag, {}).get("units", {}).get("USD", [])
-        for x in node:
-            form = str(x.get("form", "")).upper()
-            end = x.get("end")
-            val = x.get("val")
-            fy = x.get("fy")
+        if not end or val is None:
+            continue
+        if not form.startswith("10-K"):
+            continue
 
-            if not end or val is None:
-                continue
-            if not form.startswith("10-K"):
-                continue
+        end_ts = pd.to_datetime(end, errors="coerce")
+        if pd.isna(end_ts):
+            continue
 
-            try:
-                end_ts = pd.to_datetime(end, errors="coerce")
-                if pd.isna(end_ts):
-                    continue
-                year = int(fy) if fy else int(end_ts.year)
-            except Exception:
-                continue
+        annual_fp = fp in {"FY", "CY", "Q4"}
 
-            if year > best_year:
-                best_year = year
-                best_val = _safe_float(val)
-                best_tag = tag
-                best_end = end_ts
+        if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+            year_key = int(fy_raw)
+        else:
+            year_key = int(end_ts.year)
 
-    return best_tag, best_val, best_year, best_end
+        rows.append(
+            {
+                "year": year_key,
+                "end": end_ts,
+                "val": _safe_float(val),
+                "fp": fp,
+                "form": form,
+                "fy_raw": fy_raw,
+                "annual_fp": int(annual_fp),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+
+    df = pd.DataFrame(rows).dropna(subset=["val"])
+    df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
+    df = df.sort_values("year")
+    return df
+
+
+def _latest_year_from_assets(facts_json: dict) -> tuple[int | None, str | None]:
+    df = _extract_annual_series_usd(facts_json, "Assets")
+    if df.empty:
+        return None, None
+    return int(df["year"].max()), "Assets"
+
+
+def _value_for_year(facts_json: dict, tag_candidates: list[str], year: int) -> tuple[str | None, float]:
+    """
+    指定yearで値が取れる最初のタグを返す
+    """
+    for tag in tag_candidates:
+        df = _extract_annual_series_usd(facts_json, tag)
+        if df.empty:
+            continue
+        r = df[df["year"] == year]
+        if r.empty:
+            continue
+        v = float(r["val"].iloc[-1])
+        if np.isfinite(v):
+            return tag, v
+    return None, np.nan
 
 
 # =========================
-# BS (Balance Sheet) - Latest year only (simplified)
+# BS (latest year) - simple stacks
 # =========================
 def build_bs_latest_simple(facts_json: dict):
     """
@@ -106,25 +143,24 @@ def build_bs_latest_simple(facts_json: dict):
     - Equity
     """
     meta = {}
+    year, _ = _latest_year_from_assets(facts_json)
+    if year is None:
+        return pd.DataFrame(), meta
 
-    ca_tag, ca, y1, end1 = _extract_latest_value(facts_json, ["AssetsCurrent"])
-    nca_tag, nca, y2, end2 = _extract_latest_value(facts_json, ["AssetsNoncurrent"])
-    cl_tag, cl, y3, end3 = _extract_latest_value(facts_json, ["LiabilitiesCurrent"])
-    ncl_tag, ncl, y4, end4 = _extract_latest_value(facts_json, ["LiabilitiesNoncurrent"])
-    eq_tag, eq, y5, end5 = _extract_latest_value(
+    # 必要タグ
+    ca_tag, ca = _value_for_year(facts_json, ["AssetsCurrent"], year)
+    nca_tag, nca = _value_for_year(facts_json, ["AssetsNoncurrent"], year)
+    cl_tag, cl = _value_for_year(facts_json, ["LiabilitiesCurrent"], year)
+    ncl_tag, ncl = _value_for_year(facts_json, ["LiabilitiesNoncurrent"], year)
+    eq_tag, eq = _value_for_year(
         facts_json,
         ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+        year,
     )
-
-    year = max(y1, y2, y3, y4, y5)
-    # endは最も新しいものを採用
-    end = max([d for d in [end1, end2, end3, end4, end5] if d is not None], default=None)
-    end_str = str(end.date()) if end is not None else f"{year}-12-31"
 
     meta.update(
         {
             "bs_year": year,
-            "end": end_str,
             "current_assets_tag": ca_tag,
             "noncurrent_assets_tag": nca_tag,
             "current_liabilities_tag": cl_tag,
@@ -136,7 +172,6 @@ def build_bs_latest_simple(facts_json: dict):
     snap = pd.DataFrame(
         [
             ["FY", year],
-            ["End", end_str],
             ["Current Assets (M$)", _to_musd(ca)],
             ["Noncurrent Assets (M$)", _to_musd(nca)],
             ["Current Liabilities (M$)", _to_musd(cl)],
@@ -149,7 +184,7 @@ def build_bs_latest_simple(facts_json: dict):
     return snap, meta
 
 
-def plot_bs_simple(snap: pd.DataFrame, title: str):
+def plot_bs_bar(snap: pd.DataFrame, title: str):
     """
     借方（Assets）：
       下：非流動資産
@@ -168,21 +203,16 @@ def plot_bs_simple(snap: pd.DataFrame, title: str):
 
     # ---- Assets (left) ----
     bottom = 0.0
-    # 下：非流動資産
     ax.bar(0, vals["Noncurrent Assets (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Assets")
     bottom += vals["Noncurrent Assets (M$)"]
-    # 上：流動資産
     ax.bar(0, vals["Current Assets (M$)"], bottom=bottom, alpha=0.7, label="Current Assets")
 
     # ---- Liabilities + Equity (right) ----
     bottom = 0.0
-    # 下：純資産
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
     bottom += vals["Equity (M$)"]
-    # 中：非流動負債
     ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
     bottom += vals["Noncurrent Liabilities (M$)"]
-    # 上：流動負債
     ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
 
     ax.set_xticks([0, 1])
@@ -191,9 +221,156 @@ def plot_bs_simple(snap: pd.DataFrame, title: str):
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
     ax.set_title(title, color="white")
-
     ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+
     st.pyplot(fig)
+
+
+# =========================
+# Pie charts: Top3 + Other
+# =========================
+def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
+    """
+    items: [(name, valueUSD), ...]
+    - valueUSDが正のものだけ対象
+    - 上位3を抽出し、残りはOther
+    """
+    pos = [(n, float(v)) for n, v in items if np.isfinite(v) and float(v) > 0]
+    pos.sort(key=lambda x: x[1], reverse=True)
+
+    top = pos[:3]
+    top_sum = sum(v for _, v in top)
+    other = max(total - top_sum, 0.0) if np.isfinite(total) else sum(v for _, v in pos[3:])
+
+    labels = [f"{n}" for n, _ in top]
+    sizes = [v for _, v in top]
+    if other > 0:
+        labels.append("Other")
+        sizes.append(other)
+
+    # total=0だとpieが壊れるので保険
+    if sum(sizes) <= 0:
+        return (["No data"], [1.0])
+    return labels, sizes
+
+
+def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]:
+    """
+    A: 資産の上位3 + その他
+    B: 負債+純資産の上位3 + その他
+
+    ※タグは「取れやすい代表項目」を候補にしておき、
+      取れたものの中で上位3を採用する。
+    """
+    meta = {"year": year}
+
+    # --- Totals ---
+    _, total_assets = _value_for_year(facts_json, ["Assets"], year)
+    _, total_liab = _value_for_year(facts_json, ["Liabilities"], year)
+    _, total_eq = _value_for_year(
+        facts_json,
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+        year,
+    )
+    total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
+
+    meta["total_assets_usd"] = total_assets
+    meta["total_liab_usd"] = total_liab
+    meta["total_equity_usd"] = total_eq
+
+    # --- Assets candidates (代表項目) ---
+    asset_candidates = [
+        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue",
+                                "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]),
+        ("Marketable Securities", ["AvailableForSaleSecuritiesCurrent",
+                                   "AvailableForSaleSecuritiesNoncurrent",
+                                   "MarketableSecuritiesCurrent",
+                                   "MarketableSecuritiesNoncurrent"]),
+        ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet"]),
+        ("Inventory", ["InventoryNet"]),
+        ("PPE (Net)", ["PropertyPlantAndEquipmentNet"]),
+        ("Goodwill", ["Goodwill"]),
+        ("Intangibles", ["IntangibleAssetsNetExcludingGoodwill"]),
+    ]
+
+    asset_items = []
+    for name, tags in asset_candidates:
+        used, v = _value_for_year(facts_json, tags, year)
+        meta[f"asset_{name}_tag"] = used
+        if np.isfinite(v):
+            asset_items.append((name, v))
+
+    # 合計に対するOtherは _top3_plus_other で作る
+
+    # --- Liabilities + Equity candidates ---
+    # “勘定項目例：利益剰余金”に寄せて、Retained Earningsを候補に入れる。
+    le_candidates = [
+        # Liabilities side
+        ("Current Liabilities", ["LiabilitiesCurrent"]),
+        ("Noncurrent Liabilities", ["LiabilitiesNoncurrent"]),
+        ("Long-term Debt", ["LongTermDebtNoncurrent",
+                            "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
+                            "LongTermDebt"]),
+        # Equity side (component)
+        ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
+        # fallback equity total (componentが取れない場合でも何かは出す)
+        ("Equity (Total)", ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]),
+    ]
+
+    le_items = []
+    for name, tags in le_candidates:
+        used, v = _value_for_year(facts_json, tags, year)
+        meta[f"le_{name}_tag"] = used
+        # TreasuryStockなど負の項目は円グラフに向かないので「正のものだけ」
+        if np.isfinite(v) and v > 0:
+            le_items.append((name, v))
+
+    # A pie (assets)
+    if not np.isfinite(total_assets) or total_assets <= 0:
+        total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
+    a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
+
+    # B pie (liab+equity)
+    if not np.isfinite(total_le) or total_le <= 0:
+        total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
+    b_labels, b_sizes = _top3_plus_other(le_items, total_le)
+
+    # ％表示用に返す
+    assets_pie = {"labels": a_labels, "sizes": a_sizes, "total": total_assets}
+    le_pie = {"labels": b_labels, "sizes": b_sizes, "total": total_le}
+
+    return assets_pie, le_pie, meta
+
+
+def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
+    """
+    棒グラフの下に、A/Bの円グラフを左右に並べる
+    """
+    col1, col2 = st.columns(2)
+
+    def _pie(ax, labels, sizes, title):
+        ax.pie(
+            sizes,
+            labels=labels,
+            autopct=lambda p: f"{p:.0f}%",
+            startangle=90,
+            textprops={"color": "white"},
+        )
+        ax.set_title(title, color="white")
+
+    with col1:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"A: Assets Top3 + Other ({year})")
+        st.pyplot(fig)
+
+    with col2:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: Liabilities+Equity Top3 + Other ({year})")
+        st.pyplot(fig)
 
 
 # =========================
@@ -211,11 +388,10 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（BS：最新年・簡略表示）")
+    st.markdown("## 長期ファンダ（BS：棒グラフ＋円グラフA/B）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     ticker = st.text_input("Ticker（米国株）", value="AAPL")
-
     if not ticker.strip():
         st.stop()
 
@@ -227,14 +403,29 @@ def render(authed_email: str):
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
-    # いまはBSだけを確実に動かす版（PLは別ファイルで運用中ならここに統合OK）
-    snap, meta = build_bs_latest_simple(facts)
-    year = meta.get("bs_year")
+    # 最新年（Assetsを基準）
+    year, _ = _latest_year_from_assets(facts)
+    if year is None:
+        st.error("Assets（総資産）が取得できませんでした。")
+        st.stop()
 
-    st.caption(f"BS: 最新年 {year}  / End: {meta.get('end')}")
+    # BS 棒グラフ用
+    snap, meta_bs = build_bs_latest_simple(facts)
+    if snap.empty:
+        st.error("BS（流動/非流動/純資産）の取得に失敗しました。")
+        st.write(meta_bs)
+        st.stop()
 
-    plot_bs_simple(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
+    st.caption(f"BS: 最新年 {year}")
 
+    # 1) 棒グラフ
+    plot_bs_bar(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
+
+    # 2) 円グラフ A/B
+    assets_pie, le_pie, meta_pie = build_bs_pies_latest(facts, year)
+    plot_two_pies(assets_pie, le_pie, year)
+
+    # 表
     st.markdown("### BS（最新年 / 百万USD）")
     snap_disp = snap.copy()
 
@@ -248,8 +439,8 @@ def render(authed_email: str):
     snap_disp["Value"] = snap_disp["Value"].map(fmt)
     st.dataframe(snap_disp, use_container_width=True, hide_index=True)
 
-    with st.expander("BSデバッグ（採用タグ）", expanded=False):
-        st.write(meta)
+    with st.expander("デバッグ（タグ採用状況）", expanded=False):
+        st.write({"bs": meta_bs, "pies": meta_pie})
         st.write(f"CIK: {cik10}")
         st.write(f"SEC_USER_AGENT: {SEC_USER_AGENT}")
 
