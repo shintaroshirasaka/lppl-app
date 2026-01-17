@@ -67,29 +67,46 @@ def fetch_company_facts(cik10: str) -> dict:
     return r.json()
 
 
-def _extract_fy_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
-    us-gaap の tag から FY (年次) の USD を抽出
-    戻り: columns=["fy","end","val","form"]
+    us-gaap の tag から「年次相当」を抽出（USD）
+    - form == 10-K のみ採用（年次報告書）
+    - fp in {"FY","CY","Q4"} を年次として扱う
+    戻り: columns=["fy","end","val","fp","form"]
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
     rows = []
+
     for x in node:
-        if x.get("fp") == "FY" and x.get("fy") and x.get("end") and x.get("val") is not None:
+        form = str(x.get("form", "")).upper()
+        fp = str(x.get("fp", "")).upper()
+
+        if (
+            form == "10-K"
+            and fp in {"FY", "CY", "Q4"}
+            and x.get("fy")
+            and x.get("end")
+            and x.get("val") is not None
+        ):
             rows.append(
                 {
                     "fy": int(x["fy"]),
                     "end": pd.to_datetime(x["end"]),
                     "val": _safe_float(x["val"]),
-                    "form": str(x.get("form", "")),
+                    "fp": fp,
+                    "form": form,
                 }
             )
-    if not rows:
-        return pd.DataFrame(columns=["fy", "end", "val", "form"])
 
-    df = pd.DataFrame(rows).dropna(subset=["val"]).sort_values("fy")
-    df = df.drop_duplicates(subset=["fy"], keep="last")
+    if not rows:
+        return pd.DataFrame(columns=["fy", "end", "val", "fp", "form"])
+
+    df = pd.DataFrame(rows).dropna(subset=["val"])
+
+    # 同一年が複数ある場合：endが遅いもの（≒最新/確定）を採用
+    df = df.sort_values(["fy", "end"]).drop_duplicates(subset=["fy"], keep="last")
+    df = df.sort_values("fy")
     return df
 
 
@@ -98,10 +115,10 @@ def _pick_first_available_tag(facts_json: dict, candidates: list[str]) -> tuple[
     複数候補タグのうち、データが取れた最初のタグを採用
     """
     for tag in candidates:
-        df = _extract_fy_series_usd(facts_json, tag)
+        df = _extract_annual_series_usd(facts_json, tag)
         if not df.empty:
             return tag, df
-    return None, pd.DataFrame(columns=["fy", "end", "val", "form"])
+    return None, pd.DataFrame(columns=["fy", "end", "val", "fp", "form"])
 
 
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
@@ -133,20 +150,22 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta["net_income_tag"] = tag
 
     if df_rev.empty:
-        # 売上が取れないとグラフの軸が成立しないのでここで終了
         return pd.DataFrame(), meta
 
-    df = df_rev[["fy", "end", "val"]].rename(columns={"val": "revenue"})
+    # revenue を軸に FY で結合（MVPは left join でOK）
+    df = df_rev[["fy", "end", "val", "fp"]].rename(columns={"val": "revenue", "fp": "fp_rev"})
 
-    for name, d in [
-        ("op_income", df_op),
-        ("pretax", df_pt),
-        ("net_income", df_ni),
+    for name, d, fp_col in [
+        ("op_income", df_op, "fp_op"),
+        ("pretax", df_pt, "fp_pt"),
+        ("net_income", df_ni, "fp_ni"),
     ]:
         if d.empty:
             df[name] = np.nan
+            df[fp_col] = None
         else:
-            df = df.merge(d[["fy", "val"]].rename(columns={"val": name}), on="fy", how="left")
+            tmp = d[["fy", "val", "fp"]].rename(columns={"val": name, "fp": fp_col})
+            df = df.merge(tmp, on="fy", how="left")
 
     df = df.sort_values("fy")
 
@@ -160,6 +179,15 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
             "NetIncome(M$)": df["net_income"].map(_to_musd),
         }
     )
+
+    # デバッグ用：実際に採用された fp
+    meta["fp_sample"] = {
+        "revenue": df.get("fp_rev", pd.Series(dtype=object)).dropna().unique().tolist(),
+        "op_income": df.get("fp_op", pd.Series(dtype=object)).dropna().unique().tolist(),
+        "pretax": df.get("fp_pt", pd.Series(dtype=object)).dropna().unique().tolist(),
+        "net_income": df.get("fp_ni", pd.Series(dtype=object)).dropna().unique().tolist(),
+    }
+
     return out, meta
 
 
@@ -215,7 +243,7 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 棒＋折れ線くっきり版）")
+    st.markdown("## 長期ファンダ（年次PL / 年次データ複数年対応版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
@@ -303,5 +331,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
