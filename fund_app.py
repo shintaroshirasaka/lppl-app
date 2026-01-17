@@ -404,8 +404,14 @@ def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list
 
 
 def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]:
+    """
+    A: Assetsの上位3 + その他
+    B: 貸方（負債+純資産）の“勘定項目”の上位3 + その他
+       ※「流動負債」「非流動負債」「純資産（合計）」の大項目は表示しない
+    """
     meta = {"year": year}
 
+    # Totals（Other計算用）
     _, total_assets = _value_for_year(facts_json, ["Assets"], year)
     _, total_liab = _value_for_year(facts_json, ["Liabilities"], year)
     _, total_eq = _value_for_year(
@@ -415,7 +421,11 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     )
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
 
-    # A: Assets top3
+    meta["total_assets_usd"] = total_assets
+    meta["total_liab_usd"] = total_liab
+    meta["total_equity_usd"] = total_eq
+
+    # ---------- A: Assets candidates ----------
     asset_candidates = [
         ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue",
                                 "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]),
@@ -438,29 +448,47 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
-    # B: Liabilities + Equity top3
+    # ---------- B: Liabilities+Equity candidates (NO big headings) ----------
+    # 大項目（LiabilitiesCurrent / LiabilitiesNoncurrent / Equity Total）は除外
     le_candidates = [
-        ("Current Liabilities", ["LiabilitiesCurrent"]),
-        ("Noncurrent Liabilities", ["LiabilitiesNoncurrent"]),
-        ("Long-term Debt", ["LongTermDebtNoncurrent",
-                            "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
-                            "LongTermDebt"]),
+        # --- Liabilities (examples) ---
+        ("Accounts Payable", ["AccountsPayableCurrent"]),
+        ("Accrued Liabilities", ["AccruedLiabilitiesCurrent"]),
+        ("Deferred Revenue / Contract Liabilities", ["ContractWithCustomerLiabilityCurrent",
+                                                     "ContractWithCustomerLiabilityNoncurrent",
+                                                     "DeferredRevenueCurrent",
+                                                     "DeferredRevenueNoncurrent"]),
+        ("Commercial Paper", ["CommercialPaper"]),
+        ("Long-term Debt (Noncurrent)", ["LongTermDebtNoncurrent",
+                                         "LongTermDebtAndCapitalLeaseObligationsNoncurrent"]),
+        ("Long-term Debt (Current)", ["LongTermDebtCurrent",
+                                      "LongTermDebtAndCapitalLeaseObligationsCurrent"]),
+        ("Other Current Liabilities", ["OtherLiabilitiesCurrent"]),
+        ("Other Noncurrent Liabilities", ["OtherLiabilitiesNoncurrent"]),
+        # --- Equity components (examples) ---
         ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
-        ("Equity (Total)", ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]),
+        ("Additional Paid-in Capital", ["AdditionalPaidInCapital"]),
+        ("AOCI", ["AccumulatedOtherComprehensiveIncomeLossNetOfTax"]),
+        ("Common Stock", ["CommonStockValue"]),
+        # TreasuryStock は多くの場合マイナスなので円グラフに不向き → あえて除外
     ]
+
     le_items = []
     for name, tags in le_candidates:
         used, v = _value_for_year(facts_json, tags, year)
         meta[f"le_{name}_tag"] = used
+        # 円グラフは負値に弱いので「正の値のみ」採用
         if np.isfinite(v) and v > 0:
             le_items.append((name, v))
 
     if not np.isfinite(total_le) or total_le <= 0:
         total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
+
     b_labels, b_sizes = _top3_plus_other(le_items, total_le)
 
     assets_pie = {"labels": a_labels, "sizes": a_sizes, "total": total_assets}
     le_pie = {"labels": b_labels, "sizes": b_sizes, "total": total_le}
+
     return assets_pie, le_pie, meta
 
 
@@ -488,7 +516,7 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
         fig, ax = plt.subplots(figsize=(5.5, 5.0))
         fig.patch.set_facecolor("#0b0c0e")
         ax.set_facecolor("#0b0c0e")
-        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: Liabilities+Equity Top3 + Other ({year})")
+        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: L+E (accounts) Top3 + Other ({year})")
         st.pyplot(fig)
 
 
@@ -571,10 +599,8 @@ def render(authed_email: str):
         snap, meta_bs = build_bs_latest_simple(facts, year)
         st.caption(f"BS: 最新年 {year}")
 
-        # 1) 棒グラフ
         plot_bs_bar(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
 
-        # 2) 円グラフ A/B
         assets_pie, le_pie, meta_pie = build_bs_pies_latest(facts, year)
         plot_two_pies(assets_pie, le_pie, year)
 
@@ -591,7 +617,7 @@ def render(authed_email: str):
         snap_disp["Value"] = snap_disp["Value"].map(fmt)
         st.dataframe(snap_disp, use_container_width=True, hide_index=True)
 
-        with st.expander("BSデバッグ", expanded=False):
+        with st.expander("BSデバッグ（タグ採用状況）", expanded=False):
             st.write({"bs": meta_bs, "pies": meta_pie})
 
 
