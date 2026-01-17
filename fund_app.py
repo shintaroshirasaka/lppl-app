@@ -4,7 +4,6 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import streamlit as st
 import yfinance as yf
 
@@ -56,19 +55,12 @@ def fetch_company_facts(cik10: str) -> dict:
 # =========================
 # XBRL annual extractor (USD)
 # =========================
-def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False) -> pd.DataFrame:
+def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
-    include_segments=Trueの場合、セグメント情報(segment)を含むデータも返し、解析用の列を追加する。
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
-    # タグがない場合、srt (Standard Reporting Taxonomy) も探す（地域セグメント等で使われることがある）
-    if not us.get(xbrl_tag):
-        srt = facts_json.get("facts", {}).get("srt", {})
-        node = srt.get(xbrl_tag, {}).get("units", {}).get("USD", [])
-    else:
-        node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
-    
+    node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
     rows = []
 
     for x in node:
@@ -77,10 +69,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         end = x.get("end")
         val = x.get("val")
         fy_raw = x.get("fy", None)
-        filed = x.get("filed")
-        
-        # セグメント情報の取得
-        segment_obj = x.get("segment")
 
         if not end or val is None:
             continue
@@ -88,50 +76,32 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
             continue
 
         end_ts = pd.to_datetime(end, errors="coerce")
-        filed_ts = pd.to_datetime(filed, errors="coerce")
         if pd.isna(end_ts):
             continue
 
         annual_fp = fp in {"FY", "CY", "Q4"}
-        
+
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
             year_key = int(fy_raw)
         else:
             year_key = int(end_ts.year)
 
         rows.append(
-            {
-                "year": year_key,
-                "end": end_ts,
-                "val": _safe_float(val),
-                "annual_fp": int(annual_fp),
-                "filed": filed_ts,
-                "segment": segment_obj # 生のセグメントデータを保持
-            }
+            {"year": year_key, "end": end_ts, "val": _safe_float(val), "annual_fp": int(annual_fp)}
         )
 
     if not rows:
-        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "filed", "segment"])
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
-    
-    if not include_segments:
-        # 連結データのみ（segment列がNoneまたは空）
-        # ※厳密には "segment" キーがないものを連結とみなす
-        df = df[df["segment"].isnull()]
-        # 重複排除（最新のfiled優先）
-        df = df.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
-        df = df.sort_values("year")
-        return df
-    else:
-        # セグメント込み。ここでは重複排除を「Axis/Memberごと」に行う必要があるため
-        # 後続の処理で展開してから重複排除する
-        return df
+    df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
+    df = df.sort_values("year")
+    return df
 
 
 def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
-    タグ選択（最新年優先→件数→end）※連結データ用
+    タグ選択（最新年優先→件数→end）
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
@@ -140,7 +110,7 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
     best_last_end = pd.Timestamp("1900-01-01")
 
     for tag in candidates:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        df = _extract_annual_series_usd(facts_json, tag)
         if df.empty:
             continue
 
@@ -170,7 +140,7 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> t
     tag_series = {}
     tag_years = {}
     for tag in tag_priority:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        df = _extract_annual_series_usd(facts_json, tag)
         if df.empty:
             continue
         s = df.set_index("year")["val"].sort_index()
@@ -206,144 +176,6 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> t
     }
     out = pd.DataFrame({"year": composite.index.astype(int), "value": composite.values})
     return out, meta
-
-
-# =========================
-# Segment Analysis Helpers
-# =========================
-def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    segment列（JSON object/list）を解析し、DimensionとMemberを抽出する
-    """
-    rows = []
-    for _, r in df.iterrows():
-        seg = r["segment"]
-        if not seg:
-            continue
-        
-        # segmentは通常リスト形式 [{'dimension': '...', 'value': '...'}]
-        dims = []
-        if isinstance(seg, list):
-            dims = seg
-        elif isinstance(seg, dict):
-            dims = [seg]
-        
-        for d in dims:
-            dim_name = d.get("dimension")
-            mem_name = d.get("value")
-            if dim_name and mem_name:
-                rows.append({
-                    "year": r["year"],
-                    "filed": r["filed"],
-                    "val": r["val"],
-                    "dimension": dim_name,
-                    "member": mem_name
-                })
-    
-    if not rows:
-        return pd.DataFrame(columns=["year", "val", "dimension", "member"])
-    
-    out = pd.DataFrame(rows)
-    # 重複排除: 同じ年・Dim・Memberなら、最新のfiledを採用
-    out = out.sort_values(["year", "dimension", "member", "filed"]).drop_duplicates(subset=["year", "dimension", "member"], keep="last")
-    return out
-
-def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    売上高（Revenue）に関連するセグメント情報を抽出する
-    戻り値: (business_segments_df, geo_segments_df)
-    """
-    # 売上タグの候補
-    revenue_tags = [
-        "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
-        "RevenuesNetOfInterestExpense", "SalesRevenueGoodsNet", "SalesRevenueServicesNet"
-    ]
-    
-    # 全候補のデータを取得してマージ
-    all_seg_rows = []
-    
-    for tag in revenue_tags:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=True)
-        if df.empty:
-            continue
-        parsed = _parse_segment_info(df)
-        if not parsed.empty:
-            parsed["src_tag"] = tag
-            all_seg_rows.append(parsed)
-            
-    if not all_seg_rows:
-        # 【修正】空の辞書ではなく、空のDataFrameを返す
-        return pd.DataFrame(), pd.DataFrame()
-    
-    merged = pd.concat(all_seg_rows, ignore_index=True)
-    
-    # 重複処理: 同じ年・Dim・Memberで複数のタグがある場合、値が大きい方（＝より包括的なタグ）を採用
-    merged = merged.sort_values("val", ascending=False).drop_duplicates(subset=["year", "dimension", "member"], keep="first")
-    
-    # 軸（Dimension）による分類
-    def classify_axis(dim_name: str) -> str:
-        d = dim_name.lower()
-        if "businesssegments" in d or "segmentreporting" in d or "productor" in d:
-            return "Business"
-        if "geographical" in d or "geoaxis" in d:
-            return "Geography"
-        return "Other"
-
-    merged["axis_type"] = merged["dimension"].apply(classify_axis)
-    
-    # メンバー名のクリーニング
-    def clean_member(m: str) -> str:
-        if ":" in m:
-            m = m.split(":")[1]
-        if m.endswith("Member"):
-            m = m[:-6]
-        return m
-
-    merged["member_clean"] = merged["member"].apply(clean_member)
-    
-    # 不要なメンバー（TotalやEliminationなど）を除外
-    exclude_keywords = ["total", "elimination", "corporate", "adjust", "consolidation"]
-    merged = merged[~merged["member_clean"].str.lower().str.contains("|".join(exclude_keywords))]
-
-    # データのピボット
-    def pivot_data(axis_type):
-        subset = merged[merged["axis_type"] == axis_type]
-        if subset.empty:
-            return pd.DataFrame()
-        
-        pivoted = subset.pivot(index="year", columns="member_clean", values="val")
-        pivoted = pivoted.sort_index()
-        return pivoted
-
-    return pivot_data("Business"), pivot_data("Geography")
-
-
-def plot_stacked_bar(df: pd.DataFrame, title: str):
-    if df.empty:
-        st.info(f"{title}: データが見つかりませんでした。")
-        return
-
-    # M$単位に変換
-    df_m = df / 1_000_000.0
-    
-    fig, ax = plt.subplots(figsize=(12, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    
-    # カラーマップ
-    colors = cm.get_cmap("tab20", len(df_m.columns))
-    
-    df_m.plot(kind="bar", stacked=True, ax=ax, colormap=colors, width=0.8)
-    
-    ax.set_ylabel("Revenue (Million USD)", color="white")
-    ax.tick_params(colors="white", axis='x', rotation=0)
-    ax.tick_params(colors="white", axis='y')
-    ax.grid(color="#333333", alpha=0.6, axis="y")
-    ax.set_title(title, color="white")
-    
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.0, 1.0))
-    
-    st.pyplot(fig)
 
 
 # =========================
@@ -1112,7 +944,7 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（PL / BS / CF / セグメント / 受注残・RPO / 回転率 / EPS）")
+    st.markdown("## 長期ファンダ（PL / BS / CF / 受注残・RPO / 回転率 / EPS）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("input_form"):
@@ -1136,8 +968,8 @@ def render(authed_email: str):
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
-    tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps = st.tabs(
-        ["PL（年次）", "BS（最新年）", "CF（年次）", "セグメント（売上）", "受注残 / RPO", "回転率", "EPS"]
+    tab_pl, tab_bs, tab_cf, tab_rpo, tab_turn, tab_eps = st.tabs(
+        ["PL（年次）", "BS（最新年）", "CF（年次）", "受注残 / RPO", "回転率", "EPS"]
     )
 
     with tab_pl:
@@ -1190,27 +1022,6 @@ def render(authed_email: str):
         )
         with st.expander("CFデバッグ（採用タグ）", expanded=False):
             st.write(cf_meta)
-
-    with tab_seg:
-        st.caption("注: セグメント情報は企業がXBRL標準タクソノミ（Dimension）を使用している場合のみ表示されます。")
-        biz_df, geo_df = build_segment_table(facts)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if not biz_df.empty:
-                biz_disp = biz_df[biz_df.index >= int(biz_df.index.max()) - n_years + 1]
-                plot_stacked_bar(biz_disp, f"{company_name} - Revenue by Business Segment")
-                st.dataframe(biz_disp.style.format("{:,.0f}"), use_container_width=True)
-            else:
-                st.info("事業セグメント情報が見つかりませんでした。")
-        
-        with col2:
-            if not geo_df.empty:
-                geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
-                plot_stacked_bar(geo_disp, f"{company_name} - Revenue by Geography")
-                st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
-            else:
-                st.info("地域セグメント情報が見つかりませんでした。")
 
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
