@@ -8,15 +8,8 @@ import streamlit as st
 
 from auth_gate import require_admin_token
 
-# =========================
-# SEC settings
-# =========================
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
-SEC_HEADERS = {
-    "User-Agent": SEC_USER_AGENT,
-    "Accept-Encoding": "gzip, deflate",
-    "Host": "data.sec.gov",
-}
+SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -38,7 +31,6 @@ def fetch_ticker_cik_map() -> dict:
     r = requests.get(TICKER_CIK_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=30)
     r.raise_for_status()
     data = r.json()
-
     out = {}
     for _, v in data.items():
         t = str(v.get("ticker", "")).strip().lower()
@@ -57,13 +49,6 @@ def fetch_company_facts(cik10: str) -> dict:
 
 
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
-    """
-    年次相当（USD）を抽出：
-    - form: 10-K系（10-K, 10-K/A, 10-K405など）を許可
-    - fp: FY/CY/Q4 を優先（ただし完全依存しない）
-    - 年次キーは fy があれば fy を優先、無ければ end.year
-    戻り: columns=["year","end","val","fp","form","fy_raw","annual_fp"]
-    """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
     rows = []
@@ -86,7 +71,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
 
         annual_fp = fp in {"FY", "CY", "Q4"}
 
-        # ★年次キー：fyがあればそれを優先（会計年度の“年”として一番分かりやすい）
+        # 年次キー：fyがあればそれを使う（会計年度の年）
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
             year_key = int(fy_raw)
         else:
@@ -109,21 +94,22 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
 
-    # 同一年が複数候補なら：
-    # 1) annual_fp==1（FY/CY/Q4）優先
-    # 2) endが遅い方（より新しい/確定）優先
+    # 同一年が複数候補：annual_fp優先→endが新しいもの
     df = df.sort_values(["year", "annual_fp", "end"]).drop_duplicates(subset=["year"], keep="last")
     df = df.sort_values("year")
     return df
 
 
-def _pick_best_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
+def _pick_best_tag_latest_first(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
-    候補タグを全部試し、最も「年次件数が多い」ものを採用。
-    タイブレーク：最新endが新しいものを優先。
+    タグ選択ルール（長期投資向け）：
+      1) 最新年 max(year) が最大のタグを優先
+      2) 年数 len(df) が多いタグを優先
+      3) 最新 end が新しいタグを優先
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "fp", "form", "fy_raw", "annual_fp"])
+    best_max_year = -1
     best_n = -1
     best_last_end = pd.Timestamp("1900-01-01")
 
@@ -132,12 +118,23 @@ def _pick_best_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None,
         if df.empty:
             continue
 
-        n = len(df)
+        max_year = int(df["year"].max())
+        n = int(len(df))
         last_end = df["end"].max()
 
-        if (n > best_n) or (n == best_n and last_end > best_last_end):
+        better = False
+        if max_year > best_max_year:
+            better = True
+        elif max_year == best_max_year:
+            if n > best_n:
+                better = True
+            elif n == best_n and last_end > best_last_end:
+                better = True
+
+        if better:
             best_tag = tag
             best_df = df
+            best_max_year = max_year
             best_n = n
             best_last_end = last_end
 
@@ -145,11 +142,11 @@ def _pick_best_tag(facts_json: dict, candidates: list[str]) -> tuple[str | None,
 
 
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # Revenueは企業差が大きいので候補を厚めに
+    # Revenue候補：AAPLなどは近年このタグが効きやすい
     revenue_tags = [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",  # 近年の本命になりやすい
         "Revenues",
         "SalesRevenueNet",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
     ]
     op_income_tags = ["OperatingIncomeLoss"]
     pretax_tags = [
@@ -161,16 +158,16 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     meta = {}
 
-    tag, df_rev = _pick_best_tag(facts_json, revenue_tags)
+    tag, df_rev = _pick_best_tag_latest_first(facts_json, revenue_tags)
     meta["revenue_tag"] = tag
 
-    tag, df_op = _pick_best_tag(facts_json, op_income_tags)
+    tag, df_op = _pick_best_tag_latest_first(facts_json, op_income_tags)
     meta["op_income_tag"] = tag
 
-    tag, df_pt = _pick_best_tag(facts_json, pretax_tags)
+    tag, df_pt = _pick_best_tag_latest_first(facts_json, pretax_tags)
     meta["pretax_tag"] = tag
 
-    tag, df_ni = _pick_best_tag(facts_json, net_income_tags)
+    tag, df_ni = _pick_best_tag_latest_first(facts_json, net_income_tags)
     meta["net_income_tag"] = tag
 
     if df_rev.empty:
@@ -277,7 +274,7 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（年次PL / 最新年度まで拾う版）")
+    st.markdown("## 長期ファンダ（年次PL / 最新年度優先版）")
     st.caption(f"認証ユーザー: {authed_email}")
 
     with st.form("fund_form"):
