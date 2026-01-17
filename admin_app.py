@@ -125,7 +125,6 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
 
 # =======================================================
 # (ADD) Mid-term Quant Table (A~J + Threshold + Judgement)
-#   - Integrated under LPPL outputs in UI
 # =======================================================
 MID_TH = {
     # ① 相場適合性
@@ -273,6 +272,59 @@ def _mid_threshold_text(metric: str) -> str:
     return "-"
 
 
+# =======================================================
+# (IMPORTANT) Price fetch helpers (Adj Close unified)
+#   - LPPL / 判定表 / グラフ すべて Adj Close 優先で統一
+# =======================================================
+def _pick_price_field(df: pd.DataFrame, ticker: str) -> pd.Series:
+    """
+    yfinance download columns may be MultiIndex: (field, ticker)
+    Prefer 'Adj Close' then 'Close'.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        if ("Adj Close", ticker) in df.columns:
+            s = df[("Adj Close", ticker)]
+        elif ("Close", ticker) in df.columns:
+            s = df[("Close", ticker)]
+        else:
+            raise ValueError("NO_PRICE_FIELD")
+    else:
+        if "Adj Close" in df.columns:
+            s = df["Adj Close"]
+        elif "Close" in df.columns:
+            s = df["Close"]
+        else:
+            raise ValueError("NO_PRICE_FIELD")
+    return s
+
+
+@st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
+def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
+    df = yf.download(
+        ticker,
+        start=start_date.strftime("%Y-%m-%d"),
+        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=False,
+        progress=False,
+    )
+
+    if df is None or df.empty:
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    s = _pick_price_field(df, ticker).dropna()
+
+    if s.empty or len(s) < 30:
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    vals = s.to_numpy(dtype="float64")
+    if not np.all(np.isfinite(vals)):
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+    if np.any(vals <= 0):
+        raise ValueError("INVALID_TICKER_OR_NO_DATA")
+
+    return s
+
+
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_prices_pair_cached(ticker: str, bench: str, start_date: date, end_date: date) -> pd.DataFrame:
     end_exclusive = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -280,18 +332,23 @@ def fetch_prices_pair_cached(ticker: str, bench: str, start_date: date, end_date
         [ticker, bench],
         start=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
         end=end_exclusive,
-        auto_adjust=True,
+        auto_adjust=False,
         progress=False,
     )
     if df is None or df.empty:
         raise ValueError("NO_DATA_PAIR")
 
-    close = df["Close"] if "Close" in df.columns else None
-    if close is None or close.empty:
-        raise ValueError("NO_CLOSE_PAIR")
+    s_t = _pick_price_field(df, ticker).dropna()
+    s_b = _pick_price_field(df, bench).dropna()
 
-    close = close.dropna()
+    close = pd.concat([s_t.rename(ticker), s_b.rename(bench)], axis=1).dropna()
     if close.empty or len(close) < 30:
+        raise ValueError("NO_DATA_PAIR")
+
+    vals = close.to_numpy(dtype="float64")
+    if not np.all(np.isfinite(vals)):
+        raise ValueError("NO_DATA_PAIR")
+    if np.any(vals <= 0):
         raise ValueError("NO_DATA_PAIR")
 
     return close
@@ -689,52 +746,6 @@ def fit_lppl_negative_bubble(
 
 
 # -------------------------------------------------------
-# Price fetch (cached) + strict validation
-# -------------------------------------------------------
-@st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
-def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
-    df = yf.download(
-        ticker,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-        auto_adjust=False,
-    )
-
-    if df is None or df.empty:
-        raise ValueError("INVALID_TICKER_OR_NO_DATA")
-
-    # Handle MultiIndex
-    if isinstance(df.columns, pd.MultiIndex):
-        if ("Adj Close", ticker) in df.columns:
-            s = df[("Adj Close", ticker)]
-        elif ("Close", ticker) in df.columns:
-            s = df[("Close", ticker)]
-        else:
-            raise ValueError("INVALID_TICKER_OR_NO_DATA")
-    else:
-        if "Adj Close" in df.columns:
-            s = df["Adj Close"]
-        elif "Close" in df.columns:
-            s = df["Close"]
-        else:
-            raise ValueError("INVALID_TICKER_OR_NO_DATA")
-
-    s = s.dropna()
-
-    if s.empty or len(s) < 30:
-        raise ValueError("INVALID_TICKER_OR_NO_DATA")
-
-    vals = s.to_numpy(dtype="float64")
-    if not np.all(np.isfinite(vals)):
-        raise ValueError("INVALID_TICKER_OR_NO_DATA")
-
-    if np.any(vals <= 0):
-        raise ValueError("INVALID_TICKER_OR_NO_DATA")
-
-    return s
-
-
-# -------------------------------------------------------
 # fit cache helpers
 # -------------------------------------------------------
 def series_cache_key(s: pd.Series) -> str:
@@ -836,6 +847,139 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
+# =======================================================
+# (ADD) Graph pack renderer (uses Adj Close unified prices)
+# =======================================================
+def render_graph_pack_from_prices(
+    prices: pd.DataFrame,
+    ticker: str,
+    bench: str,
+    window: int = 20,
+    trading_days: int = 252,
+):
+    # Derived
+    base = prices.iloc[0]
+    index100 = prices / base * 100.0
+    dev = index100 - 100.0
+    ret = np.log(prices / prices.shift(1)).dropna()
+
+    # (A) Cumulative index
+    fig, ax = plt.subplots(figsize=(11, 6))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.plot(index100.index, index100[ticker], label=f"{ticker} (Index)", color="red")
+    ax.plot(index100.index, index100[bench],  label=f"{bench} (Index)",  color="blue")
+    ax.set_title("Cumulative Performance (Index = 100)", color="white")
+    ax.set_xlabel("Date", color="white")
+    ax.set_ylabel("Index", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    st.pyplot(fig)
+
+    # (B) Deviation scatter + regression
+    X = dev[bench].dropna()
+    Y = dev[ticker].dropna()
+    common = X.index.intersection(Y.index)
+    X = X.loc[common]
+    Y = Y.loc[common]
+
+    slope_dev, intercept_dev = np.polyfit(X.values, Y.values, 1)
+    x_sorted = X.sort_values()
+    y_line = slope_dev * x_sorted + intercept_dev
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.scatter(X, Y, alpha=0.6, color="red")
+    ax.plot(x_sorted, y_line, color="blue")
+    ax.set_title(f"Price Deviation Scatter ({ticker} vs {bench}) + Regression", color="white")
+    ax.set_xlabel(f"{bench} Deviation (pp)", color="white")
+    ax.set_ylabel(f"{ticker} Deviation (pp)", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    st.pyplot(fig)
+    st.write(f"Deviation regression: slope={slope_dev:.6f}, intercept={intercept_dev:.6f}")
+
+    # (C) Rolling vol of deviation
+    vol_dev_t = dev[ticker].rolling(int(window)).std(ddof=1)
+    vol_dev_b = dev[bench].rolling(int(window)).std(ddof=1)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker} Deviation Vol", color="red")
+    ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench} Deviation Vol", color="blue")
+    ax.set_title(f"Rolling Volatility of Price Deviation (Window = {int(window)})", color="white")
+    ax.set_xlabel("Date", color="white")
+    ax.set_ylabel("Std of Deviation (pp)", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    st.pyplot(fig)
+
+    # (D) Drawdown
+    p = prices[ticker]
+    running_max = p.cummax()
+    dd = (p / running_max) - 1.0
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.plot(dd.index, dd * 100.0, color="white")
+    ax.set_title(f"Drawdown (%) - {ticker}", color="white")
+    ax.set_xlabel("Date", color="white")
+    ax.set_ylabel("Drawdown (%)", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    st.pyplot(fig)
+    st.write(f"Max Drawdown (%): {dd.min() * 100:.2f}")
+
+    # (E) Daily log return scatter + regression
+    Xr = ret[bench].dropna()
+    Yr = ret[ticker].dropna()
+    common_r = Xr.index.intersection(Yr.index)
+    Xr = Xr.loc[common_r]
+    Yr = Yr.loc[common_r]
+
+    slope_ret, intercept_ret = np.polyfit(Xr.values, Yr.values, 1)
+    xr_sorted = Xr.sort_values()
+    yr_line = slope_ret * xr_sorted + intercept_ret
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.scatter(Xr, Yr, alpha=0.6, color="red")
+    ax.plot(xr_sorted, yr_line, color="blue")
+    ax.set_title(f"Daily Log Returns Scatter ({ticker} vs {bench}) + Regression", color="white")
+    ax.set_xlabel(f"{bench} Daily Log Return", color="white")
+    ax.set_ylabel(f"{ticker} Daily Log Return", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    st.pyplot(fig)
+    st.write(f"Return regression (approx β, α): slope(beta)={slope_ret:.6f}, intercept(alpha/day)={intercept_ret:.6f}")
+
+    # (F) Rolling annualized vol
+    roll_vol = ret[ticker].rolling(int(window)).std(ddof=1) * np.sqrt(float(trading_days))
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+    ax.plot(roll_vol.index, roll_vol * 100.0, color="red")
+    ax.set_title(f"Rolling Volatility of Daily Returns (Annualized, Window = {int(window)}) - {ticker}", color="white")
+    ax.set_xlabel("Date", color="white")
+    ax.set_ylabel("Annualized Vol (%)", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333")
+    st.pyplot(fig)
+
+    if roll_vol.dropna().empty:
+        st.warning("ローリング年率Volが計算できません（windowが大きい/データ不足の可能性）。")
+    else:
+        st.write(f"Annualized Vol mean (%): {roll_vol.mean() * 100:.2f}")
+        st.write(f"Annualized Vol last (%): {roll_vol.dropna().iloc[-1] * 100:.2f}")
+
+
 # -------------------------------------------------------
 # Streamlit app (ADMIN)
 # -------------------------------------------------------
@@ -924,6 +1068,9 @@ def main():
         show_error_black("Tickerが無効、または価格データが取得できません。")
         st.stop()
 
+    # =======================================================
+    # LPPL (Adj Close unified)
+    # =======================================================
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
     except Exception:
@@ -986,7 +1133,7 @@ def main():
                    label=f"t_c（下落） {pd.Timestamp(neg_res['tc_date']).date()}")
 
     ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Price", color="white")
+    ax.set_ylabel("Price (Adj Close preferred)", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
     ax.legend(facecolor="#0b0c0e", labelcolor="white")
@@ -1178,7 +1325,7 @@ def main():
         )
 
     # =======================================================
-    # (ADD) Mid-term Quant 判定表（LPPLの下に表示）
+    # Mid-term Quant 判定表（LPPLの下に表示）
     # =======================================================
     st.markdown("---")
     with st.expander("Mid-term Quant 判定表（A〜J + Threshold + Judgement）", expanded=False):
@@ -1186,7 +1333,7 @@ def main():
         with col_b1:
             bench = st.text_input("Benchmark（指数）", value="^GSPC", help="例: ^GSPC / ^IXIC / ^N225")
         with col_b2:
-            window = st.number_input("WINDOW", min_value=5, max_value=120, value=20, step=1)
+            mid_window = st.number_input("WINDOW（判定表）", min_value=5, max_value=120, value=20, step=1)
 
         try:
             df_mid = build_midterm_quant_table(
@@ -1194,7 +1341,7 @@ def main():
                 bench=bench.strip(),
                 start_date=start_date,
                 end_date=end_date,
-                window=int(window),
+                window=int(mid_window),
             )
             st.dataframe(
                 df_mid[["Block", "Metric", "Value", "Threshold", "Judgement", "Note"]],
@@ -1204,6 +1351,38 @@ def main():
         except Exception as e:
             show_error_black(f"判定表の生成に失敗しました: {e}")
 
+    # =======================================================
+    # (ADD) グラフ（Adj Close unified）
+    # =======================================================
+    st.markdown("---")
+    with st.expander("グラフ（Index/Deviation/Regression/Vol/Drawdown）", expanded=False):
+        gcol1, gcol2, gcol3 = st.columns([2, 1, 1])
+        with gcol1:
+            graph_bench = st.text_input("Benchmark（グラフ用）", value="^GSPC")
+        with gcol2:
+            graph_window = st.number_input("WINDOW（グラフ用）", min_value=5, max_value=120, value=20, step=1)
+        with gcol3:
+            trading_days = st.number_input("Trading days/year", min_value=200, max_value=365, value=252, step=1)
+
+        try:
+            prices_pair = fetch_prices_pair_cached(
+                ticker=ticker.strip(),
+                bench=graph_bench.strip(),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            st.caption(f"Data: {prices_pair.index.min().date()} to {prices_pair.index.max().date()} | rows={len(prices_pair)}")
+            render_graph_pack_from_prices(
+                prices=prices_pair,
+                ticker=ticker.strip(),
+                bench=graph_bench.strip(),
+                window=int(graph_window),
+                trading_days=int(trading_days),
+            )
+        except Exception as e:
+            show_error_black(f"グラフ表示に失敗しました: {e}")
+
 
 if __name__ == "__main__":
     main()
+
