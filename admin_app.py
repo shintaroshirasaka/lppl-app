@@ -129,6 +129,73 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
 
 
 # -------------------------------------------------------
+# Auto labels (標準/高い/バブル的/注意)
+# -------------------------------------------------------
+def _label_r2(r2: float) -> str:
+    if not np.isfinite(r2):
+        return "注意"
+    if r2 >= 0.80:
+        return "高い"
+    if r2 >= 0.65:
+        return "標準"
+    return "注意"
+
+
+def _label_m(m: float) -> str:
+    # “バブル的”を最優先で出したいのでこの順にする
+    if not np.isfinite(m):
+        return "注意"
+    if 0.25 <= m <= 0.70:
+        return "バブル的"
+    if m >= 0.85:
+        return "高い"   # 境界解寄り（m=0.99張り付き等）
+    return "標準"
+
+
+def _label_days_to_tc(days_to_tc: int) -> str:
+    # 近さ/通過で実務ラベル
+    if days_to_tc <= 30:
+        return "注意"   # 危険ゾーン近い/通過
+    if days_to_tc <= 90:
+        return "標準"
+    return "標準"
+
+
+def _label_rmse(rmse: float) -> str:
+    if not np.isfinite(rmse):
+        return "注意"
+    if rmse <= 0.03:
+        return "標準"
+    if rmse <= 0.06:
+        return "標準"
+    return "注意"
+
+
+def _label_omega(omega: float) -> str:
+    if not np.isfinite(omega):
+        return "注意"
+    if omega >= 18:
+        return "注意"   # 極端に高い=ノイズ追随の疑いが増える
+    if omega >= 13:
+        return "高い"   # 短周期寄り
+    if omega >= 6:
+        return "標準"   # 典型帯
+    return "注意"       # 低すぎ=振動が弱く“LPPLらしさ”が薄い可能性
+
+
+def _label_c_over_b(c_over_b: float) -> str:
+    if not np.isfinite(c_over_b):
+        return "注意"
+    if c_over_b >= 2.0:
+        return "注意"   # 過剰に振動が強い可能性
+    if c_over_b >= 1.0:
+        return "高い"
+    if c_over_b >= 0.3:
+        return "標準"
+    return "標準"
+
+
+# -------------------------------------------------------
 # LPPL-like model
 # -------------------------------------------------------
 def lppl(t, A, B, C, m, tc, omega, phi):
@@ -468,7 +535,6 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
 
     msgs: list[str] = []
 
-    # tcの近さ/通過
     if days_to_tc < 0:
         msgs.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
         msgs.append("新規ロングは慎重（追随買いは控える）。保有なら部分利確・ヘッジの検討開始。")
@@ -479,35 +545,30 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
         msgs.append(f"t_c まで残り {days_to_tc} 日（近々の転換を断定する段階ではない）。")
         msgs.append("tcは“ゾーン”として監視。過度な強気の積み増しは避け、上昇の質を点検。")
 
-    # m
     if np.isfinite(m):
-        if 0.3 <= m <= 0.6:
-            msgs.append(f"m={m:.2f}：典型的な“バブル型加速”帯域（0.3–0.6）に近い。")
-        elif m >= 0.8:
-            msgs.append(f"m={m:.2f}：上限寄り。境界解（制約に張り付き）で t_c の一点予測は信頼しにくい。")
+        if 0.25 <= m <= 0.70:
+            msgs.append(f"m={m:.2f}：バブル的な加速帯域の可能性（典型は0.3〜0.6）。")
+        elif m >= 0.85:
+            msgs.append(f"m={m:.2f}：上限寄り。境界解（制約に張り付き）で t_c 一点予測は信頼しにくい。")
             msgs.append("t_c を一点で信じず、危険ゾーンを“広め（数週間〜数ヶ月）”に取って運用。")
         else:
             msgs.append(f"m={m:.2f}：中間帯。典型バブルとは断定しにくいが、構造変化の兆候はあり得る。")
 
-    # R2 / RMSE
     if np.isfinite(r2):
         msgs.append(f"R²={r2:.2f}：形状は一定程度説明できている（ただし予言ではない）。")
     if np.isfinite(rmse):
         msgs.append(f"RMSE(log)={rmse:.3f}：log価格に対する平均誤差の目安（小さいほど安定）。")
 
-    # ω / |C/B|
     if np.isfinite(omega):
-        msgs.append(f"ω={omega:.2f}：短周期の上下動（不安定さ）が出やすい帯域。")
+        msgs.append(f"ω={omega:.2f}：短周期の上下動が出やすい（高いほど短周期）。")
     if np.isfinite(c_over_b):
         msgs.append(f"|C/B|={c_over_b:.2f}：振動の相対強度（大きいほど上下動が荒れやすい）。")
 
-    # まとめ
     if days_to_tc <= 30:
         summary = "tc 近傍（または通過）として、今後は『新規で追いかけない』『利確/ヘッジを織り込む』姿勢に切り替える局面。"
     else:
         summary = "現時点は『危険ゾーンの監視段階』。過熱の兆候が強まるなら、ロングの積み増しを抑えてリスク管理を前倒し。"
 
-    # 重複除去（順序維持）
     seen = set()
     bullets: list[str] = []
     for x in msgs:
@@ -554,7 +615,6 @@ def main():
         }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
 
-        /* custom error box */
         .custom-error {
             background-color: #141518;
             border: 1px solid #2a2c30;
@@ -752,7 +812,7 @@ def main():
         st.markdown(gain_card_html, unsafe_allow_html=True)
 
     # =======================================================
-    # ADMIN METRICS（①〜⑥）
+    # ADMIN METRICS（自動ラベル付き）
     # =======================================================
     st.markdown("### 管理者指標（LPPL 上昇モデル）")
 
@@ -761,17 +821,42 @@ def main():
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_up_norm - end_norm).days)
 
+    r2 = float(bubble_res.get("r2", np.nan))
+    m = float(pdict.get("m", np.nan))
+    rmse = float(bubble_res.get("rmse", np.nan))
+    omega = float(pdict.get("omega", np.nan))
+    c_over_b = float(pdict.get("abs_C_over_B", np.nan))
+    log_period = float(pdict.get("log_period_2pi_over_omega", np.nan))
+
+    # labels
+    lab_r2 = _label_r2(r2)
+    lab_m = _label_m(m)
+    lab_tc = _label_days_to_tc(days_to_tc)
+    lab_rmse = _label_rmse(rmse)
+    lab_omega = _label_omega(omega)
+    lab_cb = _label_c_over_b(c_over_b)
+
     admin_rows = [
-        ["① R²（対数空間）", float(bubble_res.get("r2", np.nan)), "フィット対象は log(価格)。R² も対数空間で計算。"],
-        ["② m", float(pdict.get("m", np.nan)), "加速の曲率。典型的な“バブル的”範囲は概ね 0.3〜0.6（文脈依存）。"],
-        ["③ t_c（日付・近似）", str(tc_up_norm.date()), "tc（データ点単位）をカレンダー日に近似変換。"],
-        ["③ t_c（データ点単位）", float(bubble_res.get("tc_days", np.nan)), "t=0..N-1 のグリッド上の tc（データ点単位）。"],
-        ["④ t_c までの残日数", days_to_tc, "（tc_date - end_date）を日数で計算（正:未来 / 負:過去）。"],
-        ["⑤ RMSE（対数空間）", float(bubble_res.get("rmse", np.nan)), "log(価格) と log(モデル) のRMSE（小さいほど安定）。"],
-        ["⑥ ω", float(pdict.get("omega", np.nan)), "対数時間における振動の角周波数（大きいほど短周期）。"],
-        ["⑥ |C/B|", float(pdict.get("abs_C_over_B", np.nan)), "振動項の相対強度の目安（B≈0の場合は注意）。"],
-        ["⑥ 2π/ω", float(pdict.get("log_period_2pi_over_omega", np.nan)), "対数時間での周期（log-time units）。"],
-        ["フィット期間 N", int(bubble_res.get("N", 0)), "フィットに使用したデータ点数。"],
+        ["① R²（対数空間）", r2,
+         f"フィット対象は log(価格)。R² も対数空間で計算。判定：{lab_r2}（目安：≥0.80 高い / 0.65〜0.80 標準 / <0.65 注意）"],
+        ["② m", m,
+         f"加速の曲率。判定：{lab_m}（目安：0.25〜0.70 バブル的（典型0.3〜0.6） / ≥0.85 高い＝境界解注意）"],
+        ["③ t_c（日付・近似）", str(tc_up_norm.date()),
+         "tc（データ点単位）をカレンダー日に近似変換（1点=1日換算の近似）。"],
+        ["③ t_c（データ点単位）", float(bubble_res.get('tc_days', np.nan)),
+         "t=0..N-1 のグリッド上の tc（データ点単位）。"],
+        ["④ t_c までの残日数", days_to_tc,
+         f"(tc_date - end_date) を日数で計算（正:未来 / 負:過去）。判定：{lab_tc}（目安：≤30 注意 / 30〜90 標準 / >90 標準）"],
+        ["⑤ RMSE（対数空間）", rmse,
+         f"log(価格) と log(モデル) のRMSE（小さいほど安定）。判定：{lab_rmse}（目安：≤0.06 標準 / >0.06 注意）"],
+        ["⑥ ω", omega,
+         f"対数時間における振動の角周波数（大きいほど短周期）。判定：{lab_omega}（目安：6〜13 標準 / ≥13 高い / ≥18 注意）"],
+        ["⑥ |C/B|", c_over_b,
+         f"振動項の相対強度の目安（B≈0の場合は注意）。判定：{lab_cb}（目安：0.3〜1.0 標準 / ≥1.0 高い / ≥2.0 注意）"],
+        ["⑥ 2π/ω", log_period,
+         "対数時間での周期（log-time units）。※基本は ω の判定で十分。"],
+        ["フィット期間 N", int(bubble_res.get("N", 0)),
+         "フィットに使用したデータ点数（短すぎると不安定、長すぎるとレジーム混入に注意）。"],
     ]
     admin_df = pd.DataFrame(admin_rows, columns=["指標", "値", "解説"])
     st.dataframe(admin_df, use_container_width=True)
@@ -790,9 +875,9 @@ def main():
     st.markdown("#### フィット品質フラグ（簡易チェック）")
     binfo = bubble_res.get("bounds_info", {})
     if raw_params.size == 7:
-        A, B, C, m, tc, omega, phi = [float(x) for x in raw_params]
+        A_, B_, C_, m_, tc_, omega_, phi_ = [float(x) for x in raw_params]
     else:
-        A, B, C, m, tc, omega, phi = [np.nan]*7
+        A_, B_, C_, m_, tc_, omega_, phi_ = [np.nan]*7
 
     def near_bound(x, lo, hi, tol=0.02):
         """範囲の端（上下）に tol% 以内で張り付いているか"""
@@ -802,15 +887,15 @@ def main():
         return (r < tol) or (r > 1 - tol)
 
     flags = []
-    if np.isfinite(m) and (m < 0.2 or m > 0.8):
+    if np.isfinite(m_) and (m_ < 0.2 or m_ > 0.8):
         flags.append("m が一般的な“バブル的帯域”（概ね0.3〜0.6）から外れています。解釈は慎重に。")
-    if np.isfinite(B) and B >= 0:
+    if np.isfinite(B_) and B_ >= 0:
         flags.append("B が非負です。上昇LPPL（log価格）では B<0 になることが多いです。")
-    if near_bound(m, binfo.get("m_low", np.nan), binfo.get("m_high", np.nan)):
+    if near_bound(m_, binfo.get("m_low", np.nan), binfo.get("m_high", np.nan)):
         flags.append("m が境界（0.01 もしくは 0.99 付近）に張り付いています → 境界解の可能性。")
-    if near_bound(tc, binfo.get("tc_low", np.nan), binfo.get("tc_high", np.nan)):
+    if near_bound(tc_, binfo.get("tc_low", np.nan), binfo.get("tc_high", np.nan)):
         flags.append("tc が境界付近に張り付いています → 制約に押されている可能性。")
-    if near_bound(omega, binfo.get("omega_low", np.nan), binfo.get("omega_high", np.nan)):
+    if near_bound(omega_, binfo.get("omega_low", np.nan), binfo.get("omega_high", np.nan)):
         flags.append("omega が境界付近です → 振動周波数が制約で決まっている可能性。")
     if np.isfinite(pdict.get("abs_C_over_B", np.nan)) and pdict.get("abs_C_over_B", 0.0) > 2.0:
         flags.append("|C/B| が大きいです → 振動項が支配的になり“それっぽい線”になる場合があるため、視覚妥当性を要確認。")
@@ -842,3 +927,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
