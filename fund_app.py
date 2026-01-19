@@ -61,7 +61,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
     """
     年次相当（USD）抽出（10-K系）
     """
-    # 名前空間の解決 (us-gaap, srt, custom...)
     facts_root = facts_json.get("facts", {})
     node = []
     
@@ -163,7 +162,7 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
 
 def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None) -> tuple[str | None, pd.DataFrame]:
     """
-    【新機能】XBRL内の全タグをスキャンし、キーワードに合致し、かつ最新データを持つタグを探す
+    XBRL内の全タグをスキャンし、キーワードに合致し、かつ最新データを持つタグを探す
     """
     if exclude_keywords is None:
         exclude_keywords = []
@@ -529,10 +528,12 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         year,
     )
 
+    # 1. 資産の補完
     if (not np.isfinite(nca)) and np.isfinite(assets_total) and np.isfinite(ca):
         nca = assets_total - ca
         nca_tag = "CALC:Assets-AssetsCurrent"
 
+    # 2. 負債合計の補完
     if (not np.isfinite(liab_total)):
         if np.isfinite(assets_total) and np.isfinite(eq):
             liab_total = assets_total - eq
@@ -541,6 +542,7 @@ def build_bs_latest_simple(facts_json: dict, year: int):
             liab_total = cl + ncl
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
 
+    # 3. 負債内訳の補完
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
@@ -684,6 +686,29 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     )
 
 
+# 【修正】欠落していた関数を追加
+def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
+    col1, col2 = st.columns(2)
+
+    def _pie(ax, labels, sizes, title):
+        ax.pie(sizes, labels=labels, autopct=lambda p: f"{p:.0f}%", startangle=90, textprops={"color": "white"})
+        ax.set_title(title, color="white")
+
+    with col1:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"A: Assets Top3 + Other ({year})")
+        st.pyplot(fig)
+
+    with col2:
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
+        fig.patch.set_facecolor("#0b0c0e")
+        ax.set_facecolor("#0b0c0e")
+        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: L+E Top3 + Other ({year})")
+        st.pyplot(fig)
+
+
 # =========================
 # CF (annual)
 # =========================
@@ -770,14 +795,11 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
     # 1. RPO (動的検索)
-    # 検索キーワード: PerformanceObligation, Backlog, TransactionPrice
-    # インテル対策: Standard tagが廃止された可能性があるため、キーワードで最新年を持つタグを探す
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
     tag_rpo, df_rpo = _find_best_tag_dynamic(facts_json, keywords=rpo_keywords)
     meta["rpo_tag"] = tag_rpo
 
-    # 2. 契約負債（Total, Current, Noncurrent）
-    # インテル対策: ContractLiability系だけでなく、DeferredRevenue, CustomerAdvancesなども含める
+    # 2. 契約負債
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
     # Total
@@ -801,7 +823,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     years = [int(y) for y in years]
     
-    # 古すぎるデータしかない場合への警告（直近2年以内にデータがない）
+    # 古すぎるデータしかない場合への警告
     current_year = pd.Timestamp.now().year
     if years and max(years) < current_year - 2:
         meta["warning"] = f"Latest data is from {max(years)}. Tags might be discontinued."
@@ -825,7 +847,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_curr = val_at(df_clc, y)
         cl_non = val_at(df_cln, y)
 
-        # 補完: Totalが欠損 or 古い場合、Current+Noncurrentで補完
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
         
