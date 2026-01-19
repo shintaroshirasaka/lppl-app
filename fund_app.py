@@ -1,4 +1,3 @@
-# fund_app.py
 import os
 import requests
 import pandas as pd
@@ -9,11 +8,18 @@ import streamlit as st
 import yfinance as yf
 import re
 
-from auth_gate import require_admin_token
+# ※ auth_gateファイルが同階層にある前提です
+try:
+    from auth_gate import require_admin_token
+except ImportError:
+    # テスト用にダミー関数を用意（必要に応じて削除してください）
+    def require_admin_token():
+        return "debug@example.com"
 
 # =========================
 # SEC settings
 # =========================
+# 実際のメールアドレスを設定することを強く推奨します（SECの制限回避のため）
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -34,16 +40,20 @@ def _safe_float(x):
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def fetch_ticker_cik_map() -> dict:
-    r = requests.get(TICKER_CIK_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    out = {}
-    for _, v in data.items():
-        t = str(v.get("ticker", "")).strip().lower()
-        cik = str(v.get("cik_str", "")).strip()
-        if t and cik.isdigit():
-            out[t] = cik.zfill(10)
-    return out
+    try:
+        r = requests.get(TICKER_CIK_URL, headers={"User-Agent": SEC_USER_AGENT}, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        out = {}
+        for _, v in data.items():
+            t = str(v.get("ticker", "")).strip().lower()
+            cik = str(v.get("cik_str", "")).strip()
+            if t and cik.isdigit():
+                out[t] = cik.zfill(10)
+        return out
+    except Exception as e:
+        st.error(f"Tickerマップの取得に失敗しました: {e}")
+        return {}
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
@@ -373,9 +383,10 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
     
-    colors = cm.get_cmap("tab20", len(df_m.columns))
+    # 【修正】cm.get_cmapは非推奨のため、plt.get_cmapに変更
+    colors = plt.get_cmap("tab20")(np.linspace(0, 1, len(df_m.columns)))
     
-    df_m.plot(kind="bar", stacked=True, ax=ax, colormap=colors, width=0.8)
+    df_m.plot(kind="bar", stacked=True, ax=ax, color=colors, width=0.8)
     
     ax.set_ylabel("Revenue (Million USD)", color="white")
     ax.tick_params(colors="white", axis='x', rotation=0)
@@ -686,7 +697,6 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     )
 
 
-# 【復元】plot_two_pies 関数
 def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
     col1, col2 = st.columns(2)
 
@@ -802,8 +812,12 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     # 2. 契約負債
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
-    # Total
-    tag_cl, df_cl = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, exclude_keywords=["Current", "Noncurrent"])
+    # 【重要修正】 "Tax" と "Benefit" を除外キーワードに追加し、税金費用（DeferredIncomeTax...）を拾わないようにした
+    tag_cl, df_cl = _find_best_tag_dynamic(
+        facts_json, 
+        keywords=cl_keywords, 
+        exclude_keywords=["Current", "Noncurrent", "Tax", "Benefit"]
+    )
     meta["contract_liab_tag"] = tag_cl
     
     # Current
@@ -1148,7 +1162,6 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     return out, meta
 
 
-# 【復元】plot_eps 関数
 def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
@@ -1198,7 +1211,8 @@ def render(authed_email: str):
         st.error("Tickerを入力してください。")
         st.stop()
 
-    cik10 = fetch_ticker_cik_map().get(t)
+    cik_map = fetch_ticker_cik_map()
+    cik10 = cik_map.get(t)
     if not cik10:
         st.error("このTickerのCIKが見つかりませんでした。")
         st.stop()
