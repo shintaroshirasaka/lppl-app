@@ -191,8 +191,10 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
         # 必須条件チェック
         if not any(k.lower() in tag_lower for k in keywords):
             continue
+        # 除外キーワードチェック
         if any(ek.lower() in tag_lower for ek in exclude_keywords):
             continue
+        # 末尾チェック
         if must_end_with and not tag_lower.endswith(must_end_with.lower()):
             continue
             
@@ -772,40 +774,14 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     return out, meta
 
 
-def plot_cf_annual(table: pd.DataFrame, title: str):
-    df = table.copy()
-    x = df["FY"].astype(str).tolist()
-    cfo = df["CFO(M$)"].astype(float).to_numpy()
-    cfi = df["CFI(M$)"].astype(float).to_numpy()
-    cff = df["CFF(M$)"].astype(float).to_numpy()
-    fcf = df["FCF(M$)"].astype(float).to_numpy()
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-
-    ax.plot(x, cfo, label="CFO", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, fcf, label="FCF", linewidth=2.5, marker="o", markersize=6)
-
-    ax.set_ylabel("Million USD", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
-    st.pyplot(fig)
-
-
 # =========================
-# RPO tab - FIXED (STRICTER SEARCH V2)
+# RPO tab - FIXED (FINAL)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
     # 1. RPO (受注残) の検索
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
-    # "Satisfied" (充足済み) や "Recognized" (認識済み) は除外
     rpo_exclude = ["Satisfied", "Recognized", "Billings"]
     
     tag_rpo, df_rpo = _find_best_tag_dynamic(
@@ -818,8 +794,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     # 2. 契約負債 (Contract Liabilities) の検索
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
-    # 【修正 V2】除外キーワードをさらに強化 ("Recognized" を追加)
-    # これにより "ContractWithCustomerLiabilityRevenueRecognized" (認識された収益) を除外
+    # 【最終修正】除外キーワードの整理
     base_exclude = [
         "Tax", "Benefit", "Expense",       # 税金・費用
         "IncreaseDecrease", "ChangeIn",    # 増減（CF項目）
@@ -827,12 +802,8 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "Billings", "CumulativeEffect"     # その他
     ]
     
-    # Total用: Current/Noncurrent の区別があるものも除外したいが、
-    # Totalタグが見つからない場合は Current+Noncurrent で計算するので、
-    # ここでは "Current" 等は除外リストに入れない方が安全な場合もあるが、
-    # 一般的には "DeferredRevenue" (Total) を狙うため Current/Noncurrent を除外する。
+    # Total用
     cl_exclude_total = base_exclude + ["Current", "Noncurrent"]
-    
     tag_cl, df_cl = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
@@ -850,8 +821,11 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     meta["contract_liab_current_tag"] = tag_clc
     
-    # Noncurrent用
-    cl_exclude_noncurrent = base_exclude + ["Current"]
+    # Noncurrent用 - 【ここが修正ポイント】
+    # "Noncurrent" タグを探す際、"Current" という文字列を除外してはいけない（Noncurrentに含まれるため）
+    # 代わりに must_end_with="Noncurrent" で流動負債の誤ヒットを防ぐ
+    cl_exclude_noncurrent = base_exclude
+    
     tag_cln, df_cln = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
@@ -895,8 +869,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
         
-        # Totalがない場合、Currentだけで補完するかは慎重に（Noncurrentがゼロの企業もあるため）
-        # NoncurrentタグがNULLで、Currentがある場合、Total = Current とみなすロジックを追加
+        # TotalもNoncurrentもなく、Currentだけある場合、Total = Current とみなす
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and tag_cln is None:
              cl_total = cl_curr
 
