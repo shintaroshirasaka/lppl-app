@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import streamlit as st
 import yfinance as yf
+import re
 
 from auth_gate import require_admin_token
 
@@ -59,26 +60,27 @@ def fetch_company_facts(cik10: str) -> dict:
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
-    【修正】us-gaapだけでなく、企業固有のカスタムタグ（例: intc, nvda）も検索する
     """
-    # 1. まず us-gaap を探す
+    # 名前空間の解決 (us-gaap, srt, custom...)
     facts_root = facts_json.get("facts", {})
-    node = facts_root.get("us-gaap", {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    node = []
     
-    # 2. なければ srt (Standard Reporting Taxonomy) を探す
-    if not node:
-        node = facts_root.get("srt", {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    # 既知のプレフィックスを探す
+    for prefix in ["us-gaap", "srt", "ifrs-full", "dei"]:
+        if prefix in facts_root and xbrl_tag in facts_root[prefix]:
+            node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
+            break
     
-    # 3. それでもなければ、カスタムタグ（キーが us-gaap/srt/dei 以外）を探す
+    # 見つからなければカスタムタグ（例: intc, nvda）を探す
     if not node:
         for k in facts_root.keys():
-            if k not in ["us-gaap", "srt", "dei"]:
-                node = facts_root.get(k, {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
-                if node:
-                    break
+            if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
+                if xbrl_tag in facts_root[k]:
+                    node = facts_root[k][xbrl_tag].get("units", {}).get("USD", [])
+                    if node:
+                        break
     
     rows = []
-
     for x in node:
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
@@ -86,12 +88,12 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         val = x.get("val")
         fy_raw = x.get("fy", None)
         filed = x.get("filed")
-        
         segment_obj = x.get("segment")
 
         if not end or val is None:
             continue
-        if not form.startswith("10-K"):
+        # 10-K, 20-F (ADR), 40-F などを許容
+        if not (form.startswith("10-K") or form.startswith("20-F") or form.startswith("40-F")):
             continue
 
         end_ts = pd.to_datetime(end, errors="coerce")
@@ -106,16 +108,14 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         else:
             year_key = int(end_ts.year)
 
-        rows.append(
-            {
-                "year": year_key,
-                "end": end_ts,
-                "val": _safe_float(val),
-                "annual_fp": int(annual_fp),
-                "filed": filed_ts,
-                "segment": segment_obj
-            }
-        )
+        rows.append({
+            "year": year_key,
+            "end": end_ts,
+            "val": _safe_float(val),
+            "annual_fp": int(annual_fp),
+            "filed": filed_ts,
+            "segment": segment_obj
+        })
 
     if not rows:
         return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "filed", "segment"])
@@ -135,7 +135,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
 def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
-    タグ選択（最新年優先→件数→end）
+    固定リストからタグを選択（最新年優先）
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
@@ -158,6 +158,62 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
             best_tag, best_df = tag, df
             best_max_year, best_n, best_last_end = max_year, n, last_end
 
+    return best_tag, best_df
+
+
+def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None) -> tuple[str | None, pd.DataFrame]:
+    """
+    【新機能】XBRL内の全タグをスキャンし、キーワードに合致し、かつ最新データを持つタグを探す
+    """
+    if exclude_keywords is None:
+        exclude_keywords = []
+    
+    # 検索対象の全タグをリストアップ
+    all_tags = []
+    facts_root = facts_json.get("facts", {})
+    for prefix in facts_root:
+        for tag in facts_root[prefix]:
+            all_tags.append(tag)
+            
+    # キーワードマッチング
+    candidates = []
+    for tag in all_tags:
+        tag_lower = tag.lower()
+        
+        # 必須条件チェック
+        if not any(k.lower() in tag_lower for k in keywords):
+            continue
+        if any(ek.lower() in tag_lower for ek in exclude_keywords):
+            continue
+        if must_end_with and not tag_lower.endswith(must_end_with.lower()):
+            continue
+            
+        candidates.append(tag)
+    
+    if not candidates:
+        return None, pd.DataFrame()
+
+    # データ抽出と評価
+    best_tag = None
+    best_df = pd.DataFrame(columns=["year"])
+    best_score = (-1, -1) # (max_year, count)
+
+    for tag in candidates:
+        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        if df.empty:
+            continue
+            
+        max_year = int(df["year"].max())
+        count = len(df)
+        
+        # 最新年を最優先、次にデータ数
+        score = (max_year, count)
+        
+        if score > best_score:
+            best_score = score
+            best_tag = tag
+            best_df = df
+            
     return best_tag, best_df
 
 
@@ -332,22 +388,19 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
 
 
 # =========================
-# PL (annual) + Operating margin
+# PL (annual)
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     revenue_priority = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
     net_income_priority = ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "IncomeLossFromContinuingOperations"]
-
     op_income_tags = ["OperatingIncomeLoss"]
     pretax_tags = ["IncomeBeforeIncomeTaxes", "PretaxIncome", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"]
 
     meta = {}
     rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority)
     meta["revenue_composite"] = rev_meta
-
     ni_df, ni_meta = _build_composite_by_year_usd(facts_json, net_income_priority)
     meta["net_income_composite"] = ni_meta
-
     op_tag, df_op = _pick_best_tag_latest_first_usd(facts_json, op_income_tags)
     pt_tag, df_pt = _pick_best_tag_latest_first_usd(facts_json, pretax_tags)
     meta["op_income_tag"] = op_tag
@@ -476,12 +529,10 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         year,
     )
 
-    # 1. 資産の補完
     if (not np.isfinite(nca)) and np.isfinite(assets_total) and np.isfinite(ca):
         nca = assets_total - ca
         nca_tag = "CALC:Assets-AssetsCurrent"
 
-    # 2. 負債合計の補完
     if (not np.isfinite(liab_total)):
         if np.isfinite(assets_total) and np.isfinite(eq):
             liab_total = assets_total - eq
@@ -490,7 +541,6 @@ def build_bs_latest_simple(facts_json: dict, year: int):
             liab_total = cl + ncl
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
 
-    # 3. 負債内訳の補完
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
@@ -634,28 +684,6 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     )
 
 
-def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
-    col1, col2 = st.columns(2)
-
-    def _pie(ax, labels, sizes, title):
-        ax.pie(sizes, labels=labels, autopct=lambda p: f"{p:.0f}%", startangle=90, textprops={"color": "white"})
-        ax.set_title(title, color="white")
-
-    with col1:
-        fig, ax = plt.subplots(figsize=(5.5, 5.0))
-        fig.patch.set_facecolor("#0b0c0e")
-        ax.set_facecolor("#0b0c0e")
-        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"A: Assets Top3 + Other ({year})")
-        st.pyplot(fig)
-
-    with col2:
-        fig, ax = plt.subplots(figsize=(5.5, 5.0))
-        fig.patch.set_facecolor("#0b0c0e")
-        ax.set_facecolor("#0b0c0e")
-        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: L+E Top3 + Other ({year})")
-        st.pyplot(fig)
-
-
 # =========================
 # CF (annual)
 # =========================
@@ -736,62 +764,47 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO tab - FIXED (More tags & Calc)
+# RPO tab - FIXED (DYNAMIC SEARCH)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
-    # 【修正】候補タグの強化（CustomerAdvancesを追加）
-    rpo_candidates = [
-        "RevenueRemainingPerformanceObligation",
-        "RemainingPerformanceObligation", 
-        "TransactionPriceAllocatedToRemainingPerformanceObligations", 
-        "RemainingPerformanceObligationRevenue"
-    ]
-    
-    contract_liab_candidates = [
-        "ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "DeferredCredits", 
-        "CustomerAdvancesAndOther", "CustomerAdvances"
-    ]
-    
-    contract_liab_current_candidates = [
-        "ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredIncomeCurrent",
-        "CustomerAdvancesCurrent"
-    ]
-    
-    contract_liab_noncurrent_candidates = [
-        "ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueNoncurrent", "DeferredIncomeNoncurrent",
-        "CustomerAdvancesNoncurrent"
-    ]
-
-    # 1. RPO
-    tag_rpo, df_rpo = _pick_best_tag_latest_first_usd(facts_json, rpo_candidates)
+    # 1. RPO (動的検索)
+    # 検索キーワード: PerformanceObligation, Backlog, TransactionPrice
+    # インテル対策: Standard tagが廃止された可能性があるため、キーワードで最新年を持つタグを探す
+    rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
+    tag_rpo, df_rpo = _find_best_tag_dynamic(facts_json, keywords=rpo_keywords)
     meta["rpo_tag"] = tag_rpo
 
     # 2. 契約負債（Total, Current, Noncurrent）
-    tag_cl, df_cl = _pick_best_tag_latest_first_usd(facts_json, contract_liab_candidates)
-    tag_clc, df_clc = _pick_best_tag_latest_first_usd(facts_json, contract_liab_current_candidates)
-    tag_cln, df_cln = _pick_best_tag_latest_first_usd(facts_json, contract_liab_noncurrent_candidates)
+    # インテル対策: ContractLiability系だけでなく、DeferredRevenue, CustomerAdvancesなども含める
+    cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
+    # Total
+    tag_cl, df_cl = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, exclude_keywords=["Current", "Noncurrent"])
     meta["contract_liab_tag"] = tag_cl
+    
+    # Current
+    tag_clc, df_clc = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, must_end_with="Current")
     meta["contract_liab_current_tag"] = tag_clc
+    
+    # Noncurrent
+    tag_cln, df_cln = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, must_end_with="Noncurrent")
     meta["contract_liab_noncurrent_tag"] = tag_cln
 
     # すべての年を収集
     years = sorted(
-        set(df_rpo["year"].tolist()) | 
-        set(df_cl["year"].tolist()) | 
-        set(df_clc["year"].tolist()) |
-        set(df_cln["year"].tolist())
+        set(df_rpo["year"].tolist() if not df_rpo.empty else []) | 
+        set(df_cl["year"].tolist() if not df_cl.empty else []) | 
+        set(df_clc["year"].tolist() if not df_clc.empty else []) |
+        set(df_cln["year"].tolist() if not df_cln.empty else [])
     )
     years = [int(y) for y in years]
     
-    # 【修正】直近2年以内にデータがない古いタグしかない場合、ミスリードを防ぐため空にする
+    # 古すぎるデータしかない場合への警告（直近2年以内にデータがない）
     current_year = pd.Timestamp.now().year
     if years and max(years) < current_year - 2:
-        meta["warning"] = "Data is too old, possibly discontinued tag."
-        # 強制的に空にする場合は以下をコメントアウト解除
-        # return pd.DataFrame(), meta
+        meta["warning"] = f"Latest data is from {max(years)}. Tags might be discontinued."
 
     if not years:
         return pd.DataFrame(), meta
@@ -812,7 +825,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_curr = val_at(df_clc, y)
         cl_non = val_at(df_cln, y)
 
-        # 【修正】Totalが欠損、またはTotalよりCurrent/Noncurrentの合計の方が新しい（データがある）場合、合計を採用
+        # 補完: Totalが欠損 or 古い場合、Current+Noncurrentで補完
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
         
@@ -840,7 +853,7 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     ax.set_facecolor("#0b0c0e")
 
     if np.isfinite(rpo).any():
-        ax.plot(x, rpo, label="RPO", linewidth=2.5, marker="o", markersize=6)
+        ax.plot(x, rpo, label="RPO / Backlog", linewidth=2.5, marker="o", markersize=6)
     if np.isfinite(cl).any():
         ax.plot(x, cl, label="Contract Liabilities (Total)", linewidth=2.5, marker="o", markersize=6)
     if np.isfinite(clc).any():
@@ -961,7 +974,6 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
 def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> tuple[pd.Series, dict]:
     """
     yfinanceから株式分割情報を取得し、各日付時点のデータにかけるべき補正係数を計算する。
-    【重要】yfinanceはティッカーが大文字でないとデータを返さないことが多い。
     """
     factors = pd.Series(1.0, index=date_index)
     
@@ -1114,24 +1126,6 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val_adjusted"].astype(float)})
     meta["years"] = out["FY"].tolist()
     return out, meta
-
-
-def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
-    df = table.copy()
-    x = df["FY"].astype(str).tolist()
-    eps = df["EPS"].astype(float).to_numpy()
-
-    fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-
-    ax.plot(x, eps, label="EPS (Adjusted)", linewidth=2.5, marker="o", markersize=6)
-    ax.set_ylabel(unit_label, color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
-    st.pyplot(fig)
 
 
 # =========================
