@@ -426,7 +426,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest) - FIXED
+# BS (latest)
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -472,8 +472,7 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         nca = assets_total - ca
         nca_tag = "CALC:Assets-AssetsCurrent"
 
-    # 2. 負債合計の補完（【修正】タグ欠損対策）
-    # Liabilitiesタグがない場合、Accounting Equation (A = L + E) から L = A - E で逆算
+    # 2. 負債合計の補完
     if (not np.isfinite(liab_total)):
         if np.isfinite(assets_total) and np.isfinite(eq):
             liab_total = assets_total - eq
@@ -483,11 +482,9 @@ def build_bs_latest_simple(facts_json: dict, year: int):
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
 
     # 3. 負債内訳の補完
-    # (a) 固定負債の算出
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
-    # (b) 流動負債の算出（【修正】ここが欠けていたため表示されなかった）
     elif (not np.isfinite(cl)) and np.isfinite(liab_total) and np.isfinite(ncl):
         cl = liab_total - ncl
         cl_tag = "CALC:Liabilities-LiabilitiesNoncurrent"
@@ -574,7 +571,6 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
         year,
     )
-    # 補完ロジックを追加（パイチャート用）
     if not np.isfinite(total_liab) and np.isfinite(total_assets) and np.isfinite(total_eq):
         total_liab = total_assets - total_eq
 
@@ -731,27 +727,46 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO tab - FIXED (More tags)
+# RPO tab - FIXED (More tags & Calc)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
-    # 【修正】タグ候補を拡充
-    rpo_candidates = ["RemainingPerformanceObligation", "TransactionPriceAllocatedToRemainingPerformanceObligations", "RemainingPerformanceObligationRevenue"]
+    # 【修正】タグ候補を大幅に拡充（特にRevenue...系）
+    rpo_candidates = [
+        "RevenueRemainingPerformanceObligation", # 追加
+        "RemainingPerformanceObligation", 
+        "TransactionPriceAllocatedToRemainingPerformanceObligations", 
+        "RemainingPerformanceObligationRevenue"
+    ]
     contract_liab_candidates = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "DeferredCredits"]
     contract_liab_current_candidates = ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredIncomeCurrent"]
+    contract_liab_noncurrent_candidates = ["ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueNoncurrent", "DeferredIncomeNoncurrent"]
 
-    tag, df_rpo = _pick_best_tag_latest_first_usd(facts_json, rpo_candidates)
-    meta["rpo_tag"] = tag
-    tag, df_cl = _pick_best_tag_latest_first_usd(facts_json, contract_liab_candidates)
-    meta["contract_liab_tag"] = tag
-    tag, df_clc = _pick_best_tag_latest_first_usd(facts_json, contract_liab_current_candidates)
-    meta["contract_liab_current_tag"] = tag
+    # 1. RPO
+    tag_rpo, df_rpo = _pick_best_tag_latest_first_usd(facts_json, rpo_candidates)
+    meta["rpo_tag"] = tag_rpo
 
-    years = sorted(set(df_rpo["year"].tolist()) | set(df_cl["year"].tolist()) | set(df_clc["year"].tolist()))
+    # 2. 契約負債（Total, Current, Noncurrent）
+    tag_cl, df_cl = _pick_best_tag_latest_first_usd(facts_json, contract_liab_candidates)
+    tag_clc, df_clc = _pick_best_tag_latest_first_usd(facts_json, contract_liab_current_candidates)
+    tag_cln, df_cln = _pick_best_tag_latest_first_usd(facts_json, contract_liab_noncurrent_candidates)
+    
+    meta["contract_liab_tag"] = tag_cl
+    meta["contract_liab_current_tag"] = tag_clc
+    meta["contract_liab_noncurrent_tag"] = tag_cln
+
+    # すべての年を収集
+    years = sorted(
+        set(df_rpo["year"].tolist()) | 
+        set(df_cl["year"].tolist()) | 
+        set(df_clc["year"].tolist()) |
+        set(df_cln["year"].tolist())
+    )
     years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
 
+    # 値取得用ヘルパー
     def val_at(df: pd.DataFrame, y: int) -> float:
         if df.empty:
             return np.nan
@@ -762,7 +777,27 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
     rows = []
     for y in years:
-        rows.append([y, _to_musd(val_at(df_rpo, y)), _to_musd(val_at(df_cl, y)), _to_musd(val_at(df_clc, y))])
+        rpo = val_at(df_rpo, y)
+        cl_total = val_at(df_cl, y)
+        cl_curr = val_at(df_clc, y)
+        cl_non = val_at(df_cln, y)
+
+        # 【修正】Totalが欠損、またはTotalよりCurrent/Noncurrentの合計の方が新しい（データがある）場合、合計を採用
+        # 例: TotalがNaNで、CurrentとNoncurrentがある場合 -> 足す
+        # 例: Totalがあるが0で... (通常XBRLで0はありうるが、ここではNaN判定)
+        if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
+            cl_total = cl_curr + cl_non
+            # メタデータに記録したいが、行ごとの処理なのでここでは割愛（全体傾向としてタグで判断）
+        
+        # 逆に、TotalはあるがNoncurrentがない場合などの補完も可能だが、
+        # ここでは「表示」のためにTotalを優先的に確保する
+
+        rows.append([
+            y, 
+            _to_musd(rpo), 
+            _to_musd(cl_total), 
+            _to_musd(cl_curr)
+        ])
 
     out = pd.DataFrame(rows, columns=["FY", "RPO(M$)", "ContractLiab(M$)", "ContractLiabCurrent(M$)"])
     meta["years"] = years
