@@ -383,7 +383,7 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
     
-    # 【修正】cm.get_cmapは非推奨のため、plt.get_cmapに変更
+    # cm.get_cmapは非推奨のため、plt.get_cmapに変更
     colors = plt.get_cmap("tab20")(np.linspace(0, 1, len(df_m.columns)))
     
     df_m.plot(kind="bar", stacked=True, ax=ax, color=colors, width=0.8)
@@ -799,33 +799,56 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO tab - FIXED (DYNAMIC SEARCH)
+# RPO tab - FIXED (STRICTER SEARCH)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
-    # 1. RPO (動的検索)
+    # 1. RPO (受注残) の検索
+    # "Satisfied" (充足済み) や "Recognized" (認識済み) は「残高」ではなく「売上」なので除外する
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
-    tag_rpo, df_rpo = _find_best_tag_dynamic(facts_json, keywords=rpo_keywords)
+    rpo_exclude = ["Satisfied", "Recognized", "Billings"]
+    
+    tag_rpo, df_rpo = _find_best_tag_dynamic(
+        facts_json, 
+        keywords=rpo_keywords, 
+        exclude_keywords=rpo_exclude
+    )
     meta["rpo_tag"] = tag_rpo
 
-    # 2. 契約負債
+    # 2. 契約負債 (Contract Liabilities) の検索
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
-    # 【重要修正】 "Tax" と "Benefit" を除外キーワードに追加し、税金費用（DeferredIncomeTax...）を拾わないようにした
+    # 【重要修正】除外キーワードを強化
+    # "IncreaseDecrease" (増減), "Tax" (税金), "Benefit" (便益), "Expense" (費用) を徹底的に除外
+    cl_exclude_common = ["Current", "Noncurrent", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    
+    # Total
     tag_cl, df_cl = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
-        exclude_keywords=["Current", "Noncurrent", "Tax", "Benefit"]
+        exclude_keywords=cl_exclude_common
     )
     meta["contract_liab_tag"] = tag_cl
     
-    # Current
-    tag_clc, df_clc = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, must_end_with="Current")
+    # Current (IncreaseDecreaseなどは除外するが、Currentは必須)
+    cl_exclude_current = ["Noncurrent", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    tag_clc, df_clc = _find_best_tag_dynamic(
+        facts_json, 
+        keywords=cl_keywords, 
+        exclude_keywords=cl_exclude_current,
+        must_end_with="Current"
+    )
     meta["contract_liab_current_tag"] = tag_clc
     
     # Noncurrent
-    tag_cln, df_cln = _find_best_tag_dynamic(facts_json, keywords=cl_keywords, must_end_with="Noncurrent")
+    cl_exclude_noncurrent = ["Current", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    tag_cln, df_cln = _find_best_tag_dynamic(
+        facts_json, 
+        keywords=cl_keywords, 
+        exclude_keywords=cl_exclude_noncurrent,
+        must_end_with="Noncurrent"
+    )
     meta["contract_liab_noncurrent_tag"] = tag_cln
 
     # すべての年を収集
