@@ -59,15 +59,23 @@ def fetch_company_facts(cik10: str) -> dict:
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
-    include_segments=Trueの場合、セグメント情報(segment)を含むデータも返し、解析用の列を追加する。
+    【修正】us-gaapだけでなく、企業固有のカスタムタグ（例: intc, nvda）も検索する
     """
-    us = facts_json.get("facts", {}).get("us-gaap", {})
-    # タグがない場合、srt (Standard Reporting Taxonomy) も探す
-    if not us.get(xbrl_tag):
-        srt = facts_json.get("facts", {}).get("srt", {})
-        node = srt.get(xbrl_tag, {}).get("units", {}).get("USD", [])
-    else:
-        node = us.get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    # 1. まず us-gaap を探す
+    facts_root = facts_json.get("facts", {})
+    node = facts_root.get("us-gaap", {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    
+    # 2. なければ srt (Standard Reporting Taxonomy) を探す
+    if not node:
+        node = facts_root.get("srt", {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
+    
+    # 3. それでもなければ、カスタムタグ（キーが us-gaap/srt/dei 以外）を探す
+    if not node:
+        for k in facts_root.keys():
+            if k not in ["us-gaap", "srt", "dei"]:
+                node = facts_root.get(k, {}).get(xbrl_tag, {}).get("units", {}).get("USD", [])
+                if node:
+                    break
     
     rows = []
 
@@ -127,7 +135,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
 def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
     """
-    タグ選択（最新年優先→件数→end）※連結データ用
+    タグ選択（最新年優先→件数→end）
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
@@ -144,7 +152,6 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
         n = int(len(df))
         last_end = df["end"].max()
 
-        # 条件: より新しい年があるか、同じ年ならデータ数が多いか、同じならendが新しいか
         if (max_year > best_max_year) or (
             max_year == best_max_year and (n > best_n or (n == best_n and last_end > best_last_end))
         ):
@@ -155,6 +162,8 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
 
 
 def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
+    if table.empty:
+        return table
     latest_year = int(table["FY"].max())
     min_year = latest_year - int(n_years) + 1
     return table[table["FY"] >= min_year].sort_values("FY").reset_index(drop=True)
@@ -731,16 +740,29 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
-    # 【修正】タグ候補を大幅に拡充（特にRevenue...系）
+    
+    # 【修正】候補タグの強化（CustomerAdvancesを追加）
     rpo_candidates = [
-        "RevenueRemainingPerformanceObligation", # 追加
+        "RevenueRemainingPerformanceObligation",
         "RemainingPerformanceObligation", 
         "TransactionPriceAllocatedToRemainingPerformanceObligations", 
         "RemainingPerformanceObligationRevenue"
     ]
-    contract_liab_candidates = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "DeferredCredits"]
-    contract_liab_current_candidates = ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredIncomeCurrent"]
-    contract_liab_noncurrent_candidates = ["ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueNoncurrent", "DeferredIncomeNoncurrent"]
+    
+    contract_liab_candidates = [
+        "ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "DeferredCredits", 
+        "CustomerAdvancesAndOther", "CustomerAdvances"
+    ]
+    
+    contract_liab_current_candidates = [
+        "ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredIncomeCurrent",
+        "CustomerAdvancesCurrent"
+    ]
+    
+    contract_liab_noncurrent_candidates = [
+        "ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueNoncurrent", "DeferredIncomeNoncurrent",
+        "CustomerAdvancesNoncurrent"
+    ]
 
     # 1. RPO
     tag_rpo, df_rpo = _pick_best_tag_latest_first_usd(facts_json, rpo_candidates)
@@ -763,6 +785,14 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         set(df_cln["year"].tolist())
     )
     years = [int(y) for y in years]
+    
+    # 【修正】直近2年以内にデータがない古いタグしかない場合、ミスリードを防ぐため空にする
+    current_year = pd.Timestamp.now().year
+    if years and max(years) < current_year - 2:
+        meta["warning"] = "Data is too old, possibly discontinued tag."
+        # 強制的に空にする場合は以下をコメントアウト解除
+        # return pd.DataFrame(), meta
+
     if not years:
         return pd.DataFrame(), meta
 
@@ -783,15 +813,9 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_non = val_at(df_cln, y)
 
         # 【修正】Totalが欠損、またはTotalよりCurrent/Noncurrentの合計の方が新しい（データがある）場合、合計を採用
-        # 例: TotalがNaNで、CurrentとNoncurrentがある場合 -> 足す
-        # 例: Totalがあるが0で... (通常XBRLで0はありうるが、ここではNaN判定)
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
-            # メタデータに記録したいが、行ごとの処理なのでここでは割愛（全体傾向としてタグで判断）
         
-        # 逆に、TotalはあるがNoncurrentがない場合などの補完も可能だが、
-        # ここでは「表示」のためにTotalを優先的に確保する
-
         rows.append([
             y, 
             _to_musd(rpo), 
