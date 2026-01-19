@@ -686,7 +686,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     )
 
 
-# 【修正】欠落していた関数を追加
+# 【復元】plot_two_pies 関数
 def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
     col1, col2 = st.columns(2)
 
@@ -823,7 +823,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     years = [int(y) for y in years]
     
-    # 古すぎるデータしかない場合への警告
     current_year = pd.Timestamp.now().year
     if years and max(years) < current_year - 2:
         meta["warning"] = f"Latest data is from {max(years)}. Tags might be discontinued."
@@ -1147,6 +1146,25 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val_adjusted"].astype(float)})
     meta["years"] = out["FY"].tolist()
     return out, meta
+
+
+# 【復元】plot_eps 関数
+def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    eps = df["EPS"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, eps, label="EPS (Adjusted)", linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel(unit_label, color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    st.pyplot(fig)
 
 
 # =========================
