@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import streamlit as st
 import yfinance as yf
 import re
@@ -799,14 +798,14 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO tab - FIXED (STRICTER SEARCH)
+# RPO tab - FIXED (STRICTER SEARCH V2)
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
     # 1. RPO (受注残) の検索
-    # "Satisfied" (充足済み) や "Recognized" (認識済み) は「残高」ではなく「売上」なので除外する
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
+    # "Satisfied" (充足済み) や "Recognized" (認識済み) は除外
     rpo_exclude = ["Satisfied", "Recognized", "Billings"]
     
     tag_rpo, df_rpo = _find_best_tag_dynamic(
@@ -819,20 +818,30 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     # 2. 契約負債 (Contract Liabilities) の検索
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
-    # 【重要修正】除外キーワードを強化
-    # "IncreaseDecrease" (増減), "Tax" (税金), "Benefit" (便益), "Expense" (費用) を徹底的に除外
-    cl_exclude_common = ["Current", "Noncurrent", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    # 【修正 V2】除外キーワードをさらに強化 ("Recognized" を追加)
+    # これにより "ContractWithCustomerLiabilityRevenueRecognized" (認識された収益) を除外
+    base_exclude = [
+        "Tax", "Benefit", "Expense",       # 税金・費用
+        "IncreaseDecrease", "ChangeIn",    # 増減（CF項目）
+        "Recognized", "Satisfied",         # 認識額（PL項目）
+        "Billings", "CumulativeEffect"     # その他
+    ]
     
-    # Total
+    # Total用: Current/Noncurrent の区別があるものも除外したいが、
+    # Totalタグが見つからない場合は Current+Noncurrent で計算するので、
+    # ここでは "Current" 等は除外リストに入れない方が安全な場合もあるが、
+    # 一般的には "DeferredRevenue" (Total) を狙うため Current/Noncurrent を除外する。
+    cl_exclude_total = base_exclude + ["Current", "Noncurrent"]
+    
     tag_cl, df_cl = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
-        exclude_keywords=cl_exclude_common
+        exclude_keywords=cl_exclude_total
     )
     meta["contract_liab_tag"] = tag_cl
     
-    # Current (IncreaseDecreaseなどは除外するが、Currentは必須)
-    cl_exclude_current = ["Noncurrent", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    # Current用
+    cl_exclude_current = base_exclude + ["Noncurrent"]
     tag_clc, df_clc = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
@@ -841,8 +850,8 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     meta["contract_liab_current_tag"] = tag_clc
     
-    # Noncurrent
-    cl_exclude_noncurrent = ["Current", "Tax", "Benefit", "Expense", "IncreaseDecrease", "ChangeIn"]
+    # Noncurrent用
+    cl_exclude_noncurrent = base_exclude + ["Current"]
     tag_cln, df_cln = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
@@ -851,7 +860,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     meta["contract_liab_noncurrent_tag"] = tag_cln
 
-    # すべての年を収集
+    # --- 集計ロジック ---
     years = sorted(
         set(df_rpo["year"].tolist() if not df_rpo.empty else []) | 
         set(df_cl["year"].tolist() if not df_cl.empty else []) | 
@@ -867,7 +876,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     if not years:
         return pd.DataFrame(), meta
 
-    # 値取得用ヘルパー
     def val_at(df: pd.DataFrame, y: int) -> float:
         if df.empty:
             return np.nan
@@ -883,9 +891,15 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_curr = val_at(df_clc, y)
         cl_non = val_at(df_cln, y)
 
+        # Totalがない場合、Current + Noncurrent で補完
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
         
+        # Totalがない場合、Currentだけで補完するかは慎重に（Noncurrentがゼロの企業もあるため）
+        # NoncurrentタグがNULLで、Currentがある場合、Total = Current とみなすロジックを追加
+        if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and tag_cln is None:
+             cl_total = cl_curr
+
         rows.append([
             y, 
             _to_musd(rpo), 
