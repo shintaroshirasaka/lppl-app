@@ -774,6 +774,32 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     return out, meta
 
 
+# 【追加】Missing plot function for CF
+def plot_cf_annual(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    cfo = df["CFO(M$)"].astype(float).to_numpy()
+    cfi = df["CFI(M$)"].astype(float).to_numpy()
+    cff = df["CFF(M$)"].astype(float).to_numpy()
+    fcf = df["FCF(M$)"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor("#0b0c0e")
+    ax.set_facecolor("#0b0c0e")
+
+    ax.plot(x, cfo, label="CFO", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, fcf, label="FCF", linewidth=2.5, marker="o", markersize=6)
+
+    ax.set_ylabel("Million USD", color="white")
+    ax.tick_params(colors="white")
+    ax.grid(color="#333333", alpha=0.6)
+    ax.set_title(title, color="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    st.pyplot(fig)
+
+
 # =========================
 # RPO tab - FIXED (FINAL)
 # =========================
@@ -1275,6 +1301,7 @@ def render(authed_email: str):
             st.stop()
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
         st.caption(f"CF: 表示 {len(cf_disp)} 年（最新年: {int(cf_table['FY'].max())}）")
+        # 【修正】定義した plot_cf_annual を呼び出す
         plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
         st.markdown("### 年次CF（百万USD）")
         st.dataframe(
