@@ -79,7 +79,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
             node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
             break
     
-    # 見つからなければカスタムタグ（例: intc, nvda）を探す
+    # 見つからなければカスタムタグ（例: intc, nvda, mu）を探す
     if not node:
         for k in facts_root.keys():
             if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
@@ -649,14 +649,20 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
 
-    # A
+    # A: Assets Breakdown
+    # 【修正】PPEタグ候補の拡充: Micron社等が使用する長い結合タグを追加
     asset_candidates = [
-        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]),
-        ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet"]),
-        ("Inventory", ["InventoryNet"]),
-        ("PPE (Net)", ["PropertyPlantAndEquipmentNet"]),
+        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
+        ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet", "ReceivablesNetCurrent"]),
+        ("Inventory", ["InventoryNet", "Inventory"]),
+        ("PPE (Net)", [
+            "PropertyPlantAndEquipmentNet",
+            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+            "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetNet",
+            "PropertyPlantAndEquipment"
+        ]),
         ("Goodwill", ["Goodwill"]),
-        ("Intangibles", ["IntangibleAssetsNetExcludingGoodwill"]),
+        ("Intangibles", ["IntangibleAssetsNetExcludingGoodwill", "FiniteLivedIntangibleAssetsNet", "IntangibleAssetsNet"]),
     ]
     asset_items = []
     for name, tags in asset_candidates:
@@ -668,16 +674,31 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
-    # B
+    # B: Liabilities + Equity Breakdown
+    # 【修正】負債項目のタグも拡充: 買掛金、長期負債等の結合タグを追加
     le_candidates = [
-        ("Accounts Payable", ["AccountsPayableCurrent"]),
+        ("Accounts Payable", [
+            "AccountsPayableCurrent",
+            "AccountsPayableTradeCurrent",
+            "AccountsPayableAndAccruedLiabilitiesCurrent"
+        ]),
         ("Deferred Revenue / Contract Liabilities", ["ContractWithCustomerLiabilityCurrent", "ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueCurrent", "DeferredRevenueNoncurrent", "DeferredRevenue"]),
-        ("Long-term Debt (Noncurrent)", ["LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligationsNoncurrent"]),
-        ("Long-term Debt (Current)", ["LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"]),
+        ("Long-term Debt (Noncurrent)", [
+            "LongTermDebtNoncurrent",
+            "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
+            "LongTermDebt",
+            "LongTermDebtAndFinanceLeaseObligationsNoncurrent"
+        ]),
+        ("Long-term Debt (Current)", [
+            "LongTermDebtCurrent",
+            "LongTermDebtAndCapitalLeaseObligationsCurrent",
+            "DebtCurrent",
+            "LongTermDebtAndFinanceLeaseObligationsCurrent"
+        ]),
         ("Other Current Liabilities", ["OtherLiabilitiesCurrent"]),
         ("Other Noncurrent Liabilities", ["OtherLiabilitiesNoncurrent"]),
         ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
-        ("Additional Paid-in Capital", ["AdditionalPaidInCapital"]),
+        ("Additional Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
         ("AOCI", ["AccumulatedOtherComprehensiveIncomeLossNetOfTax"]),
         ("Common Stock", ["CommonStockValue"]),
     ]
