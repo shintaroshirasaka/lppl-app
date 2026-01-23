@@ -565,7 +565,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest)
+# BS (latest) - FIXED PIE CHART LOGIC
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -691,25 +691,35 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     st.pyplot(fig)
 
 
+# ▼▼ 修正箇所：Otherが消える問題を修正 ▼▼
 def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
+    # 正の値だけ抽出してソート
     pos = [(n, float(v)) for n, v in items if np.isfinite(v) and float(v) > 0]
     pos.sort(key=lambda x: x[1], reverse=True)
+    
     top = pos[:3]
     top_sum = sum(v for _, v in top)
     
+    # 内訳合計(sum_all_pos)が報告上のTotal(total)を超えている場合（自己株式等の影響）に対応
+    # 大きい方を円グラフの全体として採用する
+    sum_all_pos = sum(v for _, v in pos)
+    effective_total = max(total, sum_all_pos) if (np.isfinite(total) and total > 0) else sum_all_pos
+    
     # 合計との差額をOtherとして算出
-    other = max(total - top_sum, 0.0) if np.isfinite(total) and total > 0 else 0.0
-    if not np.isfinite(total) or total <= 0:
-          other = sum(v for _, v in pos[3:])
+    other = max(effective_total - top_sum, 0.0)
 
     labels = [n for n, _ in top]
     sizes = [v for _, v in top]
+    
     if other > 0:
         labels.append("Other")
         sizes.append(other)
-    if sum(sizes) <= 0:
-        return (["No data"], [1.0])
+        
+    if not sizes:
+        return ["No data"], [1.0]
+        
     return labels, sizes
+# ▲▲ 修正ここまで ▲▲
 
 
 def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]:
@@ -728,6 +738,13 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_liab = total_assets - total_eq
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
+    
+    # ▼▼ 修正箇所: 負債＋純資産の合計を総資産に合わせる（Balance Sheetの等式 A = L + E を強制）▼▼
+    # これにより、積み上げ項目が足りない場合や少数株主持分等が漏れている場合でも、
+    # 差額が自動的に「Other」として円グラフに表示されるようになります。
+    if np.isfinite(total_assets) and total_assets > 0:
+        total_le = total_assets
+    # ▲▲ 修正ここまで ▲▲
 
     # A: Assets Breakdown
     asset_candidates = [
@@ -749,8 +766,12 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         meta[f"asset_{name}_tag"] = used
         if np.isfinite(v):
             asset_items.append((name, v))
+            
+    # 総資産データがない場合のバックアップ
+    sum_asset_items = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     if not np.isfinite(total_assets) or total_assets <= 0:
-        total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
+        total_assets = sum_asset_items
+    
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
     # B: Liabilities + Equity Breakdown
@@ -801,8 +822,10 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         if other_eq > 0:
             le_items.append(("Other Equity (Calc)", other_eq))
 
+    # 負債・純資産合計の調整（内訳合計より小さい場合は内訳合計を採用）
+    sum_le_items = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
     if not np.isfinite(total_le) or total_le <= 0:
-        total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
+        total_le = sum_le_items
         
     b_labels, b_sizes = _top3_plus_other(le_items, total_le)
 
