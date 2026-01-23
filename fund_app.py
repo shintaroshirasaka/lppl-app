@@ -296,7 +296,7 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> t
 
 
 # =========================
-# Segment Analysis Helpers (FIXED)
+# Segment Analysis Helpers (FIXED for KO/AVGO)
 # =========================
 def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -333,12 +333,18 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # (7) セグメント: タグ候補を拡充（SalesToExternalCustomers等はKOで使用）
+    # (2)(7) セグメント: KO/AVGO対応のため、SalesToExternalCustomers等を追加
     revenue_tags = [
-        "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
-        "SalesToExternalCustomers", "RevenuesNetOfInterestExpense", 
-        "SalesRevenueGoodsNet", "SalesRevenueServicesNet", 
-        "SegmentReportingInformationRevenue"
+        "SalesToExternalCustomers", 
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues", 
+        "SalesRevenueNet", 
+        "SalesRevenueGoodsNet", 
+        "SalesRevenueServicesNet",
+        "SegmentReportingInformationRevenue",
+        "RevenuesNetOfInterestExpense",
+        "NetOperatingRevenues",
+        "OperatingRevenues"
     ]
     
     all_seg_rows = []
@@ -361,14 +367,15 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     def classify_axis(dim_name: str) -> str:
         d = dim_name.lower()
-        # (7) セグメント: 軸判定の拡充 (StatementOperatingActivitiesSegmentAxis等)
+        # (7) セグメント: 軸判定キーワードの拡充
         business_keywords = [
             "businesssegment", "segmentreporting", "productor", "statementbusinesssegmentsaxis", 
             "statementoperatingactivitiessegmentaxis", "consolidationitems", "segmentdomain", 
-            "operatingsegments", "concentrationrisk"
+            "operatingsegments", "concentrationrisk", "entitywidedisclosure"
         ]
         geo_keywords = [
-            "geographical", "geoaxis", "statementgeographicalaxis", "entitywideinfo", "reportablegeographical"
+            "geographical", "geoaxis", "statementgeographicalaxis", "entitywideinfo", "reportablegeographical", 
+            "disaggregationofrevenue"
         ]
 
         if any(x in d for x in business_keywords):
@@ -388,13 +395,11 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     merged["member_clean"] = merged["member"].apply(clean_member)
     
-    # 除外キーワード
-    exclude_keywords = ["total", "elimination", "adjust", "consolidation", "allother", "intersegment"]
+    # 除外キーワード: "Total"などは除外するが、Corporateなどは残す場合もある
+    exclude_keywords = ["total", "elimination", "allother", "intersegment"]
     
     def is_excluded(m_clean):
         m_lower = m_clean.lower()
-        # CorporateはKOでは事業セグメントの一部として扱われることもあるが、調整額の可能性も高い。
-        # ここでは明らかに不要なものを除外
         if any(ek in m_lower for ek in exclude_keywords):
             return True
         return False
@@ -438,10 +443,10 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
 
 
 # =========================
-# PL (annual) - FIXED
+# PL (annual) - FIXED & IMPROVED (6)
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # (6) PL: 売上高と営業利益をComposite（合成）で取得し、過去データの欠落を防ぐ
+    # (6) PL: 売上・営業利益・税引前利益をComposite（合成）で取得し、データの連続性を確保
     revenue_priority = [
         "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "Revenues", 
@@ -450,16 +455,22 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         "OperatingRevenue",
         "OperatingRevenues"
     ]
+    
     net_income_priority = ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "IncomeLossFromContinuingOperations"]
     
-    # 営業利益もタグの揺らぎに対応
     op_income_priority = ["OperatingIncomeLoss", "OperatingIncome"]
     
-    pretax_tags = ["IncomeBeforeIncomeTaxes", "PretaxIncome", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"]
+    # 【修正点】税引前利益のタグ候補を大幅に追加（NULL対策）
+    pretax_priority = [
+        "IncomeBeforeIncomeTaxes", 
+        "PretaxIncome", 
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems", 
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"
+    ]
 
     meta = {}
     
-    # コンポジット処理
     rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority)
     meta["revenue_composite"] = rev_meta
     
@@ -469,9 +480,19 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     op_df, op_meta = _build_composite_by_year_usd(facts_json, op_income_priority)
     meta["op_income_composite"] = op_meta
     
-    # 日付取得用（Pretaxなどから）
-    pt_tag, df_pt = _pick_best_tag_latest_first_usd(facts_json, pretax_tags)
-    meta["pretax_tag"] = pt_tag
+    # 【修正点】税引前利益も単一タグ検索ではなくComposite（合成）を使用し、取得漏れを防ぐ
+    pt_df, pt_meta = _build_composite_by_year_usd(facts_json, pretax_priority)
+    meta["pretax_composite"] = pt_meta
+    
+    # End日付取得用（どれかから取る）
+    end_map = {}
+    if not ni_df.empty:
+         # NetIncomeの元データから日付を取得するための再抽出
+         # Composite結果には日付が含まれていないため、代表タグから日付を引く
+         best_ni_tag = ni_meta["available_tags"][0] if ni_meta["available_tags"] else "NetIncomeLoss"
+         date_df = _extract_annual_series_usd(facts_json, best_ni_tag)
+         if not date_df.empty:
+             end_map = dict(zip(date_df["year"].astype(int), date_df["end"]))
 
     if rev_df.empty:
         return pd.DataFrame(), meta
@@ -479,11 +500,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     rev_map = dict(zip(rev_df["year"].astype(int), rev_df["value"].astype(float)))
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
     op_map = dict(zip(op_df["year"].astype(int), op_df["value"].astype(float))) if not op_df.empty else {}
-    pt_map = dict(zip(df_pt["year"].astype(int), df_pt["val"].astype(float))) if not df_pt.empty else {}
-    
-    end_map = {}
-    if not df_pt.empty:
-        end_map = dict(zip(df_pt["year"].astype(int), df_pt["end"]))
+    pt_map = dict(zip(pt_df["year"].astype(int), pt_df["value"].astype(float))) if not pt_df.empty else {}
 
     years = sorted(set(rev_map.keys()) | set(op_map.keys()) | set(pt_map.keys()) | set(ni_map.keys()))
     rows = []
@@ -499,7 +516,6 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         ])
 
     out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "Pretax(M$)", "NetIncome(M$)"])
-    # 年次でソートしてグラフ描画順序を保証
     out = out.sort_values("FY").reset_index(drop=True)
     meta["years"] = years
     return out, meta
@@ -537,7 +553,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 def plot_operating_margin(table: pd.DataFrame, title: str):
     df = table.copy()
-    # ソートを保証
     df = df.sort_values("FY")
     x = df["FY"].astype(str).tolist()
     rev = df["Revenue(M$)"].astype(float).to_numpy()
@@ -562,7 +577,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest) - FIXED (1)
+# BS (latest)
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -617,7 +632,7 @@ def build_bs_latest_simple(facts_json: dict, year: int):
             liab_total = cl + ncl
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
             
-    # 3. (1) 負債合計が計算値（資産-資本）と大きく乖離している場合、計算値を採用（利益剰余金過大表示対策）
+    # 3. (1) 負債合計が計算値と大きく乖離している場合、計算値を採用（利益剰余金過大表示対策）
     if np.isfinite(assets_total) and np.isfinite(eq):
          calc_liab = assets_total - eq
          if np.isfinite(liab_total) and abs(liab_total - calc_liab) > (assets_total * 0.05):
@@ -726,7 +741,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
 
-    # A: Assets Breakdown
+    # A: Assets
     asset_candidates = [
         ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
         ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet", "ReceivablesNetCurrent"]),
@@ -750,10 +765,10 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_assets = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
-    # B: Liabilities + Equity Breakdown
+    # B: Liabilities + Equity
     le_items = []
     
-    # --- Liabilities ---
+    # Liabilities
     liab_candidates = [
         ("Accounts Payable", ["AccountsPayableCurrent", "AccountsPayableTradeCurrent", "AccountsPayable"]),
         ("Deferred Revenue", ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredRevenue"]),
@@ -775,7 +790,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         if other_liab > 0:
             le_items.append(("Other Liabilities (Calc)", other_liab))
 
-    # --- Equity ---
+    # Equity
     eq_candidates = [
         ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
         ("Add. Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
@@ -976,10 +991,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     years = [int(y) for y in years]
     
-    current_year = pd.Timestamp.now().year
-    if years and max(years) < current_year - 2:
-        meta["warning"] = f"Latest data is from {max(years)}. Tags might be discontinued."
-
     if not years:
         return pd.DataFrame(), meta
 
@@ -1019,6 +1030,10 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
 
 def plot_rpo_annual(table: pd.DataFrame, title: str):
+    if table.empty:
+        st.info("No data available for RPO plotting.")
+        return
+
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     rpo = df["RPO(M$)"].astype(float).to_numpy()
@@ -1483,3 +1498,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```</candidate>
