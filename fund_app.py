@@ -296,7 +296,7 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> t
 
 
 # =========================
-# Segment Analysis Helpers (FIXED)
+# Segment Analysis Helpers
 # =========================
 def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -333,12 +333,12 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # (7) セグメント: タグ候補を拡充（SalesToExternalCustomers等はKOで使用）
+    # (7) セグメント: タグ候補を拡充
     revenue_tags = [
         "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "SalesToExternalCustomers", "RevenuesNetOfInterestExpense", 
         "SalesRevenueGoodsNet", "SalesRevenueServicesNet", 
-        "SegmentReportingInformationRevenue"
+        "SegmentReportingInformationRevenue", "NetOperatingRevenues"
     ]
     
     all_seg_rows = []
@@ -361,7 +361,6 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     def classify_axis(dim_name: str) -> str:
         d = dim_name.lower()
-        # (7) セグメント: 軸判定の拡充 (StatementOperatingActivitiesSegmentAxis等)
         business_keywords = [
             "businesssegment", "segmentreporting", "productor", "statementbusinesssegmentsaxis", 
             "statementoperatingactivitiessegmentaxis", "consolidationitems", "segmentdomain", 
@@ -393,8 +392,6 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     def is_excluded(m_clean):
         m_lower = m_clean.lower()
-        # CorporateはKOでは事業セグメントの一部として扱われることもあるが、調整額の可能性も高い。
-        # ここでは明らかに不要なものを除外
         if any(ek in m_lower for ek in exclude_keywords):
             return True
         return False
@@ -438,24 +435,33 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
 
 
 # =========================
-# PL (annual) - FIXED
+# PL (annual) - MODIFIED
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # (6) PL: 売上高と営業利益をComposite（合成）で取得し、過去データの欠落を防ぐ
+    # (1) 売上高: NetOperatingRevenues 等を追加して過去データを補完
     revenue_priority = [
         "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "Revenues", 
+        "NetOperatingRevenues", # コカ・コーラの過去データ
+        "SalesRevenueGoodsNet", # 消費財メーカー
         "SalesRevenueNet", 
         "SalesRevenue",
         "OperatingRevenue",
         "OperatingRevenues"
     ]
-    net_income_priority = ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "IncomeLossFromContinuingOperations"]
     
-    # 営業利益もタグの揺らぎに対応
+    # (3) 純利益: 株主帰属分を最優先に変更（他社アプリとの整合性向上）
+    net_income_priority = [
+        "NetIncomeLossAvailableToCommonStockholdersBasic", # 最優先
+        "NetIncomeLoss", 
+        "ProfitLoss", 
+        "IncomeLossFromContinuingOperations"
+    ]
+    
+    # 営業利益
     op_income_priority = ["OperatingIncomeLoss", "OperatingIncome"]
     
-    pretax_tags = ["IncomeBeforeIncomeTaxes", "PretaxIncome", "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItems", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"]
+    # (2) 税前利益は削除
 
     meta = {}
     
@@ -468,10 +474,6 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     
     op_df, op_meta = _build_composite_by_year_usd(facts_json, op_income_priority)
     meta["op_income_composite"] = op_meta
-    
-    # 日付取得用（Pretaxなどから）
-    pt_tag, df_pt = _pick_best_tag_latest_first_usd(facts_json, pretax_tags)
-    meta["pretax_tag"] = pt_tag
 
     if rev_df.empty:
         return pd.DataFrame(), meta
@@ -479,13 +481,14 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     rev_map = dict(zip(rev_df["year"].astype(int), rev_df["value"].astype(float)))
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
     op_map = dict(zip(op_df["year"].astype(int), op_df["value"].astype(float))) if not op_df.empty else {}
-    pt_map = dict(zip(df_pt["year"].astype(int), df_pt["val"].astype(float))) if not df_pt.empty else {}
     
+    # 日付取得用（Pretax削除に伴い、データが豊富なRevenueタグ等から代表して取得）
+    tag_for_date, df_date = _pick_best_tag_latest_first_usd(facts_json, ["Revenues", "NetOperatingRevenues", "NetIncomeLoss"])
     end_map = {}
-    if not df_pt.empty:
-        end_map = dict(zip(df_pt["year"].astype(int), df_pt["end"]))
+    if not df_date.empty:
+        end_map = dict(zip(df_date["year"].astype(int), df_date["end"]))
 
-    years = sorted(set(rev_map.keys()) | set(op_map.keys()) | set(pt_map.keys()) | set(ni_map.keys()))
+    years = sorted(set(rev_map.keys()) | set(op_map.keys()) | set(ni_map.keys()))
     rows = []
     for y in years:
         end = end_map.get(y)
@@ -494,12 +497,12 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
             y, end_str,
             _to_musd(rev_map.get(y, np.nan)),
             _to_musd(op_map.get(y, np.nan)),
-            _to_musd(pt_map.get(y, np.nan)),
+            # 税前利益(Pretax)を削除
             _to_musd(ni_map.get(y, np.nan))
         ])
 
-    out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "Pretax(M$)", "NetIncome(M$)"])
-    # 年次でソートしてグラフ描画順序を保証
+    # カラム定義からPretaxを削除
+    out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "NetIncome(M$)"])
     out = out.sort_values("FY").reset_index(drop=True)
     meta["years"] = years
     return out, meta
@@ -510,7 +513,7 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     x = df["FY"].astype(str).tolist()
     revenue = df["Revenue(M$)"].astype(float).to_numpy()
     op = df["OpIncome(M$)"].astype(float).to_numpy()
-    pt = df["Pretax(M$)"].astype(float).to_numpy()
+    # Pretax削除
     ni = df["NetIncome(M$)"].astype(float).to_numpy()
 
     fig, ax_left = plt.subplots(figsize=(12, 5))
@@ -518,8 +521,8 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     ax_left.set_facecolor("#0b0c0e")
 
     ax_left.plot(x, op, label="Operating Income", linewidth=2.5, marker="o", markersize=6)
-    ax_left.plot(x, pt, label="Pretax Income", linewidth=2.5, marker="o", markersize=6)
-    ax_left.plot(x, ni, label="Net Income", linewidth=2.5, marker="o", markersize=6)
+    # Pretax描画削除
+    ax_left.plot(x, ni, label="Net Income (Attributable)", linewidth=2.5, marker="o", markersize=6)
 
     ax_left.set_ylabel("Profit (Million USD)", color="white")
     ax_left.tick_params(colors="white")
@@ -562,7 +565,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest) - FIXED (1)
+# BS (latest)
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -697,7 +700,7 @@ def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list
     # 合計との差額をOtherとして算出
     other = max(total - top_sum, 0.0) if np.isfinite(total) and total > 0 else 0.0
     if not np.isfinite(total) or total <= 0:
-         other = sum(v for _, v in pos[3:])
+          other = sum(v for _, v in pos[3:])
 
     labels = [n for n, _ in top]
     sizes = [v for _, v in top]
@@ -790,7 +793,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
             le_items.append((name, v))
             sum_eq_found += v
         elif name == "Treasury Stock" and np.isfinite(v) and v < 0:
-             sum_eq_found += v
+              sum_eq_found += v
 
     # その他資本（計算値）
     if np.isfinite(total_eq) and total_eq > sum_eq_found:
@@ -1056,7 +1059,8 @@ def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str]) -> tuple
 def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
 
-    ni_priority = ["NetIncomeLoss", "ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "IncomeLossFromContinuingOperations"]
+    # 純利益: 基礎データとして株主帰属分を優先（EPSとの整合性）
+    ni_priority = ["NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss", "ProfitLoss", "IncomeLossFromContinuingOperations"]
     ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority)
     meta["net_income_composite"] = ni_meta
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
@@ -1248,7 +1252,8 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
 
 def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataFrame, dict]:
     meta = {}
-    eps_tags = ["EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted", "EarningsPerShareDiluted"]
+    # (3) EPS: Dilutedを最優先
+    eps_tags = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 
     best_df = pd.DataFrame()
     best_tag = None
@@ -1257,6 +1262,7 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
         df = _extract_eps_series_any_unit(facts_json, tag)
         if df.empty:
             continue
+        # 優先順位順に走査し、より多くのデータ(または最新)があれば採用
         if best_df.empty:
             best_df = df
             best_tag = tag
@@ -1298,7 +1304,7 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(x, eps, label="EPS (Adjusted)", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, eps, label="EPS (Adjusted, Diluted)", linewidth=2.5, marker="o", markersize=6)
     ax.set_ylabel(unit_label, color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333", alpha=0.6)
@@ -1361,8 +1367,9 @@ def render(authed_email: str):
         st.caption(f"PL: 表示 {len(pl_disp)} 年（最新年: {int(pl_table['FY'].max())}）")
         plot_pl_annual(pl_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
         st.markdown("### 年次PL（百万USD）")
+        # Pretaxを削除し、純利益をAttributableベースで表示
         st.dataframe(
-            pl_disp.style.format({"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "Pretax(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}),
+            pl_disp.style.format({"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
@@ -1470,7 +1477,7 @@ def render(authed_email: str):
             unit_label = eps_meta.get("eps_unit", "USD/share")
             split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
             st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}{split_note}")
-            plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS", unit_label="USD/share")
+            plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS (Diluted)", unit_label="USD/share")
             st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
             with st.expander("EPSデバッグ", expanded=False):
                 st.write(eps_meta)
