@@ -11,14 +11,13 @@ import re
 try:
     from auth_gate import require_admin_token
 except ImportError:
-    # テスト用にダミー関数を用意（必要に応じて削除してください）
+    # テスト用にダミー関数を用意
     def require_admin_token():
         return "debug@example.com"
 
 # =========================
 # SEC settings
 # =========================
-# 実際のメールアドレスを設定することを強く推奨します（SECの制限回避のため）
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -58,9 +57,12 @@ def fetch_ticker_cik_map() -> dict:
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def fetch_company_facts(cik10: str) -> dict:
     url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
-    r = requests.get(url, headers=SEC_HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
 
 
 # =========================
@@ -71,6 +73,9 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
     年次相当（USD）抽出（10-K系）
     """
     facts_root = facts_json.get("facts", {})
+    if not facts_root:
+        return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "filed", "segment"])
+
     node = []
     
     # 既知のプレフィックスを探す
@@ -79,7 +84,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
             node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
             break
     
-    # 見つからなければカスタムタグ（例: intc, nvda, mu）を探す
+    # 見つからなければカスタムタグを探す
     if not node:
         for k in facts_root.keys():
             if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
@@ -230,9 +235,16 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
 def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
     if table.empty:
         return table
-    latest_year = int(table["FY"].max())
+    if "FY" in table.columns:
+        col = "FY"
+    elif "year" in table.columns:
+        col = "year"
+    else:
+        return table
+
+    latest_year = int(table[col].max())
     min_year = latest_year - int(n_years) + 1
-    return table[table["FY"] >= min_year].sort_values("FY").reset_index(drop=True)
+    return table[table[col] >= min_year].sort_values(col).reset_index(drop=True)
 
 
 # =========================
@@ -281,7 +293,7 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> t
 
 
 # =========================
-# Segment Analysis Helpers
+# Segment Analysis Helpers (FIXED)
 # =========================
 def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -317,9 +329,11 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # (2) セグメント: タグ候補の拡充
     revenue_tags = [
         "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
-        "RevenuesNetOfInterestExpense", "SalesRevenueGoodsNet", "SalesRevenueServicesNet"
+        "RevenuesNetOfInterestExpense", "SalesRevenueGoodsNet", "SalesRevenueServicesNet",
+        "CostOfGoodsAndServicesSold" # 稀に売上が取れず原価でセグメントが出る場合の予備
     ]
     
     all_seg_rows = []
@@ -341,9 +355,10 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     def classify_axis(dim_name: str) -> str:
         d = dim_name.lower()
-        if "businesssegments" in d or "segmentreporting" in d or "productor" in d:
+        # (2) セグメント: 軸判定の緩和
+        if any(x in d for x in ["businesssegment", "segmentreporting", "productor", "statementbusinesssegmentsaxis", "concentrationrisk"]):
             return "Business"
-        if "geographical" in d or "geoaxis" in d:
+        if any(x in d for x in ["geographical", "geoaxis", "statementgeographicalaxis", "entitywideinfo"]):
             return "Geography"
         return "Other"
 
@@ -351,14 +366,14 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     def clean_member(m: str) -> str:
         if ":" in m:
-            m = m.split(":")[1]
+            m = m.split(":")[-1]
         if m.endswith("Member"):
             m = m[:-6]
         return m
 
     merged["member_clean"] = merged["member"].apply(clean_member)
     
-    exclude_keywords = ["total", "elimination", "corporate", "adjust", "consolidation"]
+    exclude_keywords = ["total", "elimination", "corporate", "adjust", "consolidation", "allother"]
     merged = merged[~merged["member_clean"].str.lower().str.contains("|".join(exclude_keywords))]
 
     def pivot_data(axis_type):
@@ -499,7 +514,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 
 
 # =========================
-# BS (latest)
+# BS (latest) - FIXED
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
     df = _extract_annual_series_usd(facts_json, "Assets")
@@ -526,7 +541,9 @@ def build_bs_latest_simple(facts_json: dict, year: int):
     meta = {"bs_year": year}
 
     assets_tag, assets_total = _value_for_year_usd(facts_json, ["Assets"], year)
-    liab_tag, liab_total = _value_for_year_usd(facts_json, ["Liabilities"], year)
+    
+    # (1) BS: 負債合計のタグ候補を拡充
+    liab_tag, liab_total = _value_for_year_usd(facts_json, ["Liabilities", "LiabilitiesAndStockholdersEquity"], year)
     
     ca_tag, ca = _value_for_year_usd(facts_json, ["AssetsCurrent"], year)
     nca_tag, nca = _value_for_year_usd(facts_json, ["AssetsNoncurrent"], year)
@@ -536,7 +553,7 @@ def build_bs_latest_simple(facts_json: dict, year: int):
 
     eq_tag, eq = _value_for_year_usd(
         facts_json,
-        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"],
         year,
     )
 
@@ -553,8 +570,16 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         elif np.isfinite(cl) and np.isfinite(ncl):
             liab_total = cl + ncl
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
+            
+    # 3. 負債合計が計算上の数値（Assets - Equity）と大きく乖離している場合、計算値を優先
+    # これは利益剰余金が過大に見えるのを防ぐため
+    if np.isfinite(assets_total) and np.isfinite(eq):
+         calc_liab = assets_total - eq
+         if np.isfinite(liab_total) and abs(liab_total - calc_liab) > (assets_total * 0.05):
+              liab_total = calc_liab
+              liab_tag = "CALC:Assets-Equity (Override)"
 
-    # 3. 負債内訳の補完
+    # 4. 負債内訳の補完
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
@@ -623,7 +648,14 @@ def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list
     pos.sort(key=lambda x: x[1], reverse=True)
     top = pos[:3]
     top_sum = sum(v for _, v in top)
-    other = max(total - top_sum, 0.0) if np.isfinite(total) else sum(v for _, v in pos[3:])
+    
+    # (1) BS: 合計との差額をOtherとして明示的に計算する
+    other = max(total - top_sum, 0.0) if np.isfinite(total) and total > 0 else 0.0
+    
+    # Totalが不明な場合は項目合計の残りをOtherとする
+    if not np.isfinite(total) or total <= 0:
+         other = sum(v for _, v in pos[3:])
+
     labels = [n for n, _ in top]
     sizes = [v for _, v in top]
     if other > 0:
@@ -641,16 +673,17 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     _, total_liab = _value_for_year_usd(facts_json, ["Liabilities"], year)
     _, total_eq = _value_for_year_usd(
         facts_json,
-        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+        ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"],
         year,
     )
+    
+    # (1) BS: 負債合計の優先補完
     if not np.isfinite(total_liab) and np.isfinite(total_assets) and np.isfinite(total_eq):
         total_liab = total_assets - total_eq
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
 
     # A: Assets Breakdown
-    # 【修正】PPEタグ候補の拡充: Micron社等が使用する長い結合タグを追加
     asset_candidates = [
         ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
         ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet", "ReceivablesNetCurrent"]),
@@ -675,41 +708,60 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
     # B: Liabilities + Equity Breakdown
-    # 【修正】負債項目のタグも拡充: 買掛金、長期負債等の結合タグを追加
-    le_candidates = [
-        ("Accounts Payable", [
-            "AccountsPayableCurrent",
-            "AccountsPayableTradeCurrent",
-            "AccountsPayableAndAccruedLiabilitiesCurrent"
-        ]),
-        ("Deferred Revenue / Contract Liabilities", ["ContractWithCustomerLiabilityCurrent", "ContractWithCustomerLiabilityNoncurrent", "DeferredRevenueCurrent", "DeferredRevenueNoncurrent", "DeferredRevenue"]),
-        ("Long-term Debt (Noncurrent)", [
-            "LongTermDebtNoncurrent",
-            "LongTermDebtAndCapitalLeaseObligationsNoncurrent",
-            "LongTermDebt",
-            "LongTermDebtAndFinanceLeaseObligationsNoncurrent"
-        ]),
-        ("Long-term Debt (Current)", [
-            "LongTermDebtCurrent",
-            "LongTermDebtAndCapitalLeaseObligationsCurrent",
-            "DebtCurrent",
-            "LongTermDebtAndFinanceLeaseObligationsCurrent"
-        ]),
-        ("Other Current Liabilities", ["OtherLiabilitiesCurrent"]),
-        ("Other Noncurrent Liabilities", ["OtherLiabilitiesNoncurrent"]),
-        ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
-        ("Additional Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
-        ("AOCI", ["AccumulatedOtherComprehensiveIncomeLossNetOfTax"]),
-        ("Common Stock", ["CommonStockValue"]),
-    ]
+    # (1) BS: 内訳項目を拡充し、Other Liabilities/Equityを算出する
     le_items = []
-    for name, tags in le_candidates:
+    
+    # --- Liabilities ---
+    liab_candidates = [
+        ("Accounts Payable", ["AccountsPayableCurrent", "AccountsPayableTradeCurrent", "AccountsPayable"]),
+        ("Deferred Revenue", ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredRevenue"]),
+        ("Short-term Debt", ["ShortTermBorrowings", "CommercialPaper", "DebtCurrent", "LongTermDebtCurrent"]),
+        ("Long-term Debt", ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"]),
+        ("Other Liabilities", ["OtherLiabilitiesNoncurrent", "OtherLiabilities"])
+    ]
+    sum_liab_found = 0.0
+    for name, tags in liab_candidates:
         used, v = _value_for_year_usd(facts_json, tags, year)
         meta[f"le_{name}_tag"] = used
         if np.isfinite(v) and v > 0:
             le_items.append((name, v))
+            sum_liab_found += v
+            
+    # その他負債の算出
+    if np.isfinite(total_liab) and total_liab > sum_liab_found:
+        other_liab = total_liab - sum_liab_found
+        if other_liab > 0:
+            le_items.append(("Other Liabilities (Calc)", other_liab))
+
+    # --- Equity ---
+    eq_candidates = [
+        ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
+        ("Add. Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
+        ("Common Stock", ["CommonStockValue"]),
+        ("Treasury Stock", ["TreasuryStockValue"])
+    ]
+    sum_eq_found = 0.0
+    for name, tags in eq_candidates:
+        used, v = _value_for_year_usd(facts_json, tags, year)
+        meta[f"le_{name}_tag"] = used
+        # 自己株式などはマイナス値の場合があるが、円グラフでは絶対値または無視。ここでは正の値のみ抽出
+        if np.isfinite(v) and v > 0:
+            le_items.append((name, v))
+            sum_eq_found += v
+        elif name == "Treasury Stock" and np.isfinite(v) and v < 0:
+             # 資本合計との差額計算にはマイナスを含める
+             sum_eq_found += v
+
+    # その他資本の算出
+    if np.isfinite(total_eq) and total_eq > sum_eq_found:
+        other_eq = total_eq - sum_eq_found
+        if other_eq > 0:
+            le_items.append(("Other Equity (Calc)", other_eq))
+
+    # 全体のバックアップ
     if not np.isfinite(total_le) or total_le <= 0:
         total_le = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
+        
     b_labels, b_sizes = _top3_plus_other(le_items, total_le)
 
     return (
@@ -795,7 +847,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     return out, meta
 
 
-# 【追加】Missing plot function for CF
 def plot_cf_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
@@ -841,7 +892,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     # 2. 契約負債 (Contract Liabilities) の検索
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
-    # 【最終修正】除外キーワードの整理
     base_exclude = [
         "Tax", "Benefit", "Expense",       # 税金・費用
         "IncreaseDecrease", "ChangeIn",    # 増減（CF項目）
@@ -868,9 +918,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     meta["contract_liab_current_tag"] = tag_clc
     
-    # Noncurrent用 - 【ここが修正ポイント】
-    # "Noncurrent" タグを探す際、"Current" という文字列を除外してはいけない（Noncurrentに含まれるため）
-    # 代わりに must_end_with="Noncurrent" で流動負債の誤ヒットを防ぐ
+    # Noncurrent用
     cl_exclude_noncurrent = base_exclude
     
     tag_cln, df_cln = _find_best_tag_dynamic(
@@ -882,6 +930,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta["contract_liab_noncurrent_tag"] = tag_cln
 
     # --- 集計ロジック ---
+    # (3) 受注残: DataFrameが空の場合のエラー処理
     years = sorted(
         set(df_rpo["year"].tolist() if not df_rpo.empty else []) | 
         set(df_cl["year"].tolist() if not df_cl.empty else []) | 
@@ -890,10 +939,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     )
     years = [int(y) for y in years]
     
-    current_year = pd.Timestamp.now().year
-    if years and max(years) < current_year - 2:
-        meta["warning"] = f"Latest data is from {max(years)}. Tags might be discontinued."
-
     if not years:
         return pd.DataFrame(), meta
 
@@ -913,13 +958,13 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_non = val_at(df_cln, y)
 
         # Totalがない場合、Current + Noncurrent で補完
-        if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
-            cl_total = cl_curr + cl_non
+        if (not np.isfinite(cl_total)):
+            c = cl_curr if np.isfinite(cl_curr) else 0.0
+            n = cl_non if np.isfinite(cl_non) else 0.0
+            # 片方でもあれば計算
+            if np.isfinite(cl_curr) or np.isfinite(cl_non):
+                cl_total = c + n
         
-        # TotalもNoncurrentもなく、Currentだけある場合、Total = Current とみなす
-        if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and tag_cln is None:
-             cl_total = cl_curr
-
         rows.append([
             y, 
             _to_musd(rpo), 
@@ -933,6 +978,10 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
 
 def plot_rpo_annual(table: pd.DataFrame, title: str):
+    if table.empty:
+        st.info("No data available for RPO plotting.")
+        return
+
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     rpo = df["RPO(M$)"].astype(float).to_numpy()
@@ -959,7 +1008,7 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# Ratios tab: ROA / ROE / Inventory Turnover
+# Ratios tab: ROA / ROE / Inventory Turnover - FIXED
 # =========================
 def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str]) -> tuple[str | None, dict]:
     tag, df = _pick_best_tag_latest_first_usd(facts_json, tag_candidates)
@@ -979,14 +1028,15 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta["assets_tag"] = assets_tag
 
     eq_tag, eq_map = _annual_series_map_usd(
-        facts_json, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"]
+        facts_json, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"]
     )
     meta["equity_tag"] = eq_tag
 
-    inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet"])
+    inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet", "InventoryGross", "Inventory"])
     meta["inventory_tag"] = inv_tag
 
-    cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold"]
+    # (4) 回転率: CostOfSalesなどを追加
+    cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfSales", "CostOfGoodsSold"]
     cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates)
     meta["cogs_tag"] = cogs_tag
 
@@ -1021,6 +1071,8 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
 
 def plot_roa_roe(table: pd.DataFrame, title: str):
+    if table.empty:
+        return
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     roa = df["ROA(%)"].astype(float).to_numpy()
@@ -1042,6 +1094,8 @@ def plot_roa_roe(table: pd.DataFrame, title: str):
 
 
 def plot_inventory_turnover(table: pd.DataFrame, title: str):
+    if table.empty:
+        return
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     it = df["InventoryTurnover(x)"].astype(float).to_numpy()
@@ -1060,46 +1114,34 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
 
 
 # =========================
-# EPS (unit-aware) + STOCK SPLIT ADJUSTMENT
+# EPS (unit-aware) + STOCK SPLIT ADJUSTMENT - FIXED
 # =========================
 def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> tuple[pd.Series, dict]:
-    """
-    yfinanceから株式分割情報を取得し、各日付時点のデータにかけるべき補正係数を計算する。
-    """
     factors = pd.Series(1.0, index=date_index)
-    
     if not ticker:
         return factors, {}
 
     try:
-        # Tickerを大文字に強制変換して問い合わせ
         t = yf.Ticker(ticker.upper())
-        splits = t.splits  # Series (Date -> Split Ratio)
-        
+        splits = t.splits
         split_debug = {}
         if splits.empty:
             return factors, {"msg": "No splits found by yfinance"}
 
-        # デバッグ用に辞書化
         split_debug = {str(d.date()): r for d, r in splits.items()}
 
         for split_date, ratio in splits.items():
             split_date = pd.to_datetime(split_date).tz_localize(None)
             mask = factors.index.tz_localize(None) < split_date
-            
             if ratio > 0:
                 factors.loc[mask] *= (1.0 / ratio)
                 
         return factors, split_debug
-
     except Exception as e:
         return factors, {"error": str(e)}
 
 
 def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
-    """
-    EPS抽出（filed日付を考慮して最新データを優先）
-    """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     tag_obj = us.get(xbrl_tag, {})
     units = tag_obj.get("units", {})
@@ -1148,28 +1190,24 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
 
+    # (5) EPS: 単位の判定緩和
     def unit_score(u: str) -> int:
         u2 = u.lower().replace(" ", "")
         if "usd/shares" in u2 or "usd/share" in u2 or "usd/shr" in u2 or "usdper" in u2:
             return 3
+        if "shares" in u2 or "share" in u2: # Simply shares
+            return 2
         if "usd" in u2:
             return 1
         return 0
 
-    unit_counts = df.groupby("unit")["year"].count().to_dict()
-    unit_max_year = df.groupby("unit")["year"].max().to_dict()
+    df["score"] = df["unit"].apply(unit_score)
+    best_score = df["score"].max()
+    df_best = df[df["score"] == best_score].copy()
 
-    units_sorted = sorted(
-        unit_counts.keys(),
-        key=lambda u: (unit_score(u), unit_max_year.get(u, -1), unit_counts.get(u, 0)),
-        reverse=True,
-    )
-    best_unit = units_sorted[0]
-    df_best = df[df["unit"] == best_unit].copy()
-    
-    # 年(year) -> 提出日(filed) の順に昇順ソートし、最新のfiledを残す
+    # 最新のfiled優先
     df_best = df_best.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
-    df_best["unit_best"] = best_unit
+    df_best["unit_best"] = df_best["unit"]
     return df_best[["year", "end", "val", "unit_best"]]
 
 
@@ -1202,13 +1240,10 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     # 分割調整（Yahoo Finance連携）
     if ticker_symbol:
         best_df["end"] = pd.to_datetime(best_df["end"])
-        
-        # 関数内部で大文字変換を行うように修正済み
         factors, split_debug = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(best_df["end"]))
-        
         best_df["val_adjusted"] = best_df["val"] * factors.values
         meta["split_adjusted"] = True
-        meta["split_history"] = split_debug # デバッグ情報を追加
+        meta["split_history"] = split_debug 
     else:
         best_df["val_adjusted"] = best_df["val"]
         meta["split_adjusted"] = False
@@ -1322,7 +1357,6 @@ def render(authed_email: str):
             st.stop()
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
         st.caption(f"CF: 表示 {len(cf_disp)} 年（最新年: {int(cf_table['FY'].max())}）")
-        # 【修正】定義した plot_cf_annual を呼び出す
         plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
         st.markdown("### 年次CF（百万USD）")
         st.dataframe(
@@ -1359,17 +1393,17 @@ def render(authed_email: str):
         if rpo_table.empty:
             st.warning("この銘柄ではRPO/契約負債（年次）がXBRL上で取得できない可能性があります。")
             st.write(rpo_meta)
-            st.stop()
-        rpo_disp = _slice_latest_n_years(rpo_table, int(n_years))
-        st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {int(rpo_table['FY'].max())}）")
-        plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
-        st.dataframe(
-            rpo_disp.style.format({"RPO(M$)": "{:,.0f}", "ContractLiab(M$)": "{:,.0f}", "ContractLiabCurrent(M$)": "{:,.0f}"}),
-            use_container_width=True,
-            hide_index=True,
-        )
-        with st.expander("RPOデバッグ（採用タグ）", expanded=False):
-            st.write(rpo_meta)
+        else:
+            rpo_disp = _slice_latest_n_years(rpo_table, int(n_years))
+            st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {int(rpo_table['FY'].max())}）")
+            plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
+            st.dataframe(
+                rpo_disp.style.format({"RPO(M$)": "{:,.0f}", "ContractLiab(M$)": "{:,.0f}", "ContractLiabCurrent(M$)": "{:,.0f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+            with st.expander("RPOデバッグ（採用タグ）", expanded=False):
+                st.write(rpo_meta)
 
     with tab_turn:
         rat_table, rat_meta = build_ratios_table(facts)
@@ -1392,21 +1426,19 @@ def render(authed_email: str):
             st.write(rat_meta)
 
     with tab_eps:
-        # 修正: tickerシンボルを渡す
         eps_table, eps_meta = build_eps_table(facts, ticker_symbol=t)
         if eps_table.empty:
             st.error("EPSが取得できませんでした。")
             st.write(eps_meta)
-            st.stop()
-        eps_disp = _slice_latest_n_years(eps_table, int(n_years))
-        unit_label = eps_meta.get("eps_unit", "USD/share")
-        # 調整済みであることを表示
-        split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
-        st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}{split_note}")
-        plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS", unit_label="USD/share")
-        st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
-        with st.expander("EPSデバッグ", expanded=False):
-            st.write(eps_meta)
+        else:
+            eps_disp = _slice_latest_n_years(eps_table, int(n_years))
+            unit_label = eps_meta.get("eps_unit", "USD/share")
+            split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
+            st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}{split_note}")
+            plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS", unit_label="USD/share")
+            st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
+            with st.expander("EPSデバッグ", expanded=False):
+                st.write(eps_meta)
 
 
 def main():
