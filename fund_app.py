@@ -814,7 +814,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
             le_items.append((name, v))
             sum_eq_found += v
         elif name == "Treasury Stock" and np.isfinite(v) and v < 0:
-              sum_eq_found += v
+             sum_eq_found += v
 
     # その他資本（計算値）
     if np.isfinite(total_eq) and total_eq > sum_eq_found:
@@ -916,18 +916,18 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     cfo = df["CFO(M$)"].astype(float).to_numpy()
-    cfi = df["CFI(M$)"].astype(float).to_numpy()
-    cff = df["CFF(M$)"].astype(float).to_numpy()
+    # cfi = df["CFI(M$)"].astype(float).to_numpy()
+    # cff = df["CFF(M$)"].astype(float).to_numpy()
     fcf = df["FCF(M$)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
 
-    ax.plot(x, cfo, label="CFO", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, fcf, label="FCF", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cfo, label="CFO (Operating)", linewidth=2.5, marker="o", markersize=6)
+    # ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
+    # ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, fcf, label="FCF (Free)", linewidth=2.5, marker="o", markersize=6)
 
     ax.set_ylabel("Million USD", color="white")
     ax.tick_params(colors="white")
