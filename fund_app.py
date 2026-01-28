@@ -71,7 +71,6 @@ def fetch_company_facts(cik10: str) -> dict:
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
-    期間チェックロジックを追加（Q4データの排除）
     """
     facts_root = facts_json.get("facts", {})
     if not facts_root:
@@ -99,7 +98,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
         end = x.get("end")
-        start = x.get("start") # 期間開始日を取得
         val = x.get("val")
         fy_raw = x.get("fy", None)
         filed = x.get("filed")
@@ -113,20 +111,8 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
         end_ts = pd.to_datetime(end, errors="coerce")
         filed_ts = pd.to_datetime(filed, errors="coerce")
-        start_ts = pd.to_datetime(start, errors="coerce")
-
         if pd.isna(end_ts):
             continue
-
-        # ▼▼ 修正箇所：期間（Duration）チェックを追加 ▼▼
-        # PL項目（売上など）はstartがある。BS項目（資産など）はstartがない。
-        # startがある場合、期間が350日以上（約1年）であることを確認する。
-        # これにより、10-Kに含まれる「Q4（約90日）」のデータを排除する。
-        if not pd.isna(start_ts):
-            days = (end_ts - start_ts).days
-            if days < 350:
-                continue # 1年未満のデータはスキップ
-        # ▲▲ 修正ここまで ▲▲
 
         # 年次(FY/CY)のみ抽出
         annual_fp = fp in {"FY", "CY"}
@@ -150,7 +136,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     
-    # 年次フラグがあるものだけ
+    # ここで annual_fp=1 のものだけにフィルタリングすることで、Q4データの混入を防ぐ
     df = df[df["annual_fp"] == 1]
 
     if not include_segments:
@@ -694,7 +680,10 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
 
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
+    
+    # ▼▼ 修正箇所: 末尾のカンマを削除 ▼▼
     bottom += vals["Equity (M$)"]
+    
     ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
     bottom += vals["Noncurrent Liabilities (M$)"]
     ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
