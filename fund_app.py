@@ -68,9 +68,10 @@ def fetch_company_facts(cik10: str) -> dict:
 # =========================
 # XBRL annual extractor (USD)
 # =========================
-def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False) -> pd.DataFrame:
+def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False, min_duration: int = 0) -> pd.DataFrame:
     """
     年次相当（USD）抽出（10-K系）
+    min_duration > 0 の場合、期間が指定日数未満のデータ（Q4など）を除外する
     """
     facts_root = facts_json.get("facts", {})
     if not facts_root:
@@ -98,6 +99,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
         end = x.get("end")
+        start = x.get("start") # 期間開始日
         val = x.get("val")
         fy_raw = x.get("fy", None)
         filed = x.get("filed")
@@ -111,8 +113,21 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
         end_ts = pd.to_datetime(end, errors="coerce")
         filed_ts = pd.to_datetime(filed, errors="coerce")
+        start_ts = pd.to_datetime(start, errors="coerce")
+
         if pd.isna(end_ts):
             continue
+
+        # ▼▼ 期間チェック (Duration Check) ▼▼
+        if min_duration > 0:
+            # 期間指定があるのに開始日がない（Instant概念のデータなど）は除外
+            if pd.isna(start_ts):
+                continue
+            
+            days = (end_ts - start_ts).days
+            if days < min_duration:
+                continue
+        # ▲▲ 期間チェックここまで ▲▲
 
         # 年次(FY/CY)のみ抽出
         annual_fp = fp in {"FY", "CY"}
@@ -136,7 +151,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     
-    # ここで annual_fp=1 のものだけにフィルタリングすることで、Q4データの混入を防ぐ
+    # 年次フラグがあるものだけ
     df = df[df["annual_fp"] == 1]
 
     if not include_segments:
@@ -150,7 +165,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         return df
 
 
-def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> tuple[str | None, pd.DataFrame]:
+def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str], min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
     """
     固定リストからタグを選択（最新年優先）
     """
@@ -161,7 +176,7 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
     best_last_end = pd.Timestamp("1900-01-01")
 
     for tag in candidates:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        df = _extract_annual_series_usd(facts_json, tag, include_segments=False, min_duration=min_duration)
         if df.empty:
             continue
 
@@ -178,7 +193,7 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str]) -> 
     return best_tag, best_df
 
 
-def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None) -> tuple[str | None, pd.DataFrame]:
+def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None, min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
     """
     XBRL内の全タグをスキャンし、キーワードに合致し、かつ最新データを持つタグを探す
     """
@@ -218,7 +233,7 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
     best_score = (-1, -1) # (max_year, count)
 
     for tag in candidates:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        df = _extract_annual_series_usd(facts_json, tag, include_segments=False, min_duration=min_duration)
         if df.empty:
             continue
             
@@ -254,14 +269,14 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
 # =========================
 # Composite (USD) fill-by-year
 # =========================
-def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str]) -> tuple[pd.DataFrame, dict]:
+def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str], min_duration: int = 0) -> tuple[pd.DataFrame, dict]:
     """
     優先順位の高いタグリストから、年度ごとに最も確からしい値を合成する
     """
     tag_series = {}
     tag_years = {}
     for tag in tag_priority:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=False)
+        df = _extract_annual_series_usd(facts_json, tag, include_segments=False, min_duration=min_duration)
         if df.empty:
             continue
         s = df.set_index("year")["val"].sort_index()
@@ -347,8 +362,9 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     all_seg_rows = []
     
+    # セグメント売上はDuration概念なので350日フィルタ
     for tag in revenue_tags:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=True)
+        df = _extract_annual_series_usd(facts_json, tag, include_segments=True, min_duration=350)
         if df.empty:
             continue
         parsed = _parse_segment_info(df)
@@ -360,7 +376,6 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame(), pd.DataFrame()
     
     merged = pd.concat(all_seg_rows, ignore_index=True)
-    # 値が大きい方を優先（詳細な数値が取れている場合を想定）
     merged = merged.sort_values("val", ascending=False).drop_duplicates(subset=["year", "dimension", "member"], keep="first")
     
     def classify_axis(dim_name: str) -> str:
@@ -391,7 +406,6 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     merged["member_clean"] = merged["member"].apply(clean_member)
     
-    # 除外キーワード
     exclude_keywords = ["total", "elimination", "adjust", "consolidation", "allother", "intersegment"]
     
     def is_excluded(m_clean):
@@ -442,41 +456,36 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
 # PL (annual) - MODIFIED
 # =========================
 def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
-    # (1) 売上高: NetOperatingRevenues 等を追加して過去データを補完
     revenue_priority = [
         "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "Revenues", 
-        "NetOperatingRevenues", # コカ・コーラの過去データ
-        "SalesRevenueGoodsNet", # 消費財メーカー
+        "NetOperatingRevenues",
+        "SalesRevenueGoodsNet",
         "SalesRevenueNet", 
         "SalesRevenue",
         "OperatingRevenue",
         "OperatingRevenues"
     ]
     
-    # (3) 純利益: 株主帰属分を最優先に変更（他社アプリとの整合性向上）
     net_income_priority = [
-        "NetIncomeLossAvailableToCommonStockholdersBasic", # 最優先
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
         "NetIncomeLoss", 
         "ProfitLoss", 
         "IncomeLossFromContinuingOperations"
     ]
     
-    # 営業利益
     op_income_priority = ["OperatingIncomeLoss", "OperatingIncome"]
     
-    # (2) 税前利益は削除
-
     meta = {}
     
-    # コンポジット処理
-    rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority)
+    # PL項目はDuration概念なので 350日フィルタ を適用
+    rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority, min_duration=350)
     meta["revenue_composite"] = rev_meta
     
-    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, net_income_priority)
+    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, net_income_priority, min_duration=350)
     meta["net_income_composite"] = ni_meta
     
-    op_df, op_meta = _build_composite_by_year_usd(facts_json, op_income_priority)
+    op_df, op_meta = _build_composite_by_year_usd(facts_json, op_income_priority, min_duration=350)
     meta["op_income_composite"] = op_meta
 
     if rev_df.empty:
@@ -486,8 +495,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
     op_map = dict(zip(op_df["year"].astype(int), op_df["value"].astype(float))) if not op_df.empty else {}
     
-    # 日付取得用（Pretax削除に伴い、データが豊富なRevenueタグ等から代表して取得）
-    tag_for_date, df_date = _pick_best_tag_latest_first_usd(facts_json, ["Revenues", "NetOperatingRevenues", "NetIncomeLoss"])
+    tag_for_date, df_date = _pick_best_tag_latest_first_usd(facts_json, ["Revenues", "NetOperatingRevenues", "NetIncomeLoss"], min_duration=350)
     end_map = {}
     if not df_date.empty:
         end_map = dict(zip(df_date["year"].astype(int), df_date["end"]))
@@ -501,11 +509,9 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
             y, end_str,
             _to_musd(rev_map.get(y, np.nan)),
             _to_musd(op_map.get(y, np.nan)),
-            # 税前利益(Pretax)を削除
             _to_musd(ni_map.get(y, np.nan))
         ])
 
-    # カラム定義からPretaxを削除
     out = pd.DataFrame(rows, columns=["FY", "End", "Revenue(M$)", "OpIncome(M$)", "NetIncome(M$)"])
     out = out.sort_values("FY").reset_index(drop=True)
     meta["years"] = years
@@ -517,7 +523,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     x = df["FY"].astype(str).tolist()
     revenue = df["Revenue(M$)"].astype(float).to_numpy()
     op = df["OpIncome(M$)"].astype(float).to_numpy()
-    # Pretax削除
     ni = df["NetIncome(M$)"].astype(float).to_numpy()
 
     fig, ax_left = plt.subplots(figsize=(12, 5))
@@ -525,7 +530,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     ax_left.set_facecolor("#0b0c0e")
 
     ax_left.plot(x, op, label="Operating Income", linewidth=2.5, marker="o", markersize=6)
-    # Pretax描画削除
     ax_left.plot(x, ni, label="Net Income (Attributable)", linewidth=2.5, marker="o", markersize=6)
 
     ax_left.set_ylabel("Profit (Million USD)", color="white")
@@ -544,7 +548,6 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
 def plot_operating_margin(table: pd.DataFrame, title: str):
     df = table.copy()
-    # ソートを保証
     df = df.sort_values("FY")
     x = df["FY"].astype(str).tolist()
     rev = df["Revenue(M$)"].astype(float).to_numpy()
@@ -572,7 +575,8 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 # BS (latest) - FIXED PIE CHART LOGIC
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
-    df = _extract_annual_series_usd(facts_json, "Assets")
+    # BSはInstant概念なので期間フィルタなし(0)
+    df = _extract_annual_series_usd(facts_json, "Assets", min_duration=0)
     if df.empty:
         return None
     return int(df["year"].max())
@@ -580,7 +584,7 @@ def _latest_year_from_assets(facts_json: dict) -> int | None:
 
 def _value_for_year_usd(facts_json: dict, tag_candidates: list[str], year: int) -> tuple[str | None, float]:
     for tag in tag_candidates:
-        df = _extract_annual_series_usd(facts_json, tag)
+        df = _extract_annual_series_usd(facts_json, tag, min_duration=0)
         if df.empty:
             continue
         r = df[df["year"] == year]
@@ -610,12 +614,10 @@ def build_bs_latest_simple(facts_json: dict, year: int):
         year,
     )
 
-    # 1. 資産の補完
     if (not np.isfinite(nca)) and np.isfinite(assets_total) and np.isfinite(ca):
         nca = assets_total - ca
         nca_tag = "CALC:Assets-AssetsCurrent"
 
-    # 2. 負債合計の補完
     if (not np.isfinite(liab_total)):
         if np.isfinite(assets_total) and np.isfinite(eq):
             liab_total = assets_total - eq
@@ -624,14 +626,12 @@ def build_bs_latest_simple(facts_json: dict, year: int):
             liab_total = cl + ncl
             liab_tag = "CALC:LiabilitiesCurrent+Noncurrent"
             
-    # 3. (1) 負債合計が計算値（資産-資本）と大きく乖離している場合、計算値を採用（利益剰余金過大表示対策）
     if np.isfinite(assets_total) and np.isfinite(eq):
          calc_liab = assets_total - eq
          if np.isfinite(liab_total) and abs(liab_total - calc_liab) > (assets_total * 0.05):
               liab_total = calc_liab
               liab_tag = "CALC:Assets-Equity (Override)"
 
-    # 4. 負債内訳の補完
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
         ncl_tag = "CALC:Liabilities-LiabilitiesCurrent"
@@ -680,10 +680,7 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
 
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
-    
-    # ▼▼ 修正箇所: 末尾のカンマを削除 ▼▼
     bottom += vals["Equity (M$)"]
-    
     ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
     bottom += vals["Noncurrent Liabilities (M$)"]
     ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
@@ -699,19 +696,15 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
 
 
 def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
-    # 正の値だけ抽出してソート
     pos = [(n, float(v)) for n, v in items if np.isfinite(v) and float(v) > 0]
     pos.sort(key=lambda x: x[1], reverse=True)
     
     top = pos[:3]
     top_sum = sum(v for _, v in top)
     
-    # 内訳合計(sum_all_pos)が報告上のTotal(total)を超えている場合（自己株式等の影響）に対応
-    # 大きい方を円グラフの全体として採用する
     sum_all_pos = sum(v for _, v in pos)
     effective_total = max(total, sum_all_pos) if (np.isfinite(total) and total > 0) else sum_all_pos
     
-    # 合計との差額をOtherとして算出
     other = max(effective_total - top_sum, 0.0)
 
     labels = [n for n, _ in top]
@@ -738,17 +731,14 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         year,
     )
     
-    # (1) 負債合計の優先補完（資産-資本）
     if not np.isfinite(total_liab) and np.isfinite(total_assets) and np.isfinite(total_eq):
         total_liab = total_assets - total_eq
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
     
-    # 負債＋純資産の合計を総資産に合わせる（Balance Sheetの等式 A = L + E を強制）
     if np.isfinite(total_assets) and total_assets > 0:
         total_le = total_assets
 
-    # A: Assets Breakdown
     asset_candidates = [
         ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
         ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet", "ReceivablesNetCurrent"]),
@@ -769,17 +759,14 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         if np.isfinite(v):
             asset_items.append((name, v))
             
-    # 総資産データがない場合のバックアップ
     sum_asset_items = sum(v for _, v in asset_items if np.isfinite(v) and v > 0)
     if not np.isfinite(total_assets) or total_assets <= 0:
         total_assets = sum_asset_items
     
     a_labels, a_sizes = _top3_plus_other(asset_items, total_assets)
 
-    # B: Liabilities + Equity Breakdown
     le_items = []
     
-    # --- Liabilities ---
     liab_candidates = [
         ("Accounts Payable", ["AccountsPayableCurrent", "AccountsPayableTradeCurrent", "AccountsPayable"]),
         ("Deferred Revenue", ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredRevenue"]),
@@ -795,13 +782,11 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
             le_items.append((name, v))
             sum_liab_found += v
             
-    # その他負債（計算値）
     if np.isfinite(total_liab) and total_liab > sum_liab_found:
         other_liab = total_liab - sum_liab_found
         if other_liab > 0:
             le_items.append(("Other Liabilities (Calc)", other_liab))
 
-    # --- Equity ---
     eq_candidates = [
         ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
         ("Add. Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
@@ -818,13 +803,11 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         elif name == "Treasury Stock" and np.isfinite(v) and v < 0:
              sum_eq_found += v
 
-    # その他資本（計算値）
     if np.isfinite(total_eq) and total_eq > sum_eq_found:
         other_eq = total_eq - sum_eq_found
         if other_eq > 0:
             le_items.append(("Other Equity (Calc)", other_eq))
 
-    # 負債・純資産合計の調整（内訳合計より小さい場合は内訳合計を採用）
     sum_le_items = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
     if not np.isfinite(total_le) or total_le <= 0:
         total_le = sum_le_items
@@ -870,13 +853,14 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
     capex_tags = ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireFixedAssets"]
 
-    tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags)
+    # CFはDuration概念なので 350日フィルタ
+    tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags, min_duration=350)
     meta["cfo_tag"] = tag
-    tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags)
+    tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags, min_duration=350)
     meta["cfi_tag"] = tag
-    tag, df_cff = _pick_best_tag_latest_first_usd(facts_json, cff_tags)
+    tag, df_cff = _pick_best_tag_latest_first_usd(facts_json, cff_tags, min_duration=350)
     meta["cff_tag"] = tag
-    tag, df_capex = _pick_best_tag_latest_first_usd(facts_json, capex_tags)
+    tag, df_capex = _pick_best_tag_latest_first_usd(facts_json, capex_tags, min_duration=350)
     meta["capex_tag"] = tag
 
     years = sorted(set(df_cfo["year"].tolist()) | set(df_cfi["year"].tolist()) | set(df_cff["year"].tolist()) | set(df_capex["year"].tolist()))
@@ -918,8 +902,6 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     cfo = df["CFO(M$)"].astype(float).to_numpy()
-    # cfi = df["CFI(M$)"].astype(float).to_numpy()
-    # cff = df["CFF(M$)"].astype(float).to_numpy()
     fcf = df["FCF(M$)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -927,8 +909,6 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
     ax.set_facecolor("#0b0c0e")
 
     ax.plot(x, cfo, label="CFO (Operating)", linewidth=2.5, marker="o", markersize=6)
-    # ax.plot(x, cfi, label="CFI", linewidth=2.5, marker="o", markersize=6)
-    # ax.plot(x, cff, label="CFF", linewidth=2.5, marker="o", markersize=6)
     ax.plot(x, fcf, label="FCF (Free)", linewidth=2.5, marker="o", markersize=6)
 
     ax.set_ylabel("Million USD", color="white")
@@ -940,62 +920,61 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
 
 
 # =========================
-# RPO tab - FIXED (3)
+# RPO tab
 # =========================
 def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
     
-    # 1. RPO (受注残) の検索
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
     rpo_exclude = ["Satisfied", "Recognized", "Billings"]
     
+    # RPOはInstant概念なのでフィルタなし
     tag_rpo, df_rpo = _find_best_tag_dynamic(
         facts_json, 
         keywords=rpo_keywords, 
-        exclude_keywords=rpo_exclude
+        exclude_keywords=rpo_exclude,
+        min_duration=0 
     )
     meta["rpo_tag"] = tag_rpo
 
-    # 2. 契約負債 (Contract Liabilities) の検索
     cl_keywords = ["ContractWithCustomerLiability", "DeferredRevenue", "DeferredIncome", "CustomerAdvances", "UnearnedRevenue"]
     
     base_exclude = [
-        "Tax", "Benefit", "Expense",       # 税金・費用
-        "IncreaseDecrease", "ChangeIn",    # 増減（CF項目）
-        "Recognized", "Satisfied",         # 認識額（PL項目）
-        "Billings", "CumulativeEffect"     # その他
+        "Tax", "Benefit", "Expense",
+        "IncreaseDecrease", "ChangeIn",
+        "Recognized", "Satisfied",
+        "Billings", "CumulativeEffect"
     ]
     
-    # Total用
     cl_exclude_total = base_exclude + ["Current", "Noncurrent"]
     tag_cl, df_cl = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
-        exclude_keywords=cl_exclude_total
+        exclude_keywords=cl_exclude_total,
+        min_duration=0
     )
     meta["contract_liab_tag"] = tag_cl
     
-    # Current用
     cl_exclude_current = base_exclude + ["Noncurrent"]
     tag_clc, df_clc = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
         exclude_keywords=cl_exclude_current,
-        must_end_with="Current"
+        must_end_with="Current",
+        min_duration=0
     )
     meta["contract_liab_current_tag"] = tag_clc
     
-    # Noncurrent用
     cl_exclude_noncurrent = base_exclude
     tag_cln, df_cln = _find_best_tag_dynamic(
         facts_json, 
         keywords=cl_keywords, 
         exclude_keywords=cl_exclude_noncurrent,
-        must_end_with="Noncurrent"
+        must_end_with="Noncurrent",
+        min_duration=0
     )
     meta["contract_liab_noncurrent_tag"] = tag_cln
 
-    # --- 集計ロジック ---
     years = sorted(
         set(df_rpo["year"].tolist() if not df_rpo.empty else []) | 
         set(df_cl["year"].tolist() if not df_cl.empty else []) | 
@@ -1026,11 +1005,9 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cl_curr = val_at(df_clc, y)
         cl_non = val_at(df_cln, y)
 
-        # Totalがない場合、Current + Noncurrent で補完
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and np.isfinite(cl_non):
             cl_total = cl_curr + cl_non
         
-        # TotalもNoncurrentもなく、Currentだけある場合、Total = Current とみなす
         if (not np.isfinite(cl_total)) and np.isfinite(cl_curr) and tag_cln is None:
              cl_total = cl_curr
 
@@ -1075,8 +1052,8 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
 # =========================
 # Ratios tab: ROA / ROE / Inventory Turnover - FIXED (4)
 # =========================
-def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str]) -> tuple[str | None, dict]:
-    tag, df = _pick_best_tag_latest_first_usd(facts_json, tag_candidates)
+def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str], min_duration: int = 0) -> tuple[str | None, dict]:
+    tag, df = _pick_best_tag_latest_first_usd(facts_json, tag_candidates, min_duration=min_duration)
     m = dict(zip(df["year"].astype(int), df["val"].astype(float))) if not df.empty else {}
     return tag, m
 
@@ -1084,26 +1061,28 @@ def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str]) -> tuple
 def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
 
-    # 純利益: 基礎データとして株主帰属分を優先（EPSとの整合性）
     ni_priority = ["NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss", "ProfitLoss", "IncomeLossFromContinuingOperations"]
-    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority)
+    # NIはDuration概念なので350日フィルタ
+    ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority, min_duration=350)
     meta["net_income_composite"] = ni_meta
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
 
-    assets_tag, assets_map = _annual_series_map_usd(facts_json, ["Assets"])
+    # BS項目はInstant概念なのでフィルタなし
+    assets_tag, assets_map = _annual_series_map_usd(facts_json, ["Assets"], min_duration=0)
     meta["assets_tag"] = assets_tag
 
     eq_tag, eq_map = _annual_series_map_usd(
-        facts_json, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"]
+        facts_json, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", "Equity"],
+        min_duration=0
     )
     meta["equity_tag"] = eq_tag
 
-    inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet", "InventoryGross", "Inventory"])
+    inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet", "InventoryGross", "Inventory"], min_duration=0)
     meta["inventory_tag"] = inv_tag
 
-    # (4) 回転率: CostOfSales, CostOfGoodsSoldを追加
+    # COGSはDuration概念なので350日フィルタ
     cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfSales", "CostOfGoodsSold"]
-    cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates)
+    cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates, min_duration=350)
     meta["cogs_tag"] = cogs_tag
 
     years = sorted(set(ni_map.keys()) | set(assets_map.keys()) | set(eq_map.keys()) | set(inv_map.keys()) | set(cogs_map.keys()))
@@ -1184,7 +1163,6 @@ def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> t
         return factors, {}
 
     try:
-        # Tickerを大文字に強制変換して問い合わせ
         t = yf.Ticker(ticker.upper())
         splits = t.splits
         
@@ -1205,7 +1183,10 @@ def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> t
         return factors, {"error": str(e)}
 
 
-def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: int = 0) -> pd.DataFrame:
+    """
+    EPS抽出（min_duration対応）
+    """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     tag_obj = us.get(xbrl_tag, {})
     units = tag_obj.get("units", {})
@@ -1218,6 +1199,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
             form = str(x.get("form", "")).upper().strip()
             fp = str(x.get("fp", "")).upper().strip()
             end = x.get("end")
+            start = x.get("start") # 期間チェック用
             val = x.get("val")
             fy_raw = x.get("fy", None)
             filed = x.get("filed")
@@ -1228,12 +1210,21 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
                 continue
 
             end_ts = pd.to_datetime(end, errors="coerce")
+            start_ts = pd.to_datetime(start, errors="coerce")
             filed_ts = pd.to_datetime(filed, errors="coerce")
 
             if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
 
-            # EPSでも同様にQ4混入を防ぐため、annual_fpを厳密化
+            # ▼▼ EPSの期間（Duration）チェック ▼▼
+            if min_duration > 0:
+                if pd.isna(start_ts):
+                    continue
+                days = (end_ts - start_ts).days
+                if days < min_duration:
+                    continue 
+            # ▲▲ 期間チェックここまで ▲▲
+
             annual_fp = fp in {"FY", "CY"}
 
             if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
@@ -1258,7 +1249,6 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
     # 年次(FY/CY)のみ抽出
     df = df[df["annual_fp"] == 1]
 
-    # (5) EPS: 単位判定の緩和
     def unit_score(u: str) -> int:
         u2 = u.lower().replace(" ", "")
         if "usd/shares" in u2 or "usd/share" in u2 or "usd/shr" in u2 or "usdper" in u2:
@@ -1273,7 +1263,6 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
     best_score = df["score"].max()
     df_best = df[df["score"] == best_score].copy()
 
-    # 最新のfiled優先
     df_best = df_best.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
     df_best["unit_best"] = df_best["unit"]
     return df_best[["year", "end", "val", "unit_best"]]
@@ -1281,17 +1270,16 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
 
 def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataFrame, dict]:
     meta = {}
-    # (3) EPS: Dilutedを最優先
     eps_tags = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 
     best_df = pd.DataFrame()
     best_tag = None
 
     for tag in eps_tags:
-        df = _extract_eps_series_any_unit(facts_json, tag)
+        # EPSはDuration概念なので350日フィルタ
+        df = _extract_eps_series_any_unit(facts_json, tag, min_duration=350)
         if df.empty:
             continue
-        # 優先順位順に走査し、より多くのデータ(または最新)があれば採用
         if best_df.empty:
             best_df = df
             best_tag = tag
@@ -1307,7 +1295,6 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
         meta["eps_composite"] = {"available_tags": []}
         return pd.DataFrame(), meta
 
-    # 分割調整
     if ticker_symbol:
         best_df["end"] = pd.to_datetime(best_df["end"])
         factors, split_debug = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(best_df["end"]))
@@ -1396,7 +1383,6 @@ def render(authed_email: str):
         st.caption(f"PL: 表示 {len(pl_disp)} 年（最新年: {int(pl_table['FY'].max())}）")
         plot_pl_annual(pl_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
         st.markdown("### 年次PL（百万USD）")
-        # Pretaxを削除し、純利益をAttributableベースで表示
         st.dataframe(
             pl_disp.style.format({"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}),
             use_container_width=True,
