@@ -114,7 +114,9 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         if pd.isna(end_ts):
             continue
 
-        annual_fp = fp in {"FY", "CY", "Q4"}
+        # ▼▼ 修正箇所：Q4を除外し、FY/CYのみを年次として扱うように変更 ▼▼
+        annual_fp = fp in {"FY", "CY"}
+        # ▲▲ 修正ここまで ▲▲
         
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
             year_key = int(fy_raw)
@@ -135,6 +137,9 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     
+    # ここで annual_fp=1 のものだけにフィルタリングすることで、Q4データの混入を防ぐ
+    df = df[df["annual_fp"] == 1]
+
     if not include_segments:
         # 連結データのみ
         df = df[df["segment"].isnull()]
@@ -676,7 +681,7 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
 
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
-    bottom += vals["Equity (M$)"]
+    bottom += vals["Equity (M$)"],
     ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
     bottom += vals["Noncurrent Liabilities (M$)"]
     ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
@@ -1231,7 +1236,8 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
             if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
 
-            annual_fp = fp in {"FY", "CY", "Q4"}
+            # EPSでも同様にQ4混入を防ぐため、annual_fpを厳密化
+            annual_fp = fp in {"FY", "CY"}
 
             if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
                 year_key = int(fy_raw)
@@ -1251,6 +1257,9 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str) -> pd.DataFram
         return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit", "filed"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
+    
+    # 年次(FY/CY)のみ抽出
+    df = df[df["annual_fp"] == 1]
 
     # (5) EPS: 単位判定の緩和
     def unit_score(u: str) -> int:
