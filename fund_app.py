@@ -114,9 +114,8 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         if pd.isna(end_ts):
             continue
 
-        # ▼▼ 修正箇所：Q4を除外し、FY/CYのみを年次として扱うように変更 ▼▼
+        # 年次(FY/CY)のみ抽出
         annual_fp = fp in {"FY", "CY"}
-        # ▲▲ 修正ここまで ▲▲
         
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
             year_key = int(fy_raw)
@@ -681,7 +680,10 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
 
     bottom = 0.0
     ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
-    bottom += vals["Equity (M$)"],
+    
+    # ▼▼ 修正箇所: 末尾のカンマを削除 ▼▼
+    bottom += vals["Equity (M$)"]
+    
     ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
     bottom += vals["Noncurrent Liabilities (M$)"]
     ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
@@ -696,7 +698,6 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     st.pyplot(fig)
 
 
-# ▼▼ 修正箇所：Otherが消える問題を修正 ▼▼
 def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
     # 正の値だけ抽出してソート
     pos = [(n, float(v)) for n, v in items if np.isfinite(v) and float(v) > 0]
@@ -724,7 +725,6 @@ def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list
         return ["No data"], [1.0]
         
     return labels, sizes
-# ▲▲ 修正ここまで ▲▲
 
 
 def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]:
@@ -744,12 +744,9 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 
     total_le = (total_liab if np.isfinite(total_liab) else 0.0) + (total_eq if np.isfinite(total_eq) else 0.0)
     
-    # ▼▼ 修正箇所: 負債＋純資産の合計を総資産に合わせる（Balance Sheetの等式 A = L + E を強制）▼▼
-    # これにより、積み上げ項目が足りない場合や少数株主持分等が漏れている場合でも、
-    # 差額が自動的に「Other」として円グラフに表示されるようになります。
+    # 負債＋純資産の合計を総資産に合わせる（Balance Sheetの等式 A = L + E を強制）
     if np.isfinite(total_assets) and total_assets > 0:
         total_le = total_assets
-    # ▲▲ 修正ここまで ▲▲
 
     # A: Assets Breakdown
     asset_candidates = [
