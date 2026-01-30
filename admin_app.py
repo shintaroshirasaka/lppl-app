@@ -544,7 +544,7 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
     """
     みんかぶの日証金（信用残）ページからデータをスクレイピングして取得する。
     URL例: https://minkabu.jp/stock/6361/margin
-    Fix: 文字化け対策（res.encoding）とテーブル特定（match）を強化
+    Fix: match="逆日歩"を廃止し、カラム名から対象テーブルを探索するロジックに変更
     """
     import requests
     import pandas as pd
@@ -556,6 +556,7 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
 
     url = f"https://minkabu.jp/stock/{code}/margin"
     
+    # ヘッダーを更新（アクセス拒否対策）
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -564,44 +565,74 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         
-        # 【重要】文字化け対策：サーバーのエンコーディングを無視し、コンテンツから推定させる
+        # 文字化け対策
         res.encoding = res.apparent_encoding
         
-        # "逆日歩" という文字が含まれるテーブルをピンポイントで抽出する
-        dfs = pd.read_html(res.text, match="逆日歩")
+        # 【修正点1】match="逆日歩" は厳しすぎるため削除し、全テーブルを取得してから探す
+        try:
+            dfs = pd.read_html(res.text)
+        except ValueError:
+            return pd.DataFrame()
         
         if not dfs:
             return pd.DataFrame()
 
-        target_df = dfs[0] # matchで見つかった最初のテーブルを使用
+        target_df = pd.DataFrame()
         
-        # カラム名の整理（みんかぶのテーブル構造に合わせる）
-        # MultiIndex（2段組み）になっている場合と、シングルヘッダーの場合があるためフラット化
-        if isinstance(target_df.columns, pd.MultiIndex):
-            target_df.columns = ['_'.join(map(str, col)).strip() for col in target_df.columns.values]
-        else:
-            target_df.columns = [str(c).strip() for c in target_df.columns]
+        # 【修正点2】取得した全テーブルの中から、適切なカラムを持つものを探す
+        for df in dfs:
+            # カラム名の整理（MultiIndex対応）
+            if isinstance(df.columns, pd.MultiIndex):
+                cols = ['_'.join(map(str, col)).strip() for col in df.columns.values]
+            else:
+                cols = [str(c).strip() for c in df.columns]
+            
+            # チェック用のカラム文字列
+            col_str = " ".join(cols)
+            
+            # 判定条件: 「日付」が含まれ、かつ「融資」または「貸株」または「残」が含まれるテーブルを採用
+            if "日付" in col_str and ("融資" in col_str or "貸株" in col_str or "残" in col_str):
+                target_df = df
+                target_df.columns = cols # カラム名をフラット化したものに更新
+                
+                # もし「逆日歩」や「品貸料」が含まれていれば、それが本命のテーブルなので確定する
+                if "逆日歩" in col_str or "品貸料" in col_str:
+                    break
+        
+        if target_df.empty:
+            return pd.DataFrame()
         
         # 必要なカラムを特定してリネーム
         rename_map = {}
         for c in target_df.columns:
-            if "日付" in c: rename_map[c] = "Date"
-            elif "逆日歩" in c: rename_map[c] = "Hibush"
-            elif "融資" in c and "残" in c and "増減" not in c: rename_map[c] = "MarginBuy" # 信用買い残
-            elif "貸株" in c and "残" in c and "増減" not in c: rename_map[c] = "MarginSell" # 信用売り残
+            if "日付" in c: 
+                rename_map[c] = "Date"
+            elif "逆日歩" in c or "品貸料" in c: 
+                rename_map[c] = "Hibush"
+            # 【修正点3】「融資残」「買残」どちらの表記でも拾えるようにする
+            elif ("融資" in c and "残" in c) or ("買残" in c) or ("買い" in c and "残" in c): 
+                if "増減" not in c and "回転" not in c: 
+                    rename_map[c] = "MarginBuy" # 信用買い残
+            # 【修正点4】「貸株残」「売残」どちらの表記でも拾えるようにする
+            elif ("貸株" in c and "残" in c) or ("売残" in c) or ("売り" in c and "残" in c): 
+                if "増減" not in c and "回転" not in c: 
+                    rename_map[c] = "MarginSell" # 信用売り残
 
         target_df = target_df.rename(columns=rename_map)
         
-        # 必須カラムがない場合はスキップ
+        # 必須カラム "Date" がない場合はスキップ
         if "Date" not in target_df.columns:
             return pd.DataFrame()
             
-        # 数値変換関数
+        # 数値変換関数（エラーに強くする）
         def clean_num(x):
             if isinstance(x, str):
-                x = x.replace(',', '').replace('株', '').replace('円', '').replace('-', '0').strip()
+                x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('-', '0').strip()
                 if not x: return 0
-                return float(x)
+                try:
+                    return float(x)
+                except:
+                    return 0
             return x
 
         if "Hibush" in target_df.columns:
@@ -632,8 +663,8 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
         
         return target_df
 
-    except Exception as e:
-        # デバッグ用：エラー内容を画面に出す必要があれば print(e) など
+    except Exception:
+        # エラー時は空のDataFrameを返す
         return pd.DataFrame()
 
 
