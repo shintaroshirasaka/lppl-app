@@ -4,3 +4,5 @@ pandas
 numpy
 scipy
 matplotlib
+requests
+lxml
