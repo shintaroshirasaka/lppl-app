@@ -2,26 +2,23 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
 import os
 import requests
-import matplotlib.ticker as mticker
-
-# =======================================================
-# AUTH GATE: Require signed short-lived token (?t=...)
-# =======================================================
 import time
 import hmac
 import hashlib
 import base64
 
-
+# =======================================================
+# AUTH GATE: Require signed short-lived token (?t=...)
+# =======================================================
 def _b64url_decode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s.encode("utf-8"))
-
 
 def verify_token(token: str, secret: str) -> tuple[bool, str]:
     try:
@@ -42,7 +39,6 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
         return (True, email)
     except Exception:
         return (False, "")
-
 
 # ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET_ADMIN", "").strip()
@@ -93,7 +89,6 @@ DOWN_PAST_FAR_DAYS    = 60
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
-
 def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
     if x0 == x1:
         return y0
@@ -104,7 +99,6 @@ def _lin_map(x: float, x0: float, x1: float, y0: float, y1: float) -> float:
     t = (x - x0) / (x1 - x0)
     return y0 + t * (y1 - y0)
 
-
 def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
     p0 = np.asarray(p0, dtype=float)
     lb = np.asarray(lb, dtype=float)
@@ -113,7 +107,7 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
 
 
 # =======================================================
-# (ADD) Mid-term Quant Table
+# Mid-term Quant Table Settings
 # =======================================================
 MID_TH = {
     "A_R_ok": 0.70,     "A_R_ng": 0.40,
@@ -131,7 +125,6 @@ MID_TH = {
     "J_vol_ok": 0.25,    "J_vol_ng": 0.40,
 }
 
-
 def _mid_beta_r2(x: pd.Series, y: pd.Series):
     beta = np.cov(x, y, ddof=1)[0, 1] / np.var(x, ddof=1)
     slope, intercept = np.polyfit(x, y, 1)
@@ -140,7 +133,6 @@ def _mid_beta_r2(x: pd.Series, y: pd.Series):
     ss_tot = np.sum((y - y.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot
     return beta, r2
-
 
 def _mid_fmt_value(metric: str, v: float) -> str:
     if metric.startswith("E: CMGR"):
@@ -156,7 +148,6 @@ def _mid_fmt_value(metric: str, v: float) -> str:
     if metric.startswith("J: Rolling Vol"):
         return f"{v*100:.2f}%"
     return f"{v:.4f}"
-
 
 def _mid_judge(metric: str, value: float, dev: pd.DataFrame, bench: str, window: int) -> str:
     if metric == "A: Deviation R":
@@ -211,7 +202,6 @@ def _mid_judge(metric: str, value: float, dev: pd.DataFrame, bench: str, window:
         return "注意"
     return "注意"
 
-
 def _mid_threshold_text(metric: str) -> str:
     if metric == "A: Deviation R":
         return f"OK≥{MID_TH['A_R_ok']:.2f} / NG<{MID_TH['A_R_ng']:.2f}"
@@ -260,7 +250,6 @@ def _pick_price_field(df: pd.DataFrame, ticker: str) -> pd.Series:
             raise ValueError("NO_PRICE_FIELD")
     return s
 
-
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> pd.Series:
     df = yf.download(
@@ -281,7 +270,6 @@ def fetch_price_series_cached(ticker: str, start_date: date, end_date: date) -> 
     if np.any(vals <= 0):
         raise ValueError("INVALID_TICKER_OR_NO_DATA")
     return s
-
 
 @st.cache_data(ttl=PRICE_TTL_SECONDS, show_spinner=False)
 def fetch_prices_pair_cached(ticker: str, bench: str, start_date: date, end_date: date) -> pd.DataFrame:
@@ -381,7 +369,6 @@ def bubble_judgement(r2: float, m: float, omega: float) -> tuple[str, dict]:
     if info["omega_high"]: return "バブル“風”（注意：短周期すぎ）", info
     return "バブル“風”（注意）", info
 
-
 def render_bubble_flow(r2: float, m: float, omega: float):
     verdict, info = bubble_judgement(r2, m, omega)
     def yn(v: bool) -> str: return "YES" if v else "NO"
@@ -407,7 +394,6 @@ def render_bubble_flow(r2: float, m: float, omega: float):
     lines.append(f"【判定】{verdict}")
     st.markdown("### バブル判定フロー（管理者用）")
     st.code("\n".join(lines), language="text")
-
 
 def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, list[str]]:
     pdict = bubble_res.get("param_dict", {})
@@ -460,7 +446,6 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     dt = np.maximum(dt, 1e-6)
     return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
 
-
 def fit_lppl_bubble(price_series: pd.Series):
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
@@ -490,7 +475,6 @@ def fit_lppl_bubble(price_series: pd.Series):
                    "m_low": 0.01, "m_high": 0.99, "tc_low": float(N + 1), "tc_high": float(N + 250),
                    "omega_low": 2.0, "omega_high": 25.0, "phi_low": float(-np.pi), "phi_high": float(np.pi)}
     return {"params": np.asarray(params, dtype=float), "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period}, "price_fit": price_fit, "log_fit": log_fit, "r2": float(r2), "rmse": rmse, "tc_date": tc_date, "tc_days": tc_days, "bounds_info": bounds_info, "N": int(N)}
-
 
 def fit_lppl_negative_bubble(price_series: pd.Series, peak_date, min_points: int = 10, min_drop_ratio: float = 0.03):
     down_series = price_series[price_series.index >= peak_date].copy()
@@ -553,14 +537,14 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 
 
 # =======================================================
-# (ADD) SCRAPING FUNCTION FOR JAPANESE MARGIN DATA
+# (FIXED) SCRAPING FUNCTION FOR JAPANESE MARGIN DATA
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
     """
     みんかぶの日証金（信用残）ページからデータをスクレイピングして取得する。
     URL例: https://minkabu.jp/stock/6361/margin
-    ※サイト構造の変更により動作しなくなる可能性があります。
+    Fix: 文字化け対策（res.encoding）とテーブル特定（match）を強化
     """
     import requests
     import pandas as pd
@@ -573,34 +557,30 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
     url = f"https://minkabu.jp/stock/{code}/margin"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         
-        # pandasでHTML内のテーブルを読み込む
-        # 日証金データが含まれるテーブルを探す
-        dfs = pd.read_html(res.text)
+        # 【重要】文字化け対策：サーバーのエンコーディングを無視し、コンテンツから推定させる
+        res.encoding = res.apparent_encoding
         
-        target_df = pd.DataFrame()
+        # "逆日歩" という文字が含まれるテーブルをピンポイントで抽出する
+        dfs = pd.read_html(res.text, match="逆日歩")
         
-        # 複数のテーブルから「逆日歩」や「貸株」などのキーワードが含まれるものを探す
-        for df in dfs:
-            cols = [str(c) for c in df.columns]
-            if any("逆日歩" in c for c in cols) or any("貸株" in c for c in cols):
-                target_df = df
-                break
-        
-        if target_df.empty:
+        if not dfs:
             return pd.DataFrame()
 
+        target_df = dfs[0] # matchで見つかった最初のテーブルを使用
+        
         # カラム名の整理（みんかぶのテーブル構造に合わせる）
-        # 想定カラム: 日付, 逆日歩, 日歩日数, 貸株残, 融資残 ...
-        # カラムがMultiIndexの場合もあるのでフラット化
+        # MultiIndex（2段組み）になっている場合と、シングルヘッダーの場合があるためフラット化
         if isinstance(target_df.columns, pd.MultiIndex):
-            target_df.columns = ['_'.join(col).strip() for col in target_df.columns.values]
+            target_df.columns = ['_'.join(map(str, col)).strip() for col in target_df.columns.values]
+        else:
+            target_df.columns = [str(c).strip() for c in target_df.columns]
         
         # 必要なカラムを特定してリネーム
         rename_map = {}
@@ -616,16 +596,13 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
         if "Date" not in target_df.columns:
             return pd.DataFrame()
             
-        # データクレンジング
-        # 日付: "12/29 (月)" -> 2024/12/29 などに変換が必要だが、年は推測が必要
-        # みんかぶは直近データのみなので、現在日付から逆算する
-        
         # 数値変換関数
         def clean_num(x):
             if isinstance(x, str):
                 x = x.replace(',', '').replace('株', '').replace('円', '').replace('-', '0').strip()
-                if x == '': return 0
-            return float(x)
+                if not x: return 0
+                return float(x)
+            return x
 
         if "Hibush" in target_df.columns:
             target_df["Hibush"] = target_df["Hibush"].apply(clean_num)
@@ -634,15 +611,17 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
         if "MarginSell" in target_df.columns:
             target_df["MarginSell"] = target_df["MarginSell"].apply(clean_num)
 
-        # 日付処理（簡易実装：直近1年は過去、未来日付になれば前年とする）
+        # 日付処理
         current_year = date.today().year
         parsed_dates = []
         for d_str in target_df["Date"]:
             # "1/29 (木)" -> "1/29"
-            d_clean = d_str.split(' ')[0]
+            d_clean = str(d_str).split(' ')[0]
             try:
+                # まず今年の年で変換
                 dt = pd.to_datetime(f"{current_year}/{d_clean}")
-                if dt.date() > date.today() + timedelta(days=2): # 未来日付すぎたら去年
+                # もし未来の日付になってしまったら（例：今日が1月でデータが12月）、昨年のデータとみなす
+                if dt.date() > date.today() + timedelta(days=2): 
                     dt = pd.to_datetime(f"{current_year - 1}/{d_clean}")
                 parsed_dates.append(dt)
             except:
@@ -653,7 +632,8 @@ def fetch_jp_margin_data_cached(ticker: str) -> pd.DataFrame:
         
         return target_df
 
-    except Exception:
+    except Exception as e:
+        # デバッグ用：エラー内容を画面に出す必要があれば print(e) など
         return pd.DataFrame()
 
 
@@ -1047,4 +1027,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
