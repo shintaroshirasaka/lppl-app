@@ -110,6 +110,55 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
     ub = np.asarray(ub, dtype=float)
     return np.minimum(np.maximum(p0, lb + eps), ub - eps)
 
+# -------------------------------------------------------
+# ADDED: Signal & Score Computation (Missing Logic)
+# -------------------------------------------------------
+def compute_signal_and_score(tc_up_date, end_ts, down_tc_date):
+    """
+    tc_up_date: Predicted crash date (Timestamp)
+    end_ts: Current analysis date (Timestamp)
+    down_tc_date: Predicted bottom date (Timestamp or None)
+    
+    Returns: (signal_label: str, score: int)
+    """
+    if tc_up_date is None:
+        return "SAFE", 0
+    
+    tc = pd.Timestamp(tc_up_date).normalize()
+    now = pd.Timestamp(end_ts).normalize()
+    days = (tc - now).days
+    
+    # スコア計算ロジック (0-100)
+    # days が近いほど、または直近で通過したばかりであるほどリスクが高い
+    score = 0.0
+    label = "SAFE"
+    
+    if days < -60:
+        # ピークを大きく過ぎている（安全圏へ）
+        score = 10
+        label = "SAFE"
+    elif days < 0:
+        # ピークを通過した直後（まだ危険な可能性が高い）
+        # -60日 -> 0日 に向かってスコア上昇 (20 -> 95)
+        score = _lin_map(days, -60, 0, 20, 95)
+        label = "HIGH" if score > 70 else "CAUTION"
+    elif days <= 30:
+        # 危険ゾーン（30日以内）
+        # 30日 -> 0日 に向かってスコア上昇 (80 -> 99)
+        score = _lin_map(days, 30, 0, 80, 99)
+        label = "HIGH"
+    elif days <= 90:
+        # 注意ゾーン（30〜90日）
+        # 90日 -> 30日 に向かってスコア上昇 (40 -> 80)
+        score = _lin_map(days, 90, 30, 40, 80)
+        label = "CAUTION"
+    else:
+        # 安全ゾーン（90日以上先）
+        score = 20
+        label = "SAFE"
+        
+    return label, int(score)
+
 
 # =======================================================
 # Mid-term Quant Table Settings
