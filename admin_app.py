@@ -807,25 +807,63 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 # =======================================================
 # FINAL SCORE
 # =======================================================
-def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
+def compute_signal_and_score(tc_up_date, end_date, down_tc_date, m_up: float, m_down: float = None) -> tuple[str, int]:
+    """
+    tcとの距離および、mの値（0.01に近いほど高スコア、0.99に近いほど低スコア）を組み合わせてスコアを算出。
+    """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
+    
+    # --- Helper: Blend Time Score and M Score ---
+    def blend_score(score_time: float, m_val: float, min_score: float, max_score: float) -> int:
+        if not np.isfinite(m_val):
+            # mが無効な場合は時間スコアのみで返す（あるいは中間値）
+            return int(round(_clamp(score_time, min_score, max_score)))
+        
+        # m: 0.99 -> min_score 寄り (低)
+        # m: 0.01 -> max_score 寄り (高)
+        # 入力mは 0.01~0.99 を想定
+        m_clamped = _clamp(m_val, 0.01, 0.99)
+        
+        # _lin_map(x, x0, x1, y0, y1)
+        # x0=0.99 -> y0=min_score
+        # x1=0.01 -> y1=max_score
+        score_m = _lin_map(m_clamped, 0.99, 0.01, min_score, max_score)
+        
+        # 単純平均でブレンド
+        final = (score_time + score_m) / 2.0
+        return int(round(_clamp(final, min_score, max_score)))
+
+    # 1. DOWN TC (HIGH RISK: RED) -> 80-100
     if down_tc_date is not None:
         down_tc = pd.Timestamp(down_tc_date).normalize()
         delta = (down_tc - now).days
+        
+        # mの参照先：下落局面のmがあればそれを使う、なければ上昇mを代用（通常は下落フィットが成功している）
+        m_target = m_down if (m_down is not None and np.isfinite(m_down)) else m_up
+
         if delta > 0:
-            s = _lin_map(delta, DOWN_FUTURE_NEAR_DAYS, DOWN_FUTURE_FAR_DAYS, 90, 80)
-            return ("HIGH", int(round(_clamp(s, 80, 90))))
+            # Future Down TC: 80-90
+            s_time = _lin_map(delta, DOWN_FUTURE_NEAR_DAYS, DOWN_FUTURE_FAR_DAYS, 90, 80)
+            return ("HIGH", blend_score(s_time, m_target, 80, 90))
+        
+        # Past Down TC: 90-100
         past = abs(delta)
-        s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
-        return ("HIGH", int(round(_clamp(s, 90, 100))))
+        s_time = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
+        return ("HIGH", blend_score(s_time, m_target, 90, 100))
+
+    # 2. UP TC (SAFE/CAUTION) -> m_up を使用
     gap = (tc_up - now).days
+    
     if gap > 0:
-        s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
-        return ("SAFE", int(round(_clamp(s, 0, 59))))
+        # Future Up TC (SAFE: BLUE) -> 0-59
+        s_time = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
+        return ("SAFE", blend_score(s_time, m_up, 0, 59))
+    
+    # Past Up TC (CAUTION: YELLOW) -> 60-79
     past = abs(gap)
-    s = _lin_map(past, UP_PAST_NEAR_DAYS, UP_PAST_FAR_DAYS, 60, 79)
-    return ("CAUTION", int(round(_clamp(s, 60, 79))))
+    s_time = _lin_map(past, UP_PAST_NEAR_DAYS, UP_PAST_FAR_DAYS, 60, 79)
+    return ("CAUTION", blend_score(s_time, m_up, 60, 79))
 
 
 # =======================================================
@@ -1061,7 +1099,16 @@ def main():
     end_ts = pd.Timestamp(end_date)
     down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
 
-    signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
+    # --- mパラメータの抽出 ---
+    m_up_val = float(bubble_res.get("param_dict", {}).get("m", float("nan")))
+    m_down_val = None
+    if neg_res.get("ok"):
+        # params = [A, B, C, m, tc, omega, phi] -> m is index 3
+        params_down = neg_res.get("params")
+        if params_down is not None and len(params_down) >= 4:
+            m_down_val = float(params_down[3])
+
+    signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date, m_up=m_up_val, m_down=m_down_val)
 
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
@@ -1092,7 +1139,7 @@ def main():
     col_score, col_gain = st.columns(2)
     with col_score:
         score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア</div>
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア (m補正込)</div>
             <div style="display: flex; align-items: baseline; gap: 12px;">
                 <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
                 <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
