@@ -13,10 +13,6 @@ import hmac
 import hashlib
 import base64
 import io
-import urllib3
-
-# SSL警告を無視する設定（一部の古いサイト対策）
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -109,55 +105,6 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
     lb = np.asarray(lb, dtype=float)
     ub = np.asarray(ub, dtype=float)
     return np.minimum(np.maximum(p0, lb + eps), ub - eps)
-
-# -------------------------------------------------------
-# ADDED: Signal & Score Computation (Missing Logic)
-# -------------------------------------------------------
-def compute_signal_and_score(tc_up_date, end_ts, down_tc_date):
-    """
-    tc_up_date: Predicted crash date (Timestamp)
-    end_ts: Current analysis date (Timestamp)
-    down_tc_date: Predicted bottom date (Timestamp or None)
-    
-    Returns: (signal_label: str, score: int)
-    """
-    if tc_up_date is None:
-        return "SAFE", 0
-    
-    tc = pd.Timestamp(tc_up_date).normalize()
-    now = pd.Timestamp(end_ts).normalize()
-    days = (tc - now).days
-    
-    # スコア計算ロジック (0-100)
-    # days が近いほど、または直近で通過したばかりであるほどリスクが高い
-    score = 0.0
-    label = "SAFE"
-    
-    if days < -60:
-        # ピークを大きく過ぎている（安全圏へ）
-        score = 10
-        label = "SAFE"
-    elif days < 0:
-        # ピークを通過した直後（まだ危険な可能性が高い）
-        # -60日 -> 0日 に向かってスコア上昇 (20 -> 95)
-        score = _lin_map(days, -60, 0, 20, 95)
-        label = "HIGH" if score > 70 else "CAUTION"
-    elif days <= 30:
-        # 危険ゾーン（30日以内）
-        # 30日 -> 0日 に向かってスコア上昇 (80 -> 99)
-        score = _lin_map(days, 30, 0, 80, 99)
-        label = "HIGH"
-    elif days <= 90:
-        # 注意ゾーン（30〜90日）
-        # 90日 -> 30日 に向かってスコア上昇 (40 -> 80)
-        score = _lin_map(days, 90, 30, 40, 80)
-        label = "CAUTION"
-    else:
-        # 安全ゾーン（90日以上先）
-        score = 20
-        label = "SAFE"
-        
-    return label, int(score)
 
 
 # =======================================================
@@ -591,18 +538,20 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 
 
 # =======================================================
-# (FIXED 2.0) ROBUST SCRAPING with DIAGNOSTICS
+# (FIXED) ROBUST SCRAPING FUNCTION: Multi-Source + IRBank + Yahoo
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
-def fetch_jp_margin_data_diagnostics(ticker: str) -> dict:
+def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     """
-    複数ソースを順に試し、結果またはエラー詳細を返す。
-    Returns: {"status": "ok", "df": dataframe} OR {"status": "error", "logs": list_of_errors}
+    複数ソース（IRBank -> Minkabu -> Karauri -> Yahoo -> Kabutan）を順に試し、
+    信用残（MarginBuy/MarginSell）と逆日歩（Hibush）を取得する。
+    IRBankとYahooを追加し、さらに堅牢化。
     """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
-        return {"status": "error", "logs": ["Ticker is not Japanese digit code"]}
+        return pd.DataFrame()
 
+    # アクセス偽装用のヘッダー（RefererとAcceptを強化）
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -610,30 +559,36 @@ def fetch_jp_margin_data_diagnostics(ticker: str) -> dict:
         "Referer": "https://www.google.com/"
     }
 
-    logs = []
-
-    # ----- Common Helpers -----
+    # ----- 共通: 数値クリーニング関数 -----
     def clean_num(x):
         if isinstance(x, str):
+            # '株', '円', '倍', '%', カンマを除去
             x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
             if not x: return 0
             try: return float(x)
             except: return 0
         return x
 
+    # ----- 共通: 日付クリーニング関数 -----
     def parse_date_col(df, col_name="Date"):
+        # 文字列として処理
         dates = pd.to_datetime(df[col_name], errors='coerce')
         if dates.isna().any():
             today = date.today()
             current_year = today.year
             def try_parse(x):
                 if pd.isna(x) or str(x).strip() == "": return pd.NaT
-                x_clean = str(x).split(' ')[0]
+                x_clean = str(x).split(' ')[0] # "1/29 (木)" -> "1/29"
                 x_clean = x_clean.replace("年", "/").replace("月", "/").replace("日", "")
+                
+                # YYYY/MM/DD 形式をトライ
                 try: return pd.to_datetime(x_clean)
                 except: pass
+                
+                # MM/DD 形式をトライ（当年補完）
                 try:
                     dt = pd.to_datetime(f"{current_year}/{x_clean}")
+                    # 未来の日付なら昨年にする（例: 現在1月でデータが12月）
                     if dt.date() > today + timedelta(days=2):
                         dt = dt.replace(year=current_year - 1)
                     return dt
@@ -641,135 +596,236 @@ def fetch_jp_margin_data_diagnostics(ticker: str) -> dict:
             dates = df[col_name].apply(try_parse)
         return dates
 
-    # ----- 1. IRBank (Fix: "年月日") -----
-    try:
-        # IRBankはfeeかkarauriページ
-        for url in [f"https://irbank.net/{code}/fee", f"https://irbank.net/{code}/karauri"]:
-            res = requests.get(url, headers=headers, timeout=5, verify=False)
-            if res.status_code != 200:
-                logs.append(f"IRBank({url}): HTTP {res.status_code}")
-                continue
-            
-            # read_html
+    # ----- 1. IRBank Scraper (Priority) -----
+    def _scrape_irbank():
+        # IRBANKは「fee」または「karauri」ページにデータがある
+        urls = [f"https://irbank.net/{code}/fee", f"https://irbank.net/{code}/karauri"]
+        for url in urls:
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code != 200: continue
+                
+                # バイト列で渡して文字化けを防ぐ
+                try: dfs = pd.read_html(io.BytesIO(res.content))
+                except: continue
+                
+                target = pd.DataFrame()
+                for df in dfs:
+                    col_str = " ".join([str(c) for c in df.columns])
+                    # 「日付」かつ（「逆日歩」or「融資」or「貸株」or「残」）が含まれるテーブル
+                    if "日付" in col_str and ("逆日歩" in col_str or "融資" in col_str or "貸株" in col_str or "残" in col_str):
+                        target = df
+                        # MultiIndexのフラット化
+                        if isinstance(target.columns, pd.MultiIndex):
+                            target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
+                        else:
+                            target.columns = [str(c).strip() for c in target.columns]
+                        break
+                
+                if target.empty: continue
+                
+                rename_map = {}
+                for c in target.columns:
+                    if "日付" in c: rename_map[c] = "Date"
+                    elif "逆日歩" in c: rename_map[c] = "Hibush"
+                    # IRBankの日証金データ: 融資残(Buying), 貸株残(Selling)
+                    elif "融資" in c and "残" in c: rename_map[c] = "MarginBuy"
+                    elif "貸株" in c and "残" in c: rename_map[c] = "MarginSell"
+                    # 簡易パターン
+                    elif "売残" in c and "信用" not in c: rename_map[c] = "MarginSell"
+                    elif "買残" in c and "信用" not in c: rename_map[c] = "MarginBuy"
+                
+                target = target.rename(columns=rename_map)
+                if "Date" not in target.columns: continue
+                
+                target["Date"] = parse_date_col(target, "Date")
+                for col in ["MarginBuy", "MarginSell", "Hibush"]:
+                    if col in target.columns: target[col] = target[col].apply(clean_num)
+                
+                # 有効なデータがあれば採用
+                df_clean = target.dropna(subset=["Date"]).sort_values("Date")
+                if not df_clean.empty and ("MarginBuy" in df_clean.columns or "MarginSell" in df_clean.columns):
+                    return df_clean
+            except: continue
+        return pd.DataFrame()
+
+    # ----- 2. Minkabu Scraper -----
+    def _scrape_minkabu():
+        url = f"https://minkabu.jp/stock/{code}/margin"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200: return pd.DataFrame()
             try: dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception as e:
-                logs.append(f"IRBank({url}): read_html failed ({e})")
-                continue
-            
+            except: return pd.DataFrame()
             target = pd.DataFrame()
             for df in dfs:
                 col_str = " ".join([str(c) for c in df.columns])
-                # IRBankは「年月日」を使う。ここが重要修正点。
-                if ("日付" in col_str or "年月日" in col_str or "報告日" in col_str or "申込日" in col_str) and ("残" in col_str or "融資" in col_str or "貸株" in col_str):
+                if "日付" in col_str and ("融資" in col_str or "貸株" in col_str or "残" in col_str):
                     target = df
                     if isinstance(target.columns, pd.MultiIndex):
                         target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
                     else:
                         target.columns = [str(c).strip() for c in target.columns]
-                    break
-            
-            if target.empty:
-                logs.append(f"IRBank({url}): No valid table found (cols checked)")
-                continue
-            
+                    if "逆日歩" in col_str or "品貸料" in col_str: break
+            if target.empty: return pd.DataFrame()
             rename_map = {}
             for c in target.columns:
-                if "日付" in c or "年月日" in c or "報告日" in c or "申込日" in c: rename_map[c] = "Date"
-                elif "逆日歩" in c: rename_map[c] = "Hibush"
-                elif "融資" in c and "残" in c: rename_map[c] = "MarginBuy"
-                elif "貸株" in c and "残" in c: rename_map[c] = "MarginSell"
-                # Fallback
-                elif "売残" in c and "信用" not in c: rename_map[c] = "MarginSell"
-                elif "買残" in c and "信用" not in c: rename_map[c] = "MarginBuy"
-
+                if "日付" in c: rename_map[c] = "Date"
+                elif "逆日歩" in c or "品貸料" in c: rename_map[c] = "Hibush"
+                elif ("融資" in c and "残" in c) or ("買残" in c) or ("買い" in c and "残" in c):
+                    if "増減" not in c and "回転" not in c: rename_map[c] = "MarginBuy"
+                elif ("貸株" in c and "残" in c) or ("売残" in c) or ("売り" in c and "残" in c):
+                    if "増減" not in c and "回転" not in c: rename_map[c] = "MarginSell"
             target = target.rename(columns=rename_map)
-            if "Date" not in target.columns:
-                logs.append(f"IRBank({url}): Date column missing after rename")
-                continue
-
+            if "Date" not in target.columns: return pd.DataFrame()
             target["Date"] = parse_date_col(target, "Date")
             for col in ["MarginBuy", "MarginSell", "Hibush"]:
                 if col in target.columns: target[col] = target[col].apply(clean_num)
-            
-            df_clean = target.dropna(subset=["Date"]).sort_values("Date")
-            if not df_clean.empty and ("MarginBuy" in df_clean.columns or "MarginSell" in df_clean.columns):
-                return {"status": "ok", "df": df_clean, "source": "IRBank"}
-    except Exception as e:
-        logs.append(f"IRBank: Unexpected error {e}")
+            return target.dropna(subset=["Date"]).sort_values("Date")
+        except: return pd.DataFrame()
 
-    # ----- 2. Minkabu -----
-    try:
-        url = f"https://minkabu.jp/stock/{code}/margin"
-        res = requests.get(url, headers=headers, timeout=5, verify=False)
-        if res.status_code == 200:
+    # ----- 3. Karauri.net Scraper -----
+    def _scrape_karauri():
+        url = f"https://karauri.net/{code}/"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200: return pd.DataFrame()
             try: dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception as e: logs.append(f"Minkabu: read_html failed ({e})")
-            else:
-                target = pd.DataFrame()
-                for df in dfs:
-                    col_str = " ".join([str(c) for c in df.columns])
-                    if "日付" in col_str and ("融資" in col_str or "貸株" in col_str):
-                        target = df; break
-                
-                if not target.empty:
+            except: return pd.DataFrame()
+            target = pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                if "日付" in col_str and ("売残" in col_str or "貸株" in col_str):
+                    target = df
                     if isinstance(target.columns, pd.MultiIndex):
                         target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
                     else:
                         target.columns = [str(c).strip() for c in target.columns]
-                    
-                    rename_map = {}
-                    for c in target.columns:
-                        if "日付" in c: rename_map[c] = "Date"
-                        elif "逆日歩" in c or "品貸料" in c: rename_map[c] = "Hibush"
-                        elif ("融資" in c and "残" in c) or ("買残" in c): 
-                            if "増減" not in c: rename_map[c] = "MarginBuy"
-                        elif ("貸株" in c and "残" in c) or ("売残" in c): 
-                            if "増減" not in c: rename_map[c] = "MarginSell"
-                    
-                    target = target.rename(columns=rename_map)
-                    if "Date" in target.columns:
-                        target["Date"] = parse_date_col(target, "Date")
-                        for col in ["MarginBuy", "MarginSell", "Hibush"]:
-                            if col in target.columns: target[col] = target[col].apply(clean_num)
-                        return {"status": "ok", "df": target.dropna(subset=["Date"]).sort_values("Date"), "source": "Minkabu"}
-                    else: logs.append("Minkabu: Date col missing")
-                else: logs.append("Minkabu: Table not found")
-        else: logs.append(f"Minkabu: HTTP {res.status_code}")
-    except Exception as e: logs.append(f"Minkabu: Error {e}")
+                    if "逆日歩" in col_str: break
+            if target.empty: return pd.DataFrame()
+            rename_map = {}
+            for c in target.columns:
+                if "日付" in c: rename_map[c] = "Date"
+                elif "逆日歩" in c: rename_map[c] = "Hibush"
+                elif ("融資" in c and "残" in c) or ("買残" in c):
+                    if "増減" not in c: rename_map[c] = "MarginBuy"
+                elif ("貸株" in c and "残" in c) or ("売残" in c):
+                    if "増減" not in c: rename_map[c] = "MarginSell"
+            target = target.rename(columns=rename_map)
+            if "Date" not in target.columns: return pd.DataFrame()
+            target["Date"] = parse_date_col(target, "Date")
+            for col in ["MarginBuy", "MarginSell", "Hibush"]:
+                if col in target.columns: target[col] = target[col].apply(clean_num)
+            return target.dropna(subset=["Date"]).sort_values("Date")
+        except: return pd.DataFrame()
 
-    # ----- 3. Yahoo (Last Resort) -----
-    try:
+    # ----- 4. Yahoo Finance JP Scraper (Backup) -----
+    def _scrape_yahoo():
         url = f"https://finance.yahoo.co.jp/quote/{code}.T/margin"
-        res = requests.get(url, headers=headers, timeout=5, verify=False)
-        if res.status_code == 200:
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200: return pd.DataFrame()
             try: dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception as e: logs.append(f"Yahoo: read_html failed ({e})")
-            else:
-                target = pd.DataFrame()
-                for df in dfs:
-                    col_str = " ".join([str(c) for c in df.columns])
-                    if "日付" in col_str and "売り残" in col_str:
-                        target = df; target.columns = [str(c).strip() for c in target.columns]; break
-                
-                if not target.empty:
-                    rename_map = {}
-                    for c in target.columns:
-                        if "日付" in c: rename_map[c] = "Date"
-                        elif "売り残" in c and "増減" not in c: rename_map[c] = "MarginSell"
-                        elif "買い残" in c and "増減" not in c: rename_map[c] = "MarginBuy"
-                    target = target.rename(columns=rename_map)
-                    if "Date" in target.columns:
-                        target["Date"] = parse_date_col(target, "Date")
-                        for col in ["MarginBuy", "MarginSell"]:
-                            if col in target.columns: target[col] = target[col].apply(clean_num)
-                        target["Hibush"] = 0
-                        return {"status": "ok", "df": target.dropna(subset=["Date"]).sort_values("Date"), "source": "Yahoo"}
-                    else: logs.append("Yahoo: Date col missing")
-                else: logs.append("Yahoo: Table not found")
-        else: logs.append(f"Yahoo: HTTP {res.status_code}")
-    except Exception as e: logs.append(f"Yahoo: Error {e}")
+            except: return pd.DataFrame()
+            target = pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                # Yahooのテーブルはシンプル
+                if "日付" in col_str and "売り残" in col_str and "買い残" in col_str:
+                    target = df
+                    target.columns = [str(c).strip() for c in target.columns]
+                    break
+            if target.empty: return pd.DataFrame()
+            rename_map = {}
+            for c in target.columns:
+                if "日付" in c: rename_map[c] = "Date"
+                elif "売り残" in c and "増減" not in c: rename_map[c] = "MarginSell"
+                elif "買い残" in c and "増減" not in c: rename_map[c] = "MarginBuy"
+            target = target.rename(columns=rename_map)
+            if "Date" not in target.columns: return pd.DataFrame()
+            target["Date"] = parse_date_col(target, "Date")
+            for col in ["MarginBuy", "MarginSell"]:
+                if col in target.columns: target[col] = target[col].apply(clean_num)
+            # Yahooは逆日歩がないので0埋め
+            target["Hibush"] = 0
+            return target.dropna(subset=["Date"]).sort_values("Date")
+        except: return pd.DataFrame()
 
-    return {"status": "error", "logs": logs}
+    # ----- 5. Kabutan Scraper (Final Fallback) -----
+    def _scrape_kabutan():
+        url = f"https://kabutan.jp/stock/finance?code={code}&mode=m"
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code != 200: return pd.DataFrame()
+            try: dfs = pd.read_html(io.BytesIO(res.content))
+            except: return pd.DataFrame()
+            target = pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                if "日付" in col_str and "売残" in col_str and "買残" in col_str:
+                    target = df
+                    target.columns = [str(c).strip() for c in target.columns]
+                    break
+            if target.empty: return pd.DataFrame()
+            rename_map = {}
+            for c in target.columns:
+                if "日付" in c: rename_map[c] = "Date"
+                elif "売残" in c and "増減" not in c: rename_map[c] = "MarginSell"
+                elif "買残" in c and "増減" not in c: rename_map[c] = "MarginBuy"
+            target = target.rename(columns=rename_map)
+            if "Date" not in target.columns: return pd.DataFrame()
+            target["Date"] = parse_date_col(target, "Date")
+            for col in ["MarginBuy", "MarginSell"]:
+                if col in target.columns: target[col] = target[col].apply(clean_num)
+            target["Hibush"] = 0
+            return target.dropna(subset=["Date"]).sort_values("Date")
+        except: return pd.DataFrame()
+
+    # --- EXECUTION FLOW ---
+    # 優先度順に試行: IRBANK -> Minkabu -> Karauri -> Yahoo -> Kabutan
+    
+    df = _scrape_irbank()
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
+        return df
+    
+    df = _scrape_minkabu()
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
+        return df
+    
+    df = _scrape_karauri()
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
+        return df
+
+    df = _scrape_yahoo()
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
+        return df
+        
+    df = _scrape_kabutan()
+    return df
+
+
+# =======================================================
+# FINAL SCORE
+# =======================================================
+def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
+    now = pd.Timestamp(end_date).normalize()
+    tc_up = pd.Timestamp(tc_up_date).normalize()
+    if down_tc_date is not None:
+        down_tc = pd.Timestamp(down_tc_date).normalize()
+        delta = (down_tc - now).days
+        if delta > 0:
+            s = _lin_map(delta, DOWN_FUTURE_NEAR_DAYS, DOWN_FUTURE_FAR_DAYS, 90, 80)
+            return ("HIGH", int(round(_clamp(s, 80, 90))))
+        past = abs(delta)
+        s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
+        return ("HIGH", int(round(_clamp(s, 90, 100))))
+    gap = (tc_up - now).days
+    if gap > 0:
+        s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
+        return ("SAFE", int(round(_clamp(s, 0, 59))))
+    past = abs(gap)
+    s = _lin_map(past, UP_PAST_NEAR_DAYS, UP_PAST_FAR_DAYS, 60, 79)
+    return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
 # =======================================================
@@ -874,13 +930,10 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
         st.markdown("---")
         st.subheader(f"■ 信用残・逆日歩（日証金データ: {ticker}）")
         
-        with st.spinner("日証金データを取得中（IRBank/Minkabu/Yahoo）..."):
-            res = fetch_jp_margin_data_diagnostics(ticker)
+        with st.spinner("日証金データを取得中（IRBank/Minkabu/Karauri/Yahoo/Kabutan）..."):
+            margin_df = fetch_jp_margin_data_robust(ticker)
             
-        if res["status"] == "ok":
-            margin_df = res["df"]
-            source = res.get("source", "Unknown")
-            
+        if not margin_df.empty:
             # グラフ描画
             fig, ax1 = plt.subplots(figsize=(11, 6))
             fig.patch.set_facecolor("#0b0c0e")
@@ -906,6 +959,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             ax1.grid(color="#333333", linestyle="--", alpha=0.5)
 
             # 右軸：逆日歩（棒グラフ）
+            # 逆日歩があるかチェック（Yahooなどは無い場合がある）
             has_hibu = "Hibush" in margin_df.columns and margin_df["Hibush"].sum() > 0
             
             if has_hibu:
@@ -914,6 +968,8 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
                 ax2.bar(dates, margin_df["Hibush"], color=colors, alpha=0.6, width=0.6, label="逆日歩")
                 ax2.set_ylabel("逆日歩（円）", color="#FFD700")
                 ax2.tick_params(axis='y', colors="#FFD700")
+                
+                # 凡例の結合
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
                 ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
@@ -921,21 +977,12 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
                 ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
 
             st.pyplot(fig)
-            st.caption(f"※データソース: {source}。直近のデータのみ表示されます。")
+            st.caption("※データソース: IRBank / Minkabu / Karauri / Yahoo / Kabutan (自動切替)。直近のデータのみ表示されます。")
+            
             with st.expander("詳細データを見る"):
                 st.dataframe(margin_df.sort_values("Date", ascending=False), use_container_width=True)
         else:
-            st.error("日証金データが自動取得できませんでした。エラー詳細は以下を確認してください。")
-            with st.expander("エラー詳細ログ（デバッグ用）"):
-                for l in res["logs"]:
-                    st.write(f"- {l}")
-            
-            # 【最終手段】IRBANKを直接表示（Iframe）
-            code_num = ticker.replace(".T", "").strip()
-            st.markdown("### 代替表示: IRBANK（外部サイト）")
-            st.info("以下のウィンドウで直接データを確認してください。")
-            ir_url = f"https://irbank.net/{code_num}/fee"
-            st.components.v1.iframe(ir_url, height=600, scrolling=True)
+            st.warning("日証金データが取得できませんでした（全ソース巡回後も不可）。")
 
 
 # -------------------------------------------------------
