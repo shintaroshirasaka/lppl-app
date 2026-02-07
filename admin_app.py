@@ -1173,7 +1173,7 @@ def main():
     st.markdown("---")
     with st.expander("Mid-term Quant 判定表（A〜J + Threshold + Judgement）", expanded=False):
         col_b1, col_b2 = st.columns([2, 1])
-        with col_b1: bench = st.text_input("Benchmark（指数）", value="^GSPC", help="例: ^GSPC / ^IXIC / ^N225")
+        with col_b1: bench = st.text_input("Benchmark（指数）", value="ACWI", help="例: ACWI / ^GSPC / ^N225")
         with col_b2: mid_window = st.number_input("WINDOW（判定表）", min_value=5, max_value=120, value=20, step=1)
         try:
             df_mid = build_midterm_quant_table(ticker=ticker.strip(), bench=bench.strip(), start_date=start_date, end_date=end_date, window=int(mid_window))
@@ -1184,7 +1184,7 @@ def main():
     st.markdown("---")
     with st.expander("グラフ（Index/Deviation/Regression/Vol/Drawdown）", expanded=False):
         gcol1, gcol2, gcol3 = st.columns([2, 1, 1])
-        with gcol1: graph_bench = st.text_input("Benchmark（グラフ用）", value="^GSPC")
+        with gcol1: graph_bench = st.text_input("Benchmark（グラフ用）", value="ACWI")
         with gcol2: graph_window = st.number_input("WINDOW（グラフ用）", min_value=5, max_value=120, value=20, step=1)
         with gcol3: trading_days = st.number_input("Trading days/year", min_value=200, max_value=365, value=252, step=1)
         try:
