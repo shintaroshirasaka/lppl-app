@@ -129,7 +129,7 @@ def lppl(t, A, B, C, m, tc, omega, phi):
 
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """Uptrend fit (robust bounds)"""
+    """Uptrend fit (robust bounds) - FIXED DATE CALCULATION"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
@@ -172,19 +172,10 @@ def fit_lppl_bubble(price_series: pd.Series):
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     # --- FIX: Correct date conversion (Trading Index -> Calendar Date) ---
-    # Instead of adding tc_days (trading count) to first_date,
-    # we anchor to the LAST date.
-    # tc_days is the fitted index. The last data point is at index (N - 1).
-    # future_days = tc_days - (N - 1)
-    # We add this future delta to the last known calendar date.
-    
     tc_val = float(params[4])
     last_idx = N - 1
     future_units = tc_val - last_idx
     
-    # Simple assumption: 1 index unit projected forward = 1 calendar day
-    # (This is conservative. If you want trading days, you might multiply by 7/5, 
-    # but 1:1 is safer for simple projection).
     last_date = price_series.index[-1]
     tc_date = last_date + timedelta(days=future_units)
 
@@ -203,7 +194,7 @@ def fit_lppl_negative_bubble(
     min_points: int = 10,
     min_drop_ratio: float = 0.03,
 ):
-    """Downtrend fit (negative bubble, robust bounds)"""
+    """Downtrend fit (negative bubble, robust bounds) - FIXED DATE CALCULATION"""
     down_series = price_series[price_series.index >= peak_date].copy()
 
     if len(down_series) < min_points:
@@ -373,9 +364,9 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
     """
-    SAFE    : tc_up > now, score 0..59 (nearer => higher)
-    CAUTION : tc_up < now and no down_tc, score 60..79 (older => higher)
-    HIGH    : down_tc exists, score 80..100 (progressed => higher)
+    SAFE    : tc_up > now + 14 days
+    CAUTION : tc_up <= now + 14 days (Approaching or Past)
+    HIGH    : down_tc exists
     """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
@@ -405,10 +396,12 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         )
         return ("HIGH", int(round(_clamp(s, 90, 100))))
 
-    # SAFE / CAUTION
+    # SAFE / CAUTION (With 14-day Warning Buffer)
     gap = (tc_up - now).days
+    WARNING_BUFFER = 14  # 早期警戒ライン（14日）
 
-    if gap > 0:
+    # SAFE: More than 14 days in future
+    if gap > WARNING_BUFFER:
         s = _lin_map(
             x=gap,
             x0=UP_FUTURE_NEAR_DAYS,
@@ -418,11 +411,17 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         )
         return ("SAFE", int(round(_clamp(s, 0, 59))))
 
-    past = abs(gap)
+    # CAUTION: 14 days or less (including past)
+    # Convert gap to "days past warning line"
+    # If gap=14 (future) -> past_warning=0 -> Score 60
+    # If gap=0 (today)   -> past_warning=14
+    # If gap=-10 (past)  -> past_warning=24
+    past_warning = WARNING_BUFFER - gap
+    
     s = _lin_map(
-        x=past,
-        x0=UP_PAST_NEAR_DAYS,
-        x1=UP_PAST_FAR_DAYS,
+        x=past_warning,
+        x0=0, 
+        x1=UP_PAST_FAR_DAYS, # 120
         y0=60,
         y1=79,
     )
