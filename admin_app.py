@@ -448,68 +448,117 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
 
 def fit_lppl_bubble(price_series: pd.Series):
+    """Uptrend fit (robust bounds) - FIXED DATE CALCULATION"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
     N = len(t)
+    
+    # Initial guess
     A_init = float(np.mean(log_price))
     p0 = [A_init, -1.0, 0.1, 0.5, N + 20, 8.0, 0.0]
+    
+    # Bounds
     A_low = float(np.min(log_price) - 2.0)
     A_high = float(np.max(log_price) + 2.0)
     lower_bounds = [A_low, -20, -20, 0.01, N + 1, 2.0, -np.pi]
     upper_bounds = [A_high, 20, 20, 0.99, N + 250, 25.0, np.pi]
+    
     p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
+    
     params, _ = curve_fit(lppl, t, log_price, p0=p0, bounds=(lower_bounds, upper_bounds), maxfev=20000)
+    
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
+    
     ss_res = float(np.sum((log_price - log_fit) ** 2))
     ss_tot = float(np.sum((log_price - log_price.mean()) ** 2))
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rmse = float(np.sqrt(np.mean((log_price - log_fit) ** 2)))
-    first_date = price_series.index[0]
+    
+    # --- FIX: Correct date conversion ---
     tc_days = float(params[4])
-    tc_date = first_date + timedelta(days=tc_days)
+    last_idx = N - 1
+    future_units = tc_days - last_idx
+    last_date = price_series.index[-1]
+    tc_date = last_date + timedelta(days=future_units)
+    
     A, B, C, m, tc, omega, phi = [float(x) for x in params]
     abs_c_over_b = float(abs(C / B)) if abs(B) > 1e-12 else float("inf")
     log_period = float(2.0 * np.pi / omega) if omega != 0 else float("inf")
+    
     bounds_info = {"A_low": A_low, "A_high": A_high, "B_low": -20.0, "B_high": 20.0, "C_low": -20.0, "C_high": 20.0,
                    "m_low": 0.01, "m_high": 0.99, "tc_low": float(N + 1), "tc_high": float(N + 250),
                    "omega_low": 2.0, "omega_high": 25.0, "phi_low": float(-np.pi), "phi_high": float(np.pi)}
-    return {"params": np.asarray(params, dtype=float), "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period}, "price_fit": price_fit, "log_fit": log_fit, "r2": float(r2), "rmse": rmse, "tc_date": tc_date, "tc_days": tc_days, "bounds_info": bounds_info, "N": int(N)}
+                   
+    return {
+        "params": np.asarray(params, dtype=float), 
+        "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period}, 
+        "price_fit": price_fit, 
+        "log_fit": log_fit, 
+        "r2": float(r2), 
+        "rmse": rmse, 
+        "tc_date": tc_date, 
+        "tc_days": tc_days, 
+        "bounds_info": bounds_info, 
+        "N": int(N)
+    }
 
 def fit_lppl_negative_bubble(price_series: pd.Series, peak_date, min_points: int = 10, min_drop_ratio: float = 0.03):
+    """Downtrend fit (negative bubble) - FIXED DATE CALCULATION"""
     down_series = price_series[price_series.index >= peak_date].copy()
     if len(down_series) < min_points: return {"ok": False}
+    
     peak_price = float(price_series.loc[peak_date])
     last_price = float(down_series.iloc[-1])
     drop_ratio = (peak_price - last_price) / peak_price
     if drop_ratio < min_drop_ratio: return {"ok": False}
+    
     price_down = down_series.values.astype(float)
     t_down = np.arange(len(price_down), dtype=float)
     log_down = np.log(price_down)
     neg_log_down = -log_down
     N_down = len(t_down)
+    
     A_init = float(np.mean(neg_log_down))
     p0 = [A_init, -1.0, 0.1, 0.5, N_down + 15, 8.0, 0.0]
+    
     A_low = float(np.min(neg_log_down) - 2.0)
     A_high = float(np.max(neg_log_down) + 2.0)
     lower_bounds = [A_low, -20, -20, 0.01, N_down + 1, 2.0, -np.pi]
     upper_bounds = [A_high, 20, 20, 0.99, N_down + 200, 25.0, np.pi]
+    
     p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
+    
     try:
         params_down, _ = curve_fit(lppl, t_down, neg_log_down, p0=p0, bounds=(lower_bounds, upper_bounds), maxfev=20000)
     except Exception:
         return {"ok": False}
+        
     neg_log_fit = lppl(t_down, *params_down)
     log_fit = -neg_log_fit
     price_fit_down = np.exp(log_fit)
+    
     ss_res = np.sum((neg_log_down - neg_log_fit) ** 2)
     ss_tot = np.sum((neg_log_down - neg_log_down.mean()) ** 2)
     r2_down = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    first_down_date = down_series.index[0]
+    
+    # --- FIX: Correct date conversion for negative bubble ---
     tc_days = float(params_down[4])
-    tc_bottom_date = first_down_date + timedelta(days=tc_days)
-    return {"ok": True, "down_series": down_series, "price_fit_down": price_fit_down, "r2": float(r2_down), "tc_date": tc_bottom_date, "tc_days": tc_days, "params": np.asarray(params_down, dtype=float)}
+    last_idx = N_down - 1
+    future_units = tc_days - last_idx
+    last_date = down_series.index[-1]
+    tc_bottom_date = last_date + timedelta(days=future_units)
+    
+    return {
+        "ok": True, 
+        "down_series": down_series, 
+        "price_fit_down": price_fit_down, 
+        "r2": float(r2_down), 
+        "tc_date": tc_bottom_date, 
+        "tc_days": tc_days, 
+        "params": np.asarray(params_down, dtype=float)
+    }
 
 
 # -------------------------------------------------------
@@ -545,13 +594,12 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     """
     複数ソース（IRBank -> Minkabu -> Karauri -> Yahoo -> Kabutan）を順に試し、
     信用残（MarginBuy/MarginSell）と逆日歩（Hibush）を取得する。
-    IRBankとYahooを追加し、さらに堅牢化。
     """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
         return pd.DataFrame()
 
-    # アクセス偽装用のヘッダー（RefererとAcceptを強化）
+    # アクセス偽装用のヘッダー
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -562,7 +610,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     # ----- 共通: 数値クリーニング関数 -----
     def clean_num(x):
         if isinstance(x, str):
-            # '株', '円', '倍', '%', カンマを除去
             x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
             if not x: return 0
             try: return float(x)
@@ -571,24 +618,18 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 
     # ----- 共通: 日付クリーニング関数 -----
     def parse_date_col(df, col_name="Date"):
-        # 文字列として処理
         dates = pd.to_datetime(df[col_name], errors='coerce')
         if dates.isna().any():
             today = date.today()
             current_year = today.year
             def try_parse(x):
                 if pd.isna(x) or str(x).strip() == "": return pd.NaT
-                x_clean = str(x).split(' ')[0] # "1/29 (木)" -> "1/29"
+                x_clean = str(x).split(' ')[0]
                 x_clean = x_clean.replace("年", "/").replace("月", "/").replace("日", "")
-                
-                # YYYY/MM/DD 形式をトライ
                 try: return pd.to_datetime(x_clean)
                 except: pass
-                
-                # MM/DD 形式をトライ（当年補完）
                 try:
                     dt = pd.to_datetime(f"{current_year}/{x_clean}")
-                    # 未来の日付なら昨年にする（例: 現在1月でデータが12月）
                     if dt.date() > today + timedelta(days=2):
                         dt = dt.replace(year=current_year - 1)
                     return dt
@@ -598,51 +639,37 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 
     # ----- 1. IRBank Scraper (Priority) -----
     def _scrape_irbank():
-        # IRBANKは「fee」または「karauri」ページにデータがある
         urls = [f"https://irbank.net/{code}/fee", f"https://irbank.net/{code}/karauri"]
         for url in urls:
             try:
                 res = requests.get(url, headers=headers, timeout=5)
                 if res.status_code != 200: continue
-                
-                # バイト列で渡して文字化けを防ぐ
                 try: dfs = pd.read_html(io.BytesIO(res.content))
                 except: continue
-                
                 target = pd.DataFrame()
                 for df in dfs:
                     col_str = " ".join([str(c) for c in df.columns])
-                    # 「日付」かつ（「逆日歩」or「融資」or「貸株」or「残」）が含まれるテーブル
                     if "日付" in col_str and ("逆日歩" in col_str or "融資" in col_str or "貸株" in col_str or "残" in col_str):
                         target = df
-                        # MultiIndexのフラット化
                         if isinstance(target.columns, pd.MultiIndex):
                             target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
                         else:
                             target.columns = [str(c).strip() for c in target.columns]
                         break
-                
                 if target.empty: continue
-                
                 rename_map = {}
                 for c in target.columns:
                     if "日付" in c: rename_map[c] = "Date"
                     elif "逆日歩" in c: rename_map[c] = "Hibush"
-                    # IRBankの日証金データ: 融資残(Buying), 貸株残(Selling)
                     elif "融資" in c and "残" in c: rename_map[c] = "MarginBuy"
                     elif "貸株" in c and "残" in c: rename_map[c] = "MarginSell"
-                    # 簡易パターン
                     elif "売残" in c and "信用" not in c: rename_map[c] = "MarginSell"
                     elif "買残" in c and "信用" not in c: rename_map[c] = "MarginBuy"
-                
                 target = target.rename(columns=rename_map)
                 if "Date" not in target.columns: continue
-                
                 target["Date"] = parse_date_col(target, "Date")
                 for col in ["MarginBuy", "MarginSell", "Hibush"]:
                     if col in target.columns: target[col] = target[col].apply(clean_num)
-                
-                # 有効なデータがあれば採用
                 df_clean = target.dropna(subset=["Date"]).sort_values("Date")
                 if not df_clean.empty and ("MarginBuy" in df_clean.columns or "MarginSell" in df_clean.columns):
                     return df_clean
@@ -730,7 +757,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             target = pd.DataFrame()
             for df in dfs:
                 col_str = " ".join([str(c) for c in df.columns])
-                # Yahooのテーブルはシンプル
                 if "日付" in col_str and "売り残" in col_str and "買い残" in col_str:
                     target = df
                     target.columns = [str(c).strip() for c in target.columns]
@@ -746,7 +772,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             target["Date"] = parse_date_col(target, "Date")
             for col in ["MarginBuy", "MarginSell"]:
                 if col in target.columns: target[col] = target[col].apply(clean_num)
-            # Yahooは逆日歩がないので0埋め
             target["Hibush"] = 0
             return target.dropna(subset=["Date"]).sort_values("Date")
         except: return pd.DataFrame()
@@ -782,23 +807,17 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
         except: return pd.DataFrame()
 
     # --- EXECUTION FLOW ---
-    # 優先度順に試行: IRBANK -> Minkabu -> Karauri -> Yahoo -> Kabutan
-    
     df = _scrape_irbank()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
-        return df
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
     
     df = _scrape_minkabu()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
-        return df
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
     
     df = _scrape_karauri()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
-        return df
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
 
     df = _scrape_yahoo()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
-        return df
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
         
     df = _scrape_kabutan()
     return df
