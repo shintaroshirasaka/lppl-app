@@ -6,6 +6,10 @@ from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
 import os
+import time
+import hmac
+import hashlib
+import base64
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -14,11 +18,6 @@ import os
 # Token format:
 #   base64url("email|exp").base64url(hex(hmac_sha256("email|exp", secret)))
 # =======================================================
-import time
-import hmac
-import hashlib
-import base64
-
 
 def _b64url_decode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
@@ -172,16 +171,29 @@ def fit_lppl_bubble(price_series: pd.Series):
     ss_tot = np.sum((log_price - log_price.mean()) ** 2)
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    first_date = price_series.index[0]
-    tc_days = float(params[4])  # calendar-day approximation
-    tc_date = first_date + timedelta(days=tc_days)
+    # --- FIX: Correct date conversion (Trading Index -> Calendar Date) ---
+    # Instead of adding tc_days (trading count) to first_date,
+    # we anchor to the LAST date.
+    # tc_days is the fitted index. The last data point is at index (N - 1).
+    # future_days = tc_days - (N - 1)
+    # We add this future delta to the last known calendar date.
+    
+    tc_val = float(params[4])
+    last_idx = N - 1
+    future_units = tc_val - last_idx
+    
+    # Simple assumption: 1 index unit projected forward = 1 calendar day
+    # (This is conservative. If you want trading days, you might multiply by 7/5, 
+    # but 1:1 is safer for simple projection).
+    last_date = price_series.index[-1]
+    tc_date = last_date + timedelta(days=future_units)
 
     return {
         "params": params,
         "price_fit": price_fit,
         "r2": r2,
         "tc_date": tc_date,
-        "tc_days": tc_days,
+        "tc_days": tc_val,
     }
 
 
@@ -250,9 +262,13 @@ def fit_lppl_negative_bubble(
     ss_tot = np.sum((neg_log_down - neg_log_down.mean()) ** 2)
     r2_down = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
-    first_down_date = down_series.index[0]
-    tc_days = float(params_down[4])
-    tc_bottom_date = first_down_date + timedelta(days=tc_days)
+    # --- FIX: Correct date conversion for negative bubble ---
+    tc_val = float(params_down[4])
+    last_idx = N_down - 1
+    future_units = tc_val - last_idx
+    
+    last_date = down_series.index[-1]
+    tc_bottom_date = last_date + timedelta(days=future_units)
 
     return {
         "ok": True,
@@ -260,7 +276,7 @@ def fit_lppl_negative_bubble(
         "price_fit_down": price_fit_down,
         "r2": r2_down,
         "tc_date": tc_bottom_date,
-        "tc_days": tc_days,
+        "tc_days": tc_val,
         "params": params_down,
     }
 
@@ -357,9 +373,9 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
                              end_date: pd.Timestamp,
                              down_tc_date: pd.Timestamp | None) -> tuple[str, int]:
     """
-    SAFE   : tc_up > now, score 0..59 (nearer => higher)
-    CAUTION: tc_up < now and no down_tc, score 60..79 (older => higher)
-    HIGH   : down_tc exists, score 80..100 (progressed => higher)
+    SAFE    : tc_up > now, score 0..59 (nearer => higher)
+    CAUTION : tc_up < now and no down_tc, score 60..79 (older => higher)
+    HIGH    : down_tc exists, score 80..100 (progressed => higher)
     """
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
