@@ -407,14 +407,19 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_date - end_norm).days)
     bullets: list[str] = []
+    
+    # 14日早期警戒ルールをテキストにも反映
+    WARNING_DAYS = 14
+    
     if days_to_tc < 0:
         bullets.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
         bullets.append("新規の追随買いは控えめに。保有なら部分利確・ヘッジを検討。")
-    elif days_to_tc <= 30:
-        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンが近い）。")
-        bullets.append("新規ロングは慎重（サイズ縮小・分割）。利確/ヘッジ準備。")
+    elif days_to_tc <= WARNING_DAYS:
+        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーン：14日以内）。")
+        bullets.append("早期警戒期間に入っています。新規ロングは慎重（サイズ縮小・分割）。利確/ヘッジ準備。")
     else:
-        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーンは監視段階）。")
+        bullets.append(f"t_c まで残り {days_to_tc} 日（安全圏）。")
+        
     verdict, _ = bubble_judgement(r2, m, omega)
     bullets.append(f"バブル判定（R²→m→ω）：{verdict}")
     if np.isfinite(r2) and r2 < 0.65:
@@ -824,11 +829,13 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 
 
 # =======================================================
-# FINAL SCORE
+# FINAL SCORE (UPDATED WITH 14-DAY WARNING RULE)
 # =======================================================
 def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
+    
+    # 優先度1: 下落トレンド（High Risk）
     if down_tc_date is not None:
         down_tc = pd.Timestamp(down_tc_date).normalize()
         delta = (down_tc - now).days
@@ -838,12 +845,24 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
         past = abs(delta)
         s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
         return ("HIGH", int(round(_clamp(s, 90, 100))))
+    
+    # 優先度2: 上昇トレンド（Safe/Caution判定）
+    # 【ロジック変更】tcまで「残り14日」を切ったらCAUTION（黄色）にする
     gap = (tc_up - now).days
-    if gap > 0:
+    WARNING_BUFFER = 14  # 早期警戒ライン（14日）
+
+    # SAFE: 14日より未来
+    if gap > WARNING_BUFFER:
         s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
         return ("SAFE", int(round(_clamp(s, 0, 59))))
-    past = abs(gap)
-    s = _lin_map(past, UP_PAST_NEAR_DAYS, UP_PAST_FAR_DAYS, 60, 79)
+
+    # CAUTION: 14日以内、当日、または過去
+    # gapが14ならスコア60（注意入り口）、gapが過去に行くほどスコア上昇
+    # gap=14 -> past_warning=0
+    # gap=0  -> past_warning=14
+    past_warning = WARNING_BUFFER - gap
+    
+    s = _lin_map(past_warning, 0, UP_PAST_FAR_DAYS, 60, 79)
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
@@ -1020,198 +1039,3 @@ def main():
         div[data-baseweb="input"] svg { fill: #ffffff !important; }
         div[data-testid="stFormSubmitButton"] button { background-color: #222428 !important; color: #ffffff !important; border: 1px solid #555 !important; }
         div[data-testid="stFormSubmitButton"] button:hover { background-color: #444 !important; border-color: #888 !important; color: #ffffff !important; }
-        [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
-        .custom-error { background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    def show_error_black(msg: str):
-        st.markdown(f"""<div class="custom-error">{msg}</div>""", unsafe_allow_html=True)
-
-    st.markdown("## Out-stander（管理者用）")
-    st.caption(f"認証ユーザー: {authed_email}")
-
-    with st.form("input_form"):
-        ticker = st.text_input("Ticker", value="", placeholder="例: NVDA / 0700.HK / 7203.T")
-        today = date.today()
-        default_start = today - timedelta(days=220)
-        col1, col2 = st.columns(2)
-        with col1: start_date = st.date_input("Start", default_start)
-        with col2: end_date = st.date_input("End", today)
-        submitted = st.form_submit_button("Run")
-
-    if not submitted: st.stop()
-    if not ticker.strip():
-        show_error_black("Tickerが無効、または価格データが取得できません。")
-        st.stop()
-
-    try:
-        price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
-    except Exception:
-        show_error_black("Tickerが無効、または価格データが取得できません。")
-        st.stop()
-
-    if len(price_series) < 30:
-        show_error_black("Tickerが無効、または価格データが取得できません。")
-        st.stop()
-
-    key = series_cache_key(price_series)
-    idx_int = price_series.index.astype("int64").to_numpy()
-    vals = price_series.to_numpy(dtype="float64")
-
-    try:
-        bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
-    except Exception:
-        show_error_black("フィットに失敗しました（上昇LPPL）。")
-        st.stop()
-
-    peak_date = price_series.idxmax()
-    peak_price = float(price_series.max())
-    start_price_val = float(price_series.iloc[0])
-    gain = peak_price / start_price_val
-    gain_pct = (gain - 1.0) * 100.0
-
-    peak_date_int = int(pd.Timestamp(peak_date).value)
-    neg_res = fit_lppl_negative_bubble_cached(key, vals, idx_int, peak_date_int=peak_date_int, min_points=10, min_drop_ratio=0.03)
-
-    tc_up_date = pd.Timestamp(bubble_res["tc_date"])
-    end_ts = pd.Timestamp(end_date)
-    down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
-
-    signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="上昇モデル")
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"t_c（上昇） {pd.Timestamp(bubble_res['tc_date']).date()}")
-    ax.axvline(peak_date, color="white", linestyle=":", label=f"ピーク {pd.Timestamp(peak_date).date()}")
-    if neg_res.get("ok"):
-        down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="下落（ピーク以降）")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="下落モデル")
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"t_c（下落） {pd.Timestamp(neg_res['tc_date']).date()}")
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Price (Adj Close preferred)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
-    st.pyplot(fig)
-
-    if signal_label == "HIGH":
-        risk_label = "High"; risk_color = "#ff4d4f"
-    elif signal_label == "CAUTION":
-        risk_label = "Caution"; risk_color = "#ffc53d"
-    else:
-        risk_label = "Safe"; risk_color = "#52c41a"
-
-    col_score, col_gain = st.columns(2)
-    with col_score:
-        score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア</div>
-            <div style="display: flex; align-items: baseline; gap: 12px;">
-                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
-                <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
-            </div></div>"""
-        st.markdown(score_card_html, unsafe_allow_html=True)
-    with col_gain:
-        gain_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">上昇倍率（開始→ピーク）</div>
-            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">{gain:.2f}x</div>
-            <div style="margin-top: 6px; display: inline-block; padding: 2px 10px; border-radius: 999px; background-color: #102915; color: #52c41a; font-size: 0.85rem; font-weight: 500;">{gain_pct:+.1f}%</div>
-        </div>"""
-        st.markdown(gain_card_html, unsafe_allow_html=True)
-
-    st.markdown("---")
-    pdict = bubble_res.get("param_dict", {})
-    r2 = float(bubble_res.get("r2", np.nan))
-    m = float(pdict.get("m", np.nan))
-    omega = float(pdict.get("omega", np.nan))
-    render_bubble_flow(r2, m, omega)
-    verdict, _ = bubble_judgement(r2, m, omega)
-    st.markdown("### 管理者指標（バブル判定のための最小説明）")
-    tc_up_norm = pd.Timestamp(bubble_res["tc_date"]).normalize()
-    end_norm = pd.Timestamp(end_date).normalize()
-    days_to_tc = int((tc_up_norm - end_norm).days)
-    rmse = float(bubble_res.get("rmse", np.nan))
-    c_over_b = float(pdict.get("abs_C_over_B", np.nan))
-    log_period = float(pdict.get("log_period_2pi_over_omega", np.nan))
-    N = int(bubble_res.get("N", 0))
-    admin_rows = [
-        ["① R²（対数空間）", r2, "バブル判定の条件：R²≥0.65。"],
-        ["② m（最重要）", m, "バブル的：m∈[0.25,0.70]（典型0.3〜0.6）。"],
-        ["③ ω", omega, "バブル的：ω∈[6,13]。ω≥18は短周期すぎ→バブル“風”（注意）。"],
-        ["結論（バブル判定）", verdict, "上の判定フローの最終結論。"],
-        ["t_c（日付・近似）", str(tc_up_norm.date()), "tcが近い/通過＝終盤の可能性。"],
-        ["t_cまでの残日数", days_to_tc, "終盤度（短い/通過ほど終盤リスク↑）。"],
-        ["RMSE（対数空間）", rmse, "フィットの安定度（小さいほど安定）。"],
-        ["|C/B|", c_over_b, "≥2.0は“それっぽいフィット”の疑いが増える。"],
-        ["2π/ω", log_period, "周期の別表現。"],
-        ["フィット期間 N", N, "期間N。"]
-    ]
-    st.dataframe(pd.DataFrame(admin_rows, columns=["指標", "値", "解説"]), use_container_width=True)
-    st.markdown("#### 生パラメータ（A, B, C, m, tc, ω, φ）")
-    raw_params = bubble_res.get("params", np.array([], dtype=float)).astype(float)
-    if raw_params.size == 7:
-        raw_df = pd.DataFrame([raw_params], columns=["A", "B", "C", "m", "tc", "omega", "phi"])
-    else:
-        raw_df = pd.DataFrame([raw_params])
-    st.dataframe(raw_df, use_container_width=True)
-    st.markdown("#### フィット品質フラグ（簡易サニティチェック）")
-    binfo = bubble_res.get("bounds_info", {})
-    if raw_params.size == 7:
-        A_, B_, C_, m_, tc_, omega_, phi_ = [float(x) for x in raw_params]
-    else:
-        A_, B_, C_, m_, tc_, omega_, phi_ = [np.nan]*7
-    def near_bound(x, lo, hi, tol=0.02):
-        if not np.isfinite(x) or not np.isfinite(lo) or not np.isfinite(hi) or hi == lo: return False
-        r = (x - lo) / (hi - lo)
-        return (r < tol) or (r > 1 - tol)
-    flags = []
-    if np.isfinite(m_) and (m_ < 0.2 or m_ > 0.8): flags.append("m が一般的な“バブル的帯域”から外れています。")
-    if near_bound(m_, binfo.get("m_low", np.nan), binfo.get("m_high", np.nan)): flags.append("m が境界付近です（境界解の疑い）。")
-    if near_bound(tc_, binfo.get("tc_low", np.nan), binfo.get("tc_high", np.nan)): flags.append("tc が境界付近です。")
-    if near_bound(omega_, binfo.get("omega_low", np.nan), binfo.get("omega_high", np.nan)): flags.append("ω が境界付近です。")
-    if np.isfinite(c_over_b) and c_over_b > 2.0: flags.append("|C/B| が大きいです（振動過多）。")
-    if flags: st.write(pd.DataFrame({"フラグ": flags}))
-    else: st.write("単純なヒューリスティックでは明確な赤信号は見当たりません。")
-
-    st.markdown("### 投資判断向けの解釈（管理者のみ）")
-    summary, bullets = admin_interpretation_text(bubble_res, end_date)
-    with st.expander("投資判断向けの解釈メモ（管理者のみ）", expanded=True):
-        st.markdown(f"**要約**：{summary}")
-        st.markdown("**ポイント**")
-        st.markdown("\n".join([f"- {b}" for b in bullets]))
-        st.markdown("---")
-        st.markdown("**使い方（実務）**")
-        st.markdown("- バブル判定は **R²（信用）×m（形）×ω（自然さ）** の3点で判断。\n- tc は『バブルかどうか』ではなく『終盤かどうか』。")
-
-    st.markdown("---")
-    with st.expander("Mid-term Quant 判定表（A〜J + Threshold + Judgement）", expanded=False):
-        col_b1, col_b2 = st.columns([2, 1])
-        with col_b1: bench = st.text_input("Benchmark（指数）", value="ACWI", help="例: ACWI / ^GSPC / ^N225")
-        with col_b2: mid_window = st.number_input("WINDOW（判定表）", min_value=5, max_value=120, value=20, step=1)
-        try:
-            df_mid = build_midterm_quant_table(ticker=ticker.strip(), bench=bench.strip(), start_date=start_date, end_date=end_date, window=int(mid_window))
-            st.dataframe(df_mid[["Block", "Metric", "Value", "Threshold", "Judgement", "Note"]], use_container_width=True, hide_index=True)
-        except Exception as e:
-            show_error_black(f"判定表の生成に失敗しました: {e}")
-
-    st.markdown("---")
-    with st.expander("グラフ（Index/Deviation/Regression/Vol/Drawdown）", expanded=False):
-        gcol1, gcol2, gcol3 = st.columns([2, 1, 1])
-        with gcol1: graph_bench = st.text_input("Benchmark（グラフ用）", value="ACWI")
-        with gcol2: graph_window = st.number_input("WINDOW（グラフ用）", min_value=5, max_value=120, value=20, step=1)
-        with gcol3: trading_days = st.number_input("Trading days/year", min_value=200, max_value=365, value=252, step=1)
-        try:
-            prices_pair = fetch_prices_pair_cached(ticker=ticker.strip(), bench=graph_bench.strip(), start_date=start_date, end_date=end_date)
-            st.caption(f"Data: {prices_pair.index.min().date()} to {prices_pair.index.max().date()} | rows={len(prices_pair)}")
-            render_graph_pack_from_prices(prices=prices_pair, ticker=ticker.strip(), bench=graph_bench.strip(), window=int(graph_window), trading_days=int(trading_days))
-        except Exception as e:
-            show_error_black(f"グラフ表示に失敗しました: {e}")
-
-if __name__ == "__main__":
-    main()
