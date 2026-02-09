@@ -19,12 +19,12 @@ import io
 import platform
 
 # =======================================================
-# FONT SETUP (Standard English Font)
+# FONT SETUP (Luxury / Serif Style)
 # =======================================================
-# Removed complex Japanese font detection. 
-# Setting a standard sans-serif font for English display.
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial', 'Helvetica', 'sans-serif']
+# Changed to Serif fonts for a "High Net Worth" / Editorial look
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif', 'Georgia', 'serif']
+plt.rcParams['axes.unicode_minus'] = False
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -878,60 +878,48 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 # =======================================================
 # Render Graph Pack
 # =======================================================
+
+# REDESIGNED: Minimalist "High-End" Text Overlay
 def draw_score_overlay(ax, score: int, label: str):
     """
-    Draw Score and Signal on Matplotlib Axes
+    Draw Minimalist Score Info in Top Right (Editorial Style)
+    No Boxes, No Heavy Badges. Just elegant type.
     """
-    # Signal colors
-    if label == "HIGH":
-        badge_bg = "#ff4d4f"; badge_fg = "white"
-    elif label == "CAUTION":
-        badge_bg = "#ffc53d"; badge_fg = "black"
-    else: # SAFE
-        badge_bg = "#52c41a"; badge_fg = "white"
+    # Colors
+    GOLD = "#d4af37"
+    TEXT_MAIN = "#E0E0E0"
+    TEXT_DIM = "#808080"
+    
+    # Position: Top Right
+    x_pos = 0.95
+    y_pos = 0.95
+    
+    # 1. Label "RISK SCORE"
+    ax.text(x_pos, y_pos, "RISK SCORE", transform=ax.transAxes,
+            fontsize=9, color=TEXT_DIM, fontweight='normal', ha='right', va='top', fontname='serif', zorder=20)
+    
+    # 2. Score Value (Large, Gold)
+    ax.text(x_pos, y_pos - 0.04, str(score), transform=ax.transAxes,
+            fontsize=36, color=GOLD, fontweight='bold', ha='right', va='top', fontname='serif', zorder=20)
+    
+    # 3. Dot Indicator next to score
+    dot_color = GOLD if label in ["CAUTION", "HIGH"] else "#52c41a"
+    ax.scatter([x_pos + 0.02], [y_pos - 0.07], s=40, color=dot_color, transform=ax.transAxes, zorder=20)
 
-    # 1. "Score" Label (Light gray)
-    ax.text(0.04, 0.92, "Score", transform=ax.transAxes,
-            fontsize=12, color='#aaaaaa', fontweight='normal', zorder=20)
-            
-    # 2. Score Value (White, Large)
-    ax.text(0.04, 0.83, str(score), transform=ax.transAxes,
-            fontsize=32, color='white', fontweight='bold', zorder=20)
-            
-    # 3. Signal Badge (Next to Score)
-    ax.text(0.18, 0.85, f" {label} ", transform=ax.transAxes,
-            fontsize=10, color=badge_fg, fontweight='bold',
-            bbox=dict(facecolor=badge_bg, edgecolor='none', boxstyle='round,pad=0.4', alpha=0.95),
-            zorder=20, verticalalignment='bottom')
-
-    # 4. Background Panel (Semi-transparent black)
-    rect = patches.FancyBboxPatch(
-        (0.02, 0.81), width=0.28, height=0.16,
-        boxstyle="round,pad=0.02",
-        transform=ax.transAxes,
-        facecolor="#000000", alpha=0.6,
-        edgecolor="#333333", linewidth=1,
-        zorder=15
-    )
-    ax.add_patch(rect)
+    # 4. Signal text underneath
+    ax.text(x_pos, y_pos - 0.13, f"SIGNAL: {label}", transform=ax.transAxes,
+            fontsize=8, color=TEXT_DIM, fontweight='normal', ha='right', va='top', fontname='sans-serif', zorder=20, alpha=0.8)
 
 
 def draw_logo_overlay(ax):
     """
-    Simulated Logo Overlay
-    Text: 'OUT-STANDER' in Serif, bottom left.
-    Visual: Outline added for visibility.
+    Minimalist Watermark Logo (Bottom Right)
+    Dark Gold, Serif, Large but subtle.
     """
-    # Logo text (Serif Font, Gold color)
-    text_obj = ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
-            fontsize=16, color='#e5c07b', fontweight='bold',
-            fontname='serif', zorder=20, alpha=0.9)
-    
-    # Outline (Black stroke)
-    text_obj.set_path_effects([
-        path_effects.Stroke(linewidth=3, foreground='black'),
-        path_effects.Normal()
-    ])
+    # Logo text
+    ax.text(0.95, 0.03, "OUT-STANDER", transform=ax.transAxes,
+            fontsize=24, color='#3d3320', fontweight='bold',
+            fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
 
 
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
@@ -941,8 +929,8 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ret = np.log(prices / prices.shift(1)).dropna()
 
     fig, ax = plt.subplots(figsize=(11, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor("#050505")
+    ax.set_facecolor("#050505")
     ax.plot(index100.index, index100[ticker], label=f"{ticker} (Index)", color="red")
     ax.plot(index100.index, index100[bench],  label=f"{bench} (Index)",  color="blue")
     ax.set_title("Cumulative Performance (Index = 100)", color="white")
@@ -1095,16 +1083,17 @@ def main():
     st.markdown(
         """
         <style>
-        .stApp { background-color: #0b0c0e !important; color: #ffffff !important; }
-        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; }
-        input.st-ai, input.st-ah, div[data-baseweb="input"] { background-color: #1a1c1f !important; color: #ffffff !important; border-color: #444 !important; }
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap');
+        .stApp { background-color: #050505 !important; color: #ffffff !important; }
+        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; font-family: 'Times New Roman', serif; }
+        input.st-ai, input.st-ah, div[data-baseweb="input"] { background-color: #111111 !important; color: #ffffff !important; border-color: #333 !important; }
         input { color: #ffffff !important; }
         input::placeholder { color: rgba(255,255,255,0.45) !important; }
         div[data-baseweb="input"] svg { fill: #ffffff !important; }
-        div[data-testid="stFormSubmitButton"] button { background-color: #222428 !important; color: #ffffff !important; border: 1px solid #555 !important; }
-        div[data-testid="stFormSubmitButton"] button:hover { background-color: #444 !important; border-color: #888 !important; color: #ffffff !important; }
+        div[data-testid="stFormSubmitButton"] button { background-color: #1a1a1a !important; color: #d4af37 !important; border: 1px solid #333 !important; font-family: 'Times New Roman', serif; }
+        div[data-testid="stFormSubmitButton"] button:hover { background-color: #d4af37 !important; border-color: #d4af37 !important; color: #000000 !important; }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
-        .custom-error { background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }
+        .custom-error { background-color: #141518; border: 1px solid #2a2c30; border-radius: 0px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1113,8 +1102,8 @@ def main():
     def show_error_black(msg: str):
         st.markdown(f"""<div class="custom-error">{msg}</div>""", unsafe_allow_html=True)
 
-    st.markdown("## Out-stander (Admin)")
-    st.caption(f"Auth User: {authed_email}")
+    # st.markdown("## Out-stander (Admin)") # Removed header to let graph take focus
+    # st.caption(f"Auth User: {authed_email}")
 
     with st.form("input_form"):
         ticker = st.text_input("Ticker", value="", placeholder="Ex: NVDA / 0700.HK / 7203.T")
@@ -1123,7 +1112,7 @@ def main():
         col1, col2 = st.columns(2)
         with col1: start_date = st.date_input("Start", default_start)
         with col2: end_date = st.date_input("End", today)
-        submitted = st.form_submit_button("Run")
+        submitted = st.form_submit_button("Run Analysis")
 
     if not submitted: st.stop()
     if not ticker.strip():
@@ -1166,36 +1155,85 @@ def main():
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # -----------------------------------------------------------
-    # MAIN CHART RENDER with OVERLAY (Modified)
+    # MAIN CHART RENDER with OVERLAY (REDESIGNED FOR LUXURY)
     # -----------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    # Use a slightly wider aspect ratio for cinematic look
+    fig, ax = plt.subplots(figsize=(12, 6.5))
     
-    # Plot Data
-    ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Uptrend Model")
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"t_c (Up) {pd.Timestamp(bubble_res['tc_date']).date()}")
-    ax.axvline(peak_date, color="white", linestyle=":", label=f"Peak {pd.Timestamp(peak_date).date()}")
+    # Deep Black Background
+    BG_COLOR = "#050505"
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+    
+    # --- Data Plotting ---
+    # 1. Price (White, Thin, Crisp)
+    ax.plot(price_series.index, price_series.values, color="#F0F0F0", linewidth=0.8, alpha=0.9, zorder=5)
+    
+    # 2. Model (Gold, Smooth, Prominent)
+    # Using a Champagne Gold color
+    GOLD_COLOR = "#C5A059" 
+    ax.plot(price_series.index, bubble_res["price_fit"], color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
+    
+    # 3. Vertical Lines (Very subtle dotted)
+    ax.axvline(bubble_res["tc_date"], color=GOLD_COLOR, linestyle=":", linewidth=0.8, alpha=0.6)
+    ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
     
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="Drop (After Peak)")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Downtrend Model")
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"t_c (Down) {pd.Timestamp(neg_res['tc_date']).date()}")
-    
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Price (Adj Close preferred)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    
-    # Legend
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
+        ax.plot(down.index, down.values, color="cyan", linewidth=0.8, alpha=0.7)
+        ax.plot(down.index, neg_res["price_fit_down"], "--", color="#008b8b", linewidth=1.5, alpha=0.8)
 
-    # ★ ADD OVERLAY HERE (Score & Signal on Chart)
+    # --- Direct Labeling (No Legend Box) ---
+    last_date = price_series.index[-1]
+    last_price = price_series.values[-1]
+    last_model_val = bubble_res["price_fit"][-1]
+    
+    # Offset dates slightly for text placement
+    text_date_offset = last_date + timedelta(days=2)
+    
+    # Label: Ticker
+    ax.text(text_date_offset, last_price, f" {ticker.strip()}", color="#F0F0F0", 
+            fontsize=10, fontweight='bold', fontname='serif', va='center')
+    
+    # Label: Model
+    ax.text(text_date_offset, last_model_val, " Model", color=GOLD_COLOR, 
+            fontsize=10, fontweight='bold', fontname='serif', va='center')
+    
+    # Label: Peak
+    # Find peak coordinates
+    peak_val = price_series.max()
+    peak_dt = price_series.idxmax()
+    ax.text(peak_dt, peak_val * 1.02, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", 
+            color="#888888", fontsize=7, ha='center', fontname='sans-serif')
+
+
+    # --- Header (Editorial Style) ---
+    # Top Left: Ticker Name + Subtitle
+    ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes,
+            fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
+    ax.text(0.02, 0.88, "MARKET ANALYSIS SYSTEM", transform=ax.transAxes,
+            fontsize=7, color="#666666", fontweight='bold', fontname='sans-serif', letter_spacing=2)
+
+    # --- Styling ---
+    # Remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # Dim left and bottom spines
+    ax.spines['left'].set_color('#333333')
+    ax.spines['bottom'].set_color('#333333')
+    
+    # Grid: Very subtle dots
+    ax.grid(color="#333333", linestyle=":", linewidth=0.5, alpha=0.3)
+    
+    # Axis Text
+    ax.tick_params(axis='x', colors='#888888', labelsize=8)
+    ax.tick_params(axis='y', colors='#888888', labelsize=8)
+
+    # --- Overlays ---
+    # ★ ADD SCORE (Top Right, Minimalist)
     draw_score_overlay(ax, score, signal_label)
     
-    # ★ ADD LOGO HERE (Text simulation)
+    # ★ ADD LOGO (Bottom Right, Watermark)
     draw_logo_overlay(ax)
 
     st.pyplot(fig)
@@ -1207,24 +1245,6 @@ def main():
         risk_label = "Caution"; risk_color = "#ffc53d"
     else:
         risk_label = "Safe"; risk_color = "#52c41a"
-
-    # HTML Card (Backup view below chart)
-    col_score, col_gain = st.columns(2)
-    with col_score:
-        score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Score Detail</div>
-            <div style="display: flex; align-items: baseline; gap: 12px;">
-                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
-                <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
-            </div></div>"""
-        st.markdown(score_card_html, unsafe_allow_html=True)
-    with col_gain:
-        gain_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Rise Factor (Start to Peak)</div>
-            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">{gain:.2f}x</div>
-            <div style="margin-top: 6px; display: inline-block; padding: 2px 10px; border-radius: 999px; background-color: #102915; color: #52c41a; font-size: 0.85rem; font-weight: 500;">{gain_pct:+.1f}%</div>
-        </div>"""
-        st.markdown(gain_card_html, unsafe_allow_html=True)
 
     st.markdown("---")
     pdict = bubble_res.get("param_dict", {})
