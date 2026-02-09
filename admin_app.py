@@ -882,34 +882,38 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 # REDESIGNED: Minimalist "High-End" Text Overlay
 def draw_score_overlay(ax, score: int, label: str):
     """
-    Draw Minimalist Score Info in Top Right (Editorial Style)
-    No Boxes, No Heavy Badges. Just elegant type.
+    Draw Minimalist Score Info in Top LEFT (moved from Right)
+    Color coded by score value.
     """
     # Colors
-    GOLD = "#d4af37"
-    TEXT_MAIN = "#E0E0E0"
+    # 0-59: Blue (Safe) -> Using Deep Sky Blue for visibility against black
+    # 60-79: Yellow (Caution)
+    # 80+: Red (High)
+    if score < 60:
+        score_color = "#00BFFF" # Deep Sky Blue
+    elif score < 80:
+        score_color = "#ffc53d" # Gold/Yellow
+    else:
+        score_color = "#ff4d4f" # Red
+
     TEXT_DIM = "#808080"
     
-    # Position: Top Right (Modified to avoid overlap)
-    # Move slightly left to ensure it doesn't touch the frame edge
-    x_pos = 0.95
-    y_pos = 0.95
+    # Position: Top LEFT (Below Ticker)
+    # Ticker is at y=0.92. Subtitle was at 0.88.
+    # Let's place score around y=0.82
+    x_pos = 0.02
+    y_pos = 0.86
     
     # 1. Label "RISK SCORE"
     ax.text(x_pos, y_pos, "RISK SCORE", transform=ax.transAxes,
-            fontsize=9, color=TEXT_DIM, fontweight='normal', ha='right', va='top', fontname='serif', zorder=20)
+            fontsize=9, color=TEXT_DIM, fontweight='normal', ha='left', va='bottom', fontname='serif', zorder=20)
     
-    # 2. Score Value (Large, Gold)
-    ax.text(x_pos, y_pos - 0.04, str(score), transform=ax.transAxes,
-            fontsize=36, color=GOLD, fontweight='bold', ha='right', va='top', fontname='serif', zorder=20)
+    # 2. Score Value (Large, Color Coded)
+    ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes,
+            fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
     
     # 3. Dot Indicator next to score
-    dot_color = GOLD if label in ["CAUTION", "HIGH"] else "#52c41a"
-    ax.scatter([x_pos + 0.02], [y_pos - 0.07], s=40, color=dot_color, transform=ax.transAxes, zorder=20)
-
-    # 4. Signal text underneath
-    ax.text(x_pos, y_pos - 0.13, f"SIGNAL: {label}", transform=ax.transAxes,
-            fontsize=8, color=TEXT_DIM, fontweight='normal', ha='right', va='top', fontname='sans-serif', zorder=20, alpha=0.8)
+    # ax.scatter([x_pos + 0.12], [y_pos - 0.05], s=40, color=score_color, transform=ax.transAxes, zorder=20)
 
 
 def draw_logo_overlay(ax):
@@ -1174,14 +1178,20 @@ def main():
     GOLD_COLOR = "#C5A059" 
     ax.plot(price_series.index, bubble_res["price_fit"], color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
     
-    # 3. Vertical Lines (Very subtle dotted)
-    ax.axvline(bubble_res["tc_date"], color=GOLD_COLOR, linestyle=":", linewidth=0.8, alpha=0.6)
+    # 3. Vertical Lines (UPDATED COLORS)
+    # Up Trend t_c = Red Dashed
+    ax.axvline(bubble_res["tc_date"], color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.8)
+    
+    # Peak line = White dotted
     ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
     
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="cyan", linewidth=0.8, alpha=0.7)
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="#008b8b", linewidth=1.5, alpha=0.8)
+        
+        # Down Trend t_c = Green Dashed
+        ax.axvline(neg_res["tc_date"], color="#00ff00", linestyle="--", linewidth=1.2, alpha=0.8)
 
     # --- FIX: Ensure Right Margin for Labels to Avoid Overlap ---
     # Extend X-axis to the right by about 15% to create a "margin" area for text
@@ -1212,15 +1222,12 @@ def main():
     ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", 
             color="#888888", fontsize=7, ha='center', fontname='sans-serif')
 
-    # --- Header (Editorial Style) ---
-    # Top Left: Ticker Name + Subtitle
+    # --- Header (Editorial Style - NO SUBTITLE) ---
+    # Top Left: Ticker Name Only
     ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes,
             fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
     
-    # Manually space the subtitle to simulate tracking
-    subtitle_text = " ".join("MARKET ANALYSIS SYSTEM")
-    ax.text(0.02, 0.88, subtitle_text, transform=ax.transAxes,
-            fontsize=7, color="#666666", fontweight='bold', fontname='sans-serif')
+    # (Removed Subtitle Text as requested)
 
     # --- Styling ---
     # Remove top and right spines
@@ -1238,7 +1245,7 @@ def main():
     ax.tick_params(axis='y', colors='#888888', labelsize=8)
 
     # --- Overlays ---
-    # ★ ADD SCORE (Top Right, Minimalist)
+    # ★ ADD SCORE (Top LEFT, Color Coded)
     draw_score_overlay(ax, score, signal_label)
     
     # ★ ADD LOGO (Bottom Right, Watermark)
