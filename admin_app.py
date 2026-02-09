@@ -21,8 +21,8 @@ import io
 # DESIGN SYSTEM: Tech-Luxury Theme
 # =======================================================
 THEME = {
-    "bg_main": "#0E1117",       # Streamlit default dark (背景全体)
-    "bg_chart": "#121212",      # Deep matte black (チャートとヘッダーの背景)
+    "bg_main": "#0E1117",       # Streamlit default dark
+    "bg_chart": "#121212",      # Deep matte black for charts
     "gold": "#C5A059",          # Champagne Gold (Key Accent)
     "platinum": "#E0E0E0",      # Platinum (Main Text/Line)
     "grid": "#333333",          # Subtle Grid
@@ -36,7 +36,7 @@ THEME = {
 # Set Global Matplotlib Styles for Luxury Feel
 plt.rcParams['font.family'] = THEME['font_sans']
 plt.rcParams['axes.facecolor'] = THEME['bg_chart']
-plt.rcParams['figure.facecolor'] = THEME['bg_chart'] # Figure全体の背景もチャート色に合わせる
+plt.rcParams['figure.facecolor'] = THEME['bg_main']
 plt.rcParams['text.color'] = THEME['platinum']
 plt.rcParams['axes.labelcolor'] = '#888888'
 plt.rcParams['xtick.color'] = '#888888'
@@ -912,15 +912,6 @@ def render_tech_luxury_chart(price_series, bubble_res, neg_res, ticker, score, s
         ax.text(tc_down, ax.get_ylim()[0], f"Bottom\n{tc_d_str}", color=THEME['green_glow'], 
                 ha='center', va='top', fontsize=8)
 
-    # -------------------------------------------------------
-    # 【修正追加】 右側にテキスト用の余白を作る
-    # -------------------------------------------------------
-    last_date = price_series.index[-1]
-    if bubble_res.get("price_fit") is not None:
-        # 現在のX軸の右端（数値）に、約45日分の余白を足す
-        margin_days = 45
-        ax.set_xlim(right=mdates.date2num(last_date + timedelta(days=margin_days)))
-
     # Watermark
     draw_luxury_watermark(ax)
     
@@ -1043,7 +1034,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
 def main():
     st.set_page_config(page_title="Out-stander Admin", layout="wide")
     
-    # CSS: Tech-Luxury Instrument Panel & Integration
+    # CSS: Tech-Luxury Instrument Panel
     st.markdown(f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Roboto+Mono:wght@300;400&display=swap');
@@ -1051,17 +1042,14 @@ def main():
         .stApp {{ background-color: {THEME['bg_main']} !important; }}
         div[data-testid="stMarkdownContainer"] p, label {{ color: #ffffff !important; }}
         
-        /* Header Container - チャートと一体化 */
+        /* Header Container */
         .instrument-header {{
             display: flex;
             justify-content: space-between;
             align-items: flex-end;
-            padding: 20px 20px 10px 20px; /* チャートの余白に合わせて調整 */
-            /* border-bottom: 1px solid #333;  <-- 削除 */
-            margin-bottom: 0px !important; /* <-- 0にする */
-            background-color: {THEME['bg_chart']} !important; /* 背景をチャートと同じに */
-            border-top-left-radius: 10px;
-            border-top-right-radius: 10px;
+            padding: 20px 0;
+            border-bottom: 1px solid #333;
+            margin-bottom: 20px;
         }}
         
         /* Ticker Styling */
@@ -1107,17 +1095,6 @@ def main():
         .status-dot.caution {{ background-color: #FFD700; box-shadow: 0 0 8px #FFD700; }}
         .status-dot.high {{ background-color: {THEME['red_glow']}; box-shadow: 0 0 8px {THEME['red_glow']}; }}
         
-        /* チャートのコンテナ上部のマージンを打ち消す */
-        div.stPyplot > div {{
-            margin-top: -1rem !important; /* Streamlitのデフォルトギャップを相殺 */
-        }}
-        
-        /* チャート自体の角丸調整（ヘッダーと合わせる） */
-        div.stPyplot figure {{
-            border-bottom-left-radius: 10px !important;
-            border-bottom-right-radius: 10px !important;
-        }}
-
         /* Remove Streamlit Elements */
         div[data-testid="stHeader"] {{ display: none; }}
         footer {{ display: none; }}
