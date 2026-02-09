@@ -4,6 +4,8 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.patches as patches
+import matplotlib.font_manager as fm
+import matplotlib.patheffects as path_effects # 縁取り用
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
@@ -14,6 +16,56 @@ import hmac
 import hashlib
 import base64
 import io
+import platform
+
+# =======================================================
+# FONT SETUP (Auto-detect Japanese Font)
+# =======================================================
+def configure_japanese_font():
+    """
+    OS環境に合わせて日本語フォントを自動設定する。
+    Matplotlibのデフォルトでは日本語が表示できない（□□□になる）ため。
+    """
+    system = platform.system()
+    font_path = None
+    
+    # OSごとの代表的な日本語フォントパス候補
+    if system == "Windows":
+        font_candidates = [
+            "C:\\Windows\\Fonts\\meiryo.ttc",
+            "C:\\Windows\\Fonts\\msgothic.ttc",
+            "C:\\Windows\\Fonts\\yugothr.ttc"
+        ]
+    elif system == "Darwin": # Mac
+        font_candidates = [
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/Library/Fonts/Osaka.ttf",
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"
+        ]
+    else: # Linux (Streamlit Cloud, Docker etc)
+        font_candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/ipafont-gothic/ipag.ttf"
+        ]
+        
+    for path in font_candidates:
+        if os.path.exists(path):
+            font_path = path
+            break
+            
+    if font_path:
+        # フォントプロパティを生成してMatplotlibに設定
+        font_prop = fm.FontProperties(fname=font_path)
+        plt.rcParams['font.family'] = font_prop.get_name()
+        return font_prop
+    else:
+        # 見つからない場合はデフォルト（文字化けする可能性あり）
+        return None
+
+# フォント設定を実行（グローバル設定）
+JP_FONT = configure_japanese_font()
+
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -909,11 +961,18 @@ def draw_logo_overlay(ax):
     """
     ロゴ（画像）がないため、テキスト描画でロゴを再現する。
     左下に 'OUT-STANDER' をSerifフォントで配置。
+    ★視認性向上のために「縁取り（Outline）」を追加。
     """
     # ロゴ風テキスト (Serif Font, Gold color)
-    ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
+    text_obj = ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
             fontsize=16, color='#e5c07b', fontweight='bold',
             fontname='serif', zorder=20, alpha=0.9)
+    
+    # 縁取り（黒いアウトライン）を追加して、線と重なっても読めるようにする
+    text_obj.set_path_effects([
+        path_effects.Stroke(linewidth=3, foreground='black'),
+        path_effects.Normal()
+    ])
 
 
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
@@ -932,7 +991,14 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylabel("Index", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    
+    # 日本語フォント設定があれば適用
+    if JP_FONT:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
+        ax.set_title("Cumulative Performance (Index = 100)", color="white", fontproperties=JP_FONT)
+    else:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white")
+        
     st.pyplot(fig)
 
     X = dev[bench].dropna(); Y = dev[ticker].dropna()
@@ -965,7 +1031,11 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylabel("Std of Deviation (pp)", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    
+    if JP_FONT:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
+    else:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white")
     st.pyplot(fig)
 
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
@@ -1055,9 +1125,16 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
                 
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                
+                if JP_FONT:
+                    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
+                else:
+                    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
             else:
-                ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                if JP_FONT:
+                    ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
+                else:
+                    ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
 
             st.pyplot(fig)
             st.caption("※データソース: IRBank / Minkabu / Karauri / Yahoo / Kabutan (自動切替)。直近のデータのみ表示されます。")
@@ -1170,8 +1247,12 @@ def main():
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
     
-    # Legend (Lower right or auto to avoid collision with top-left overlay)
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
+    # Legend
+    # 日本語フォントがあれば適用
+    if JP_FONT:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right', prop=JP_FONT)
+    else:
+        ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
 
     # ★ ADD OVERLAY HERE (Score & Signal on Chart)
     draw_score_overlay(ax, score, signal_label)
