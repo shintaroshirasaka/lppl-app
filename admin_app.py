@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.patches as patches
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
@@ -866,6 +867,46 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 # =======================================================
 # Render Graph Pack
 # =======================================================
+def draw_score_overlay(ax, score: int, label: str):
+    """
+    MatplotlibのAxes上にScoreとSignalを描画する
+    """
+    # 信号色定義
+    if label == "HIGH":
+        badge_bg = "#ff4d4f"; badge_fg = "white"
+    elif label == "CAUTION":
+        badge_bg = "#ffc53d"; badge_fg = "black"
+    else: # SAFE
+        badge_bg = "#52c41a"; badge_fg = "white"
+
+    # 1. "Score" Label (薄いグレー)
+    ax.text(0.04, 0.92, "Score", transform=ax.transAxes,
+            fontsize=12, color='#aaaaaa', fontweight='normal', zorder=20)
+            
+    # 2. Score Value (白、大きく)
+    ax.text(0.04, 0.83, str(score), transform=ax.transAxes,
+            fontsize=32, color='white', fontweight='bold', zorder=20)
+            
+    # 3. Signal Badge (Scoreの横に配置)
+    # bboxを使って角丸四角形を描画
+    ax.text(0.18, 0.85, f" {label} ", transform=ax.transAxes,
+            fontsize=10, color=badge_fg, fontweight='bold',
+            bbox=dict(facecolor=badge_bg, edgecolor='none', boxstyle='round,pad=0.4', alpha=0.95),
+            zorder=20, verticalalignment='bottom')
+
+    # 4. 背景パネル (読みやすくするための半透明の黒背景)
+    # スコア表示エリア全体をカバーする
+    rect = patches.FancyBboxPatch(
+        (0.02, 0.81), width=0.28, height=0.16,
+        boxstyle="round,pad=0.02",
+        transform=ax.transAxes,
+        facecolor="#000000", alpha=0.6,
+        edgecolor="#333333", linewidth=1,
+        zorder=15
+    )
+    ax.add_patch(rect)
+
+
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
     base = prices.iloc[0]
     index100 = prices / base * 100.0
@@ -1096,24 +1137,38 @@ def main():
 
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
+    # -----------------------------------------------------------
+    # MAIN CHART RENDER with OVERLAY (Modified)
+    # -----------------------------------------------------------
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
     ax.set_facecolor("#0b0c0e")
+    
+    # Plot Data
     ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
     ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="上昇モデル")
     ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"t_c（上昇） {pd.Timestamp(bubble_res['tc_date']).date()}")
     ax.axvline(peak_date, color="white", linestyle=":", label=f"ピーク {pd.Timestamp(peak_date).date()}")
+    
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="cyan", label="下落（ピーク以降）")
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="下落モデル")
         ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"t_c（下落） {pd.Timestamp(neg_res['tc_date']).date()}")
+    
     ax.set_xlabel("Date", color="white")
     ax.set_ylabel("Price (Adj Close preferred)", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    
+    # Legend (Lower right or auto to avoid collision with top-left overlay)
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
+
+    # ★ ADD OVERLAY HERE (Score & Signal on Chart)
+    draw_score_overlay(ax, score, signal_label)
+
     st.pyplot(fig)
+    # -----------------------------------------------------------
 
     if signal_label == "HIGH":
         risk_label = "High"; risk_color = "#ff4d4f"
@@ -1122,10 +1177,11 @@ def main():
     else:
         risk_label = "Safe"; risk_color = "#52c41a"
 
+    # HTML Card (Backup view below chart)
     col_score, col_gain = st.columns(2)
     with col_score:
         score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア</div>
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア詳細（カード表示）</div>
             <div style="display: flex; align-items: baseline; gap: 12px;">
                 <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
                 <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
