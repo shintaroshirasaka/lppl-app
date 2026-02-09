@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
+import matplotlib.dates as mdates
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
@@ -15,6 +16,38 @@ import hmac
 import hashlib
 import base64
 import io
+
+# =======================================================
+# DESIGN SYSTEM: Tech-Luxury Theme
+# =======================================================
+THEME = {
+    "bg_main": "#0E1117",       # Streamlit default dark
+    "bg_chart": "#121212",      # Deep matte black for charts
+    "gold": "#C5A059",          # Champagne Gold (Key Accent)
+    "platinum": "#E0E0E0",      # Platinum (Main Text/Line)
+    "grid": "#333333",          # Subtle Grid
+    "red_glow": "#FF453A",      # Sophisticated Red
+    "blue_glow": "#0A84FF",     # Sophisticated Blue
+    "green_glow": "#30D158",    # Sophisticated Green
+    "font_serif": "DejaVu Serif", 
+    "font_sans": "DejaVu Sans", 
+}
+
+# Set Global Matplotlib Styles for Luxury Feel
+plt.rcParams['font.family'] = THEME['font_sans']
+plt.rcParams['axes.facecolor'] = THEME['bg_chart']
+plt.rcParams['figure.facecolor'] = THEME['bg_main']
+plt.rcParams['text.color'] = THEME['platinum']
+plt.rcParams['axes.labelcolor'] = '#888888'
+plt.rcParams['xtick.color'] = '#888888'
+plt.rcParams['ytick.color'] = '#888888'
+plt.rcParams['grid.color'] = THEME['grid']
+plt.rcParams['grid.alpha'] = 0.3
+plt.rcParams['axes.spines.top'] = False
+plt.rcParams['axes.spines.right'] = False
+plt.rcParams['axes.spines.left'] = True
+plt.rcParams['axes.spines.bottom'] = True
+plt.rcParams['axes.edgecolor'] = '#333333'
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -449,7 +482,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     bounds_info = {"A_low": A_low, "A_high": A_high, "B_low": -20.0, "B_high": 20.0, "C_low": -20.0, "C_high": 20.0,
                    "m_low": 0.01, "m_high": 0.99, "tc_low": float(N + 1), "tc_high": float(N + 250),
                    "omega_low": 2.0, "omega_high": 25.0, "phi_low": float(-np.pi), "phi_high": float(np.pi)}
-                   
+                    
     return {
         "params": np.asarray(params, dtype=float), 
         "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period}, 
@@ -813,153 +846,144 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 
 
 # =======================================================
-# Render Graph Pack
+# Tech-Luxury Rendering Functions (NEW)
 # =======================================================
-def draw_score_overlay(ax, score: int, label: str):
-    """
-    Draw Score and Signal overlay (English).
-    """
-    if label == "HIGH":
-        badge_bg = "#ff4d4f"; badge_fg = "white"
-    elif label == "CAUTION":
-        badge_bg = "#ffc53d"; badge_fg = "black"
-    else: # SAFE
-        badge_bg = "#52c41a"; badge_fg = "white"
+def draw_luxury_watermark(ax):
+    """Draws a subtle, high-end watermark."""
+    text_obj = ax.text(0.98, 0.02, "OUT-STANDER", transform=ax.transAxes,
+            fontsize=14, color=THEME['gold'], fontweight='normal',
+            fontname=THEME['font_serif'], alpha=0.4, ha='right', va='bottom', zorder=1)
 
-    ax.text(0.04, 0.92, "Score", transform=ax.transAxes,
-            fontsize=12, color='#aaaaaa', fontweight='normal', zorder=20)
-            
-    ax.text(0.04, 0.83, str(score), transform=ax.transAxes,
-            fontsize=32, color='white', fontweight='bold', zorder=20)
-            
-    ax.text(0.18, 0.85, f" {label} ", transform=ax.transAxes,
-            fontsize=10, color=badge_fg, fontweight='bold',
-            bbox=dict(facecolor=badge_bg, edgecolor='none', boxstyle='round,pad=0.4', alpha=0.95),
-            zorder=20, verticalalignment='bottom')
-
-    rect = patches.FancyBboxPatch(
-        (0.02, 0.81), width=0.28, height=0.16,
-        boxstyle="round,pad=0.02",
-        transform=ax.transAxes,
-        facecolor="#000000", alpha=0.6,
-        edgecolor="#333333", linewidth=1,
-        zorder=15
+def annotate_line_end(ax, x_date, y_val, text, color, offset=(5, 0)):
+    """Places text directly at the end of a line (No Legend Box)."""
+    ax.annotate(
+        text, 
+        xy=(x_date, y_val), 
+        xytext=offset, 
+        textcoords="offset points",
+        color=color, 
+        fontsize=9, 
+        fontweight='bold', 
+        fontfamily=THEME['font_sans'],
+        va='center',
+        bbox=dict(boxstyle="square,pad=0.1", fc=THEME['bg_chart'], ec="none", alpha=0.7)
     )
-    ax.add_patch(rect)
 
-
-def draw_logo_overlay(ax):
-    """
-    Draw 'OUT-STANDER' logo (English text).
-    """
-    text_obj = ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
-            fontsize=16, color='#e5c07b', fontweight='bold',
-            fontname='serif', zorder=20, alpha=0.9)
+def render_tech_luxury_chart(price_series, bubble_res, neg_res, ticker, score, signal_label, gain):
+    # Setup Figure
+    fig, ax = plt.subplots(figsize=(10, 5.5))
     
-    text_obj.set_path_effects([
-        path_effects.Stroke(linewidth=3, foreground='black'),
-        path_effects.Normal()
-    ])
+    # 1. Main Price Line (Platinum, thin, crisp)
+    ax.plot(price_series.index, price_series.values, color=THEME['platinum'], 
+            linewidth=1.2, alpha=0.9, zorder=5)
+    # Direct Label for Ticker
+    annotate_line_end(ax, price_series.index[-1], price_series.values[-1], 
+                      ticker, THEME['platinum'])
+
+    # 2. Up Model (Champagne Gold, Smooth)
+    ax.plot(price_series.index, bubble_res["price_fit"], color=THEME['gold'], 
+            linewidth=1.8, alpha=1.0, zorder=6)
+    annotate_line_end(ax, price_series.index[-1], bubble_res["price_fit"][-1], 
+                      "Model", THEME['gold'], offset=(5, 10))
+
+    # 3. Events (Vertical Lines with Top Labels)
+    tc_date = bubble_res["tc_date"]
+    tc_str = pd.Timestamp(tc_date).strftime('%Y-%m-%d')
+    ax.axvline(tc_date, color=THEME['red_glow'], linestyle=":", linewidth=1, alpha=0.8)
+    ax.text(tc_date, ax.get_ylim()[1], f"Turn\n{tc_str}", color=THEME['red_glow'], 
+            ha='center', va='bottom', fontsize=8, backgroundcolor=THEME['bg_chart'])
+
+    peak_date = price_series.idxmax()
+    peak_str = pd.Timestamp(peak_date).strftime('%Y-%m-%d')
+    ax.axvline(peak_date, color='#555555', linestyle=":", linewidth=1, alpha=0.6)
+    ax.text(peak_date, ax.get_ylim()[1], f"Peak\n{peak_str}", color='#888888', 
+            ha='center', va='bottom', fontsize=8, backgroundcolor=THEME['bg_chart'])
+
+    # 4. Down Model (if exists)
+    if neg_res.get("ok"):
+        down = neg_res["down_series"]
+        ax.plot(down.index, down.values, color=THEME['blue_glow'], linewidth=1.2, alpha=0.8)
+        ax.plot(down.index, neg_res["price_fit_down"], color=THEME['green_glow'], 
+                linestyle="--", linewidth=1.5, alpha=0.8)
+        
+        tc_down = neg_res["tc_date"]
+        tc_d_str = pd.Timestamp(tc_down).strftime('%Y-%m-%d')
+        ax.axvline(tc_down, color=THEME['green_glow'], linestyle=":", linewidth=1)
+        ax.text(tc_down, ax.get_ylim()[0], f"Bottom\n{tc_d_str}", color=THEME['green_glow'], 
+                ha='center', va='top', fontsize=8)
+
+    # Watermark
+    draw_luxury_watermark(ax)
+    
+    return fig
 
 
+# =======================================================
+# Render Graph Pack (UPDATED for Dark Theme)
+# =======================================================
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
     base = prices.iloc[0]
     index100 = prices / base * 100.0
     dev = index100 - 100.0
     ret = np.log(prices / prices.shift(1)).dropna()
 
+    # 1. Cumulative
     fig, ax = plt.subplots(figsize=(11, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.plot(index100.index, index100[ticker], label=f"{ticker} (Index)", color="red")
-    ax.plot(index100.index, index100[bench],  label=f"{bench} (Index)",  color="blue")
+    ax.plot(index100.index, index100[ticker], label=f"{ticker}", color=THEME['gold'])
+    ax.plot(index100.index, index100[bench],  label=f"{bench}",  color=THEME['blue_glow'])
     ax.set_title("Cumulative Performance (Index = 100)", color="white")
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Index", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    
-    # ENGLISH LEGEND
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
-        
+    ax.legend(facecolor=THEME['bg_chart'], labelcolor="white")
     st.pyplot(fig)
 
+    # 2. Scatter Dev
     X = dev[bench].dropna(); Y = dev[ticker].dropna()
     common = X.index.intersection(Y.index); X = X.loc[common]; Y = Y.loc[common]
     slope_dev, intercept_dev = np.polyfit(X.values, Y.values, 1)
     x_sorted = X.sort_values(); y_line = slope_dev * x_sorted + intercept_dev
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.scatter(X, Y, alpha=0.6, color="red")
-    ax.plot(x_sorted, y_line, color="blue")
+    ax.scatter(X, Y, alpha=0.6, color=THEME['red_glow'])
+    ax.plot(x_sorted, y_line, color=THEME['blue_glow'])
     ax.set_title(f"Price Deviation Scatter ({ticker} vs {bench})", color="white")
-    ax.set_xlabel(f"{bench} Deviation (pp)", color="white")
-    ax.set_ylabel(f"{ticker} Deviation (pp)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
     st.pyplot(fig)
     st.write(f"Deviation regression: slope={slope_dev:.6f}, intercept={intercept_dev:.6f}")
 
+    # 3. Rolling Vol Dev
     vol_dev_t = dev[ticker].rolling(int(window)).std(ddof=1)
     vol_dev_b = dev[bench].rolling(int(window)).std(ddof=1)
     fig, ax = plt.subplots(figsize=(11, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker} Deviation Vol", color="red")
-    ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench} Deviation Vol", color="blue")
+    ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker}", color=THEME['gold'])
+    ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench}", color=THEME['blue_glow'])
     ax.set_title(f"Rolling Volatility of Price Deviation (Window = {int(window)})", color="white")
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Std of Deviation (pp)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    ax.legend(facecolor=THEME['bg_chart'], labelcolor="white")
     st.pyplot(fig)
 
+    # 4. Drawdown
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
     fig, ax = plt.subplots(figsize=(11, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.plot(dd.index, dd * 100.0, color="white")
+    ax.plot(dd.index, dd * 100.0, color=THEME['platinum'])
     ax.set_title(f"Drawdown (%) - {ticker}", color="white")
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Drawdown (%)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
     st.pyplot(fig)
 
+    # 5. Scatter Returns
     Xr = ret[bench].dropna(); Yr = ret[ticker].dropna()
     common_r = Xr.index.intersection(Yr.index); Xr = Xr.loc[common_r]; Yr = Yr.loc[common_r]
     slope_ret, intercept_ret = np.polyfit(Xr.values, Yr.values, 1)
     xr_sorted = Xr.sort_values(); yr_line = slope_ret * xr_sorted + intercept_ret
     fig, ax = plt.subplots(figsize=(7, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.scatter(Xr, Yr, alpha=0.6, color="red")
-    ax.plot(xr_sorted, yr_line, color="blue")
+    ax.scatter(Xr, Yr, alpha=0.6, color=THEME['red_glow'])
+    ax.plot(xr_sorted, yr_line, color=THEME['blue_glow'])
     ax.set_title(f"Daily Log Returns Scatter ({ticker} vs {bench})", color="white")
-    ax.set_xlabel(f"{bench} Daily Log Return", color="white")
-    ax.set_ylabel(f"{ticker} Daily Log Return", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
     st.pyplot(fig)
     
+    # 6. Rolling Vol Returns
     roll_vol = ret[ticker].rolling(int(window)).std(ddof=1) * np.sqrt(float(trading_days))
     fig, ax = plt.subplots(figsize=(11, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    ax.plot(roll_vol.index, roll_vol * 100.0, color="red")
-    ax.set_title(f"Rolling Volatility of Daily Returns (Annualized, Window = {int(window)}) - {ticker}", color="white")
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Annualized Vol (%)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
+    ax.plot(roll_vol.index, roll_vol * 100.0, color=THEME['gold'])
+    ax.set_title(f"Rolling Volatility (Annualized, Window = {int(window)})", color="white")
     st.pyplot(fig)
 
-    # =======================================================
-    # (ADD) JAPANESE MARGIN CHART (Dual Axis) - English Labels
-    # =======================================================
+    # 7. JP MARGIN
     if ticker.endswith(".T"):
         st.markdown("---")
         st.subheader(f"Margin Balance & Reverse Repo Fee (JP) - {ticker}")
@@ -968,49 +992,36 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             margin_df = fetch_jp_margin_data_robust(ticker)
             
         if not margin_df.empty:
-            # グラフ描画
             fig, ax1 = plt.subplots(figsize=(11, 6))
-            fig.patch.set_facecolor("#0b0c0e")
-            ax1.set_facecolor("#0b0c0e")
-            
-            # X軸（日付）
             dates = margin_df["Date"]
             
-            # 左軸：信用残（面グラフ）
             if "MarginBuy" in margin_df.columns and "MarginSell" in margin_df.columns:
-                ax1.fill_between(dates, margin_df["MarginBuy"], color="#4169E1", alpha=0.3, label="Margin Buy (Long)")
-                ax1.plot(dates, margin_df["MarginBuy"], color="#4169E1", linewidth=1.5)
+                ax1.fill_between(dates, margin_df["MarginBuy"], color=THEME['blue_glow'], alpha=0.2, label="Margin Buy (Long)")
+                ax1.plot(dates, margin_df["MarginBuy"], color=THEME['blue_glow'], linewidth=1.5)
                 
-                ax1.fill_between(dates, margin_df["MarginSell"], color="#CD5C5C", alpha=0.3, label="Margin Sell (Short)")
-                ax1.plot(dates, margin_df["MarginSell"], color="#CD5C5C", linewidth=1.5)
+                ax1.fill_between(dates, margin_df["MarginSell"], color=THEME['red_glow'], alpha=0.2, label="Margin Sell (Short)")
+                ax1.plot(dates, margin_df["MarginSell"], color=THEME['red_glow'], linewidth=1.5)
                 
                 ax1.set_ylabel("Balance (Shares)", color="white")
-                ax1.tick_params(axis='y', colors="white")
                 ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
             
-            ax1.set_xlabel("Date", color="white")
-            ax1.tick_params(axis='x', colors="white")
-            ax1.grid(color="#333333", linestyle="--", alpha=0.5)
-
-            # 右軸：逆日歩（棒グラフ）
+            # Hibush
             has_hibu = "Hibush" in margin_df.columns and margin_df["Hibush"].sum() > 0
-            
             if has_hibu:
                 ax2 = ax1.twinx()
-                colors = ["#FFD700" if v > 0 else "#333333" for v in margin_df["Hibush"]]
+                colors = [THEME['gold'] if v > 0 else "#333333" for v in margin_df["Hibush"]]
                 ax2.bar(dates, margin_df["Hibush"], color=colors, alpha=0.6, width=0.6, label="Rev Repo Fee")
-                ax2.set_ylabel("Fee (JPY)", color="#FFD700")
-                ax2.tick_params(axis='y', colors="#FFD700")
+                ax2.set_ylabel("Fee (JPY)", color=THEME['gold'])
+                ax2.tick_params(axis='y', colors=THEME['gold'])
                 
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
-                ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor=THEME['bg_chart'], labelcolor="white")
             else:
-                ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                ax1.legend(loc="upper left", facecolor=THEME['bg_chart'], labelcolor="white")
 
             st.pyplot(fig)
             st.caption("Source: IRBank / Minkabu / Karauri / Yahoo / Kabutan (Auto-fallback).")
-            
             with st.expander("Show Details"):
                 st.dataframe(margin_df.sort_values("Date", ascending=False), use_container_width=True)
         else:
@@ -1022,48 +1033,98 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
 # -------------------------------------------------------
 def main():
     st.set_page_config(page_title="Out-stander Admin", layout="wide")
-    st.markdown(
-        """
+    
+    # CSS: Tech-Luxury Instrument Panel
+    st.markdown(f"""
         <style>
-        .stApp { background-color: #0b0c0e !important; color: #ffffff !important; }
-        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; }
-        input.st-ai, input.st-ah, div[data-baseweb="input"] { background-color: #1a1c1f !important; color: #ffffff !important; border-color: #444 !important; }
-        input { color: #ffffff !important; }
-        input::placeholder { color: rgba(255,255,255,0.45) !important; }
-        div[data-baseweb="input"] svg { fill: #ffffff !important; }
-        div[data-testid="stFormSubmitButton"] button { background-color: #222428 !important; color: #ffffff !important; border: 1px solid #555 !important; }
-        div[data-testid="stFormSubmitButton"] button:hover { background-color: #444 !important; border-color: #888 !important; color: #ffffff !important; }
-        [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
-        .custom-error { background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Roboto+Mono:wght@300;400&display=swap');
+        
+        .stApp {{ background-color: {THEME['bg_main']} !important; }}
+        div[data-testid="stMarkdownContainer"] p, label {{ color: #ffffff !important; }}
+        
+        /* Header Container */
+        .instrument-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            padding: 20px 0;
+            border-bottom: 1px solid #333;
+            margin-bottom: 20px;
+        }}
+        
+        /* Ticker Styling */
+        .ticker-title {{
+            font-family: 'Cinzel', serif; /* Elegant Serif */
+            font-size: 32px;
+            color: #FFFFFF;
+            letter-spacing: 2px;
+        }}
+        .ticker-sub {{
+            font-family: 'Roboto Mono', monospace;
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }}
+
+        /* Score Instrument Styling */
+        .score-panel {{
+            text-align: right;
+            font-family: 'Roboto Mono', monospace;
+        }}
+        .score-label {{
+            font-size: 10px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        .score-value {{
+            font-size: 32px;
+            color: {THEME['gold']};
+            font-weight: 300;
+        }}
+        .status-dot {{
+            height: 10px;
+            width: 10px;
+            background-color: #333;
+            border-radius: 50%;
+            display: inline-block;
+            margin-left: 8px;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }}
+        .status-dot.safe {{ background-color: {THEME['blue_glow']}; box-shadow: 0 0 8px {THEME['blue_glow']}; }}
+        .status-dot.caution {{ background-color: #FFD700; box-shadow: 0 0 8px #FFD700; }}
+        .status-dot.high {{ background-color: {THEME['red_glow']}; box-shadow: 0 0 8px {THEME['red_glow']}; }}
+        
+        /* Remove Streamlit Elements */
+        div[data-testid="stHeader"] {{ display: none; }}
+        footer {{ display: none; }}
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        """, unsafe_allow_html=True)
 
     def show_error_black(msg: str):
-        st.markdown(f"""<div class="custom-error">{msg}</div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div style="background-color: #141518; border: 1px solid #2a2c30; padding: 14px; color: white;">{msg}</div>""", unsafe_allow_html=True)
 
-    st.markdown("## Out-stander (Admin)")
-    st.caption(f"Authenticated: {authed_email}")
-
+    # Input Form (Minimalist)
     with st.form("input_form"):
-        ticker = st.text_input("Ticker", value="", placeholder="e.g. NVDA / 0700.HK / 7203.T")
-        today = date.today()
-        default_start = today - timedelta(days=220)
-        col1, col2 = st.columns(2)
-        with col1: start_date = st.date_input("Start", default_start)
-        with col2: end_date = st.date_input("End", today)
-        submitted = st.form_submit_button("Run")
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+        with col1: ticker = st.text_input("Ticker", value="", placeholder="e.g. NVDA")
+        with col2: start_date = st.date_input("Start", date.today() - timedelta(days=220))
+        with col3: end_date = st.date_input("End", date.today())
+        with col4: submitted = st.form_submit_button("ANALYZE")
 
-    if not submitted: st.stop()
+    if not submitted:
+        st.info("Awaiting Input...")
+        st.stop()
+    
     if not ticker.strip():
         show_error_black("Invalid Ticker")
         st.stop()
 
+    # Calculation Block
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
-    except Exception:
-        show_error_black("No Data found")
+    except:
+        show_error_black("Ticker Not Found or No Data")
         st.stop()
 
     if len(price_series) < 30:
@@ -1076,100 +1137,57 @@ def main():
 
     try:
         bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
-    except Exception:
+    except:
         show_error_black("LPPL Fit Failed")
         st.stop()
 
-    peak_date = price_series.idxmax()
-    peak_price = float(price_series.max())
-    start_price_val = float(price_series.iloc[0])
-    gain = peak_price / start_price_val
-    gain_pct = (gain - 1.0) * 100.0
-
-    peak_date_int = int(pd.Timestamp(peak_date).value)
-    neg_res = fit_lppl_negative_bubble_cached(key, vals, idx_int, peak_date_int=peak_date_int, min_points=10, min_drop_ratio=0.03)
-
+    peak_date = price_series.idxmax(); peak_price = float(price_series.max())
+    gain = peak_price / float(price_series.iloc[0])
+    
+    neg_res = fit_lppl_negative_bubble_cached(key, vals, idx_int, int(pd.Timestamp(peak_date).value), 10, 0.03)
+    
     tc_up_date = pd.Timestamp(bubble_res["tc_date"])
-    end_ts = pd.Timestamp(end_date)
     down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
+    signal_label, score = compute_signal_and_score(tc_up_date, pd.Timestamp(end_date), down_tc_date)
 
-    # This call was failing because the function was missing
-    signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
+    # Determine Status Dot Class
+    status_class = "safe" if signal_label == "SAFE" else "high" if signal_label == "HIGH" else "caution"
 
-    # -----------------------------------------------------------
-    # MAIN CHART RENDER with OVERLAY (English)
-    # -----------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
-    
-    # Plot Data
-    ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
-    
-    tc_date_str = pd.Timestamp(bubble_res['tc_date']).strftime('%Y-%m-%d')
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"Turn (up) {tc_date_str}")
-    
-    peak_date_str = pd.Timestamp(peak_date).strftime('%Y-%m-%d')
-    ax.axvline(peak_date, color="white", linestyle=":", label=f"Peak {peak_date_str}")
-    
-    if neg_res.get("ok"):
-        down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="Drawdown")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
-        tc_down_str = pd.Timestamp(neg_res['tc_date']).strftime('%Y-%m-%d')
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"Turn (down) {tc_down_str}")
-    
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Price (Adj Close preferred)", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    
-    # Legend (English)
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
+    # -------------------------------------------------------
+    # 1. RENDER HEADER (Instrument Panel)
+    # -------------------------------------------------------
+    st.markdown(f"""
+        <div class="instrument-header">
+            <div>
+                <div class="ticker-title">{ticker.upper()}</div>
+                <div class="ticker-sub">MARKET ANALYSIS SYSTEM</div>
+            </div>
+            <div class="score-panel">
+                <div class="score-label">Risk Score</div>
+                <div>
+                    <span class="score-value">{score}</span>
+                    <span class="status-dot {status_class}"></span>
+                </div>
+                <div class="score-label" style="margin-top:4px;">Signal: {signal_label}</div>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
-    # Overlays
-    draw_score_overlay(ax, score, signal_label)
-    draw_logo_overlay(ax)
-
+    # -------------------------------------------------------
+    # 2. RENDER CHART (Clean, Direct Labeling)
+    # -------------------------------------------------------
+    fig = render_tech_luxury_chart(price_series, bubble_res, neg_res, ticker, score, signal_label, gain)
     st.pyplot(fig)
-    # -----------------------------------------------------------
 
-    if signal_label == "HIGH":
-        risk_label = "High"; risk_color = "#ff4d4f"
-    elif signal_label == "CAUTION":
-        risk_label = "Caution"; risk_color = "#ffc53d"
-    else:
-        risk_label = "Safe"; risk_color = "#52c41a"
+    # Admin Debug Section (Collapsed by default to keep UI clean)
+    with st.expander("Admin Diagnostics"):
+        pdict = bubble_res.get("param_dict", {})
+        r2 = float(bubble_res.get("r2", np.nan))
+        m = float(pdict.get("m", np.nan))
+        omega = float(pdict.get("omega", np.nan))
+        render_bubble_flow(r2, m, omega)
+        admin_interpretation_text(bubble_res, end_date)
 
-    # HTML Card (Backup view below chart)
-    col_score, col_gain = st.columns(2)
-    with col_score:
-        score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Score</div>
-            <div style="display: flex; align-items: baseline; gap: 12px;">
-                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
-                <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
-            </div></div>"""
-        st.markdown(score_card_html, unsafe_allow_html=True)
-    with col_gain:
-        gain_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Gain (Start -> Peak)</div>
-            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">{gain:.2f}x</div>
-            <div style="margin-top: 6px; display: inline-block; padding: 2px 10px; border-radius: 999px; background-color: #102915; color: #52c41a; font-size: 0.85rem; font-weight: 500;">{gain_pct:+.1f}%</div>
-        </div>"""
-        st.markdown(gain_card_html, unsafe_allow_html=True)
-
-    st.markdown("---")
-    pdict = bubble_res.get("param_dict", {})
-    r2 = float(bubble_res.get("r2", np.nan))
-    m = float(pdict.get("m", np.nan))
-    omega = float(pdict.get("omega", np.nan))
-    render_bubble_flow(r2, m, omega)
-    verdict, _ = bubble_judgement(r2, m, omega)
-    st.markdown("### Admin Indicators")
-    admin_interpretation_text(bubble_res, end_date)
-    
     # Quant table expander
     with st.expander("Mid-term Quant Table", expanded=False):
         col_b1, col_b2 = st.columns([2, 1])
