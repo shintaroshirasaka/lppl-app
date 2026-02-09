@@ -780,6 +780,39 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 
 
 # =======================================================
+# (ADDED BACK) Compute Signal and Score Function
+# =======================================================
+def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
+    now = pd.Timestamp(end_date).normalize()
+    tc_up = pd.Timestamp(tc_up_date).normalize()
+    
+    # Priority 1: Downtrend Risk
+    if down_tc_date is not None:
+        down_tc = pd.Timestamp(down_tc_date).normalize()
+        delta = (down_tc - now).days
+        if delta > 0:
+            s = _lin_map(delta, DOWN_FUTURE_NEAR_DAYS, DOWN_FUTURE_FAR_DAYS, 90, 80)
+            return ("HIGH", int(round(_clamp(s, 80, 90))))
+        past = abs(delta)
+        s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
+        return ("HIGH", int(round(_clamp(s, 90, 100))))
+    
+    # Priority 2: Uptrend Caution
+    gap = (tc_up - now).days
+    WARNING_BUFFER = 14
+
+    # SAFE
+    if gap > WARNING_BUFFER:
+        s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
+        return ("SAFE", int(round(_clamp(s, 0, 59))))
+
+    # CAUTION
+    past_warning = WARNING_BUFFER - gap
+    s = _lin_map(past_warning, 0, UP_PAST_FAR_DAYS, 60, 79)
+    return ("CAUTION", int(round(_clamp(s, 60, 79))))
+
+
+# =======================================================
 # Render Graph Pack
 # =======================================================
 def draw_score_overlay(ax, score: int, label: str):
@@ -1060,6 +1093,7 @@ def main():
     end_ts = pd.Timestamp(end_date)
     down_tc_date = pd.Timestamp(neg_res["tc_date"]) if neg_res.get("ok") else None
 
+    # This call was failing because the function was missing
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # -----------------------------------------------------------
