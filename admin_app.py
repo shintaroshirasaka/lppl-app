@@ -4,8 +4,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.patches as patches
-import matplotlib.font_manager as fm
-import matplotlib.patheffects as path_effects # 縁取り用
+import matplotlib.patheffects as path_effects
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
@@ -16,56 +15,6 @@ import hmac
 import hashlib
 import base64
 import io
-import platform
-
-# =======================================================
-# FONT SETUP (Auto-detect Japanese Font)
-# =======================================================
-def configure_japanese_font():
-    """
-    OS環境に合わせて日本語フォントを自動設定する。
-    Matplotlibのデフォルトでは日本語が表示できない（□□□になる）ため。
-    """
-    system = platform.system()
-    font_path = None
-    
-    # OSごとの代表的な日本語フォントパス候補
-    if system == "Windows":
-        font_candidates = [
-            "C:\\Windows\\Fonts\\meiryo.ttc",
-            "C:\\Windows\\Fonts\\msgothic.ttc",
-            "C:\\Windows\\Fonts\\yugothr.ttc"
-        ]
-    elif system == "Darwin": # Mac
-        font_candidates = [
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            "/Library/Fonts/Osaka.ttf",
-            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"
-        ]
-    else: # Linux (Streamlit Cloud, Docker etc)
-        font_candidates = [
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/ipafont-gothic/ipag.ttf"
-        ]
-        
-    for path in font_candidates:
-        if os.path.exists(path):
-            font_path = path
-            break
-            
-    if font_path:
-        # フォントプロパティを生成してMatplotlibに設定
-        font_prop = fm.FontProperties(fname=font_path)
-        plt.rcParams['font.family'] = font_prop.get_name()
-        return font_prop
-    else:
-        # 見つからない場合はデフォルト（文字化けする可能性あり）
-        return None
-
-# フォント設定を実行（グローバル設定）
-JP_FONT = configure_japanese_font()
-
 
 # =======================================================
 # AUTH GATE: Require signed short-lived token (?t=...)
@@ -207,81 +156,57 @@ def _mid_judge(metric: str, value: float, dev: pd.DataFrame, bench: str, window:
     if metric == "A: Deviation R":
         if value >= MID_TH["A_R_ok"]: return "OK"
         if value < MID_TH["A_R_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric == "B: Deviation R²":
         if value >= MID_TH["B_R2_ok"]: return "OK"
         if value < MID_TH["B_R2_ng"]:  return "NG"
-        return "注意"
-    if metric.startswith("C: Deviation β"):
+        return "Caution"
+    if metric.startswith("C: Deviation Beta"):
         if MID_TH["C_beta_ok_low"] <= value <= MID_TH["C_beta_ok_high"]: return "OK"
         if value < MID_TH["C_beta_ng_low"] or value > MID_TH["C_beta_ng_high"]: return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("D: Deviation Vol"):
         bench_latest = dev[bench].rolling(window).std(ddof=1).dropna().iloc[-1]
         ratio = value / bench_latest if bench_latest != 0 else np.nan
         if ratio <= 1.5: return "OK"
         if ratio > 2.5:  return "NG"
-        return "注意"
+        return "Caution"
     if metric == "D: Max Drawdown":
         if value >= MID_TH["G_mdd_ok"]: return "OK"
         if value < MID_TH["G_mdd_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("E: CMGR"):
         if value >= MID_TH["E_cmgr_ok"]: return "OK"
         if value < MID_TH["E_cmgr_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("F: Sharpe"):
         if value >= MID_TH["F_sharpe_ok"]: return "OK"
         if value < MID_TH["F_sharpe_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("F2: Alpha"):
         if value >= MID_TH["F2_alpha_ok"]: return "OK"
         if value < MID_TH["F2_alpha_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("F3: Alpha"):
         if value >= MID_TH["F3_alpha_ok"]: return "OK"
         if value < MID_TH["F3_alpha_ng"]:  return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("H: Rolling R²"):
         if value >= MID_TH["H_R2_ok"]: return "OK"
         if value < MID_TH["H_R2_ng"]:  return "NG"
-        return "注意"
-    if metric.startswith("I: Rolling β"):
+        return "Caution"
+    if metric.startswith("I: Rolling Beta"):
         if MID_TH["I_beta_ok_low"] <= value <= MID_TH["I_beta_ok_high"]: return "OK"
         if value < MID_TH["I_beta_ng_low"] or value > MID_TH["I_beta_ng_high"]: return "NG"
-        return "注意"
+        return "Caution"
     if metric.startswith("J: Rolling Vol"):
         if value <= MID_TH["J_vol_ok"]: return "OK"
         if value > MID_TH["J_vol_ng"]:  return "NG"
-        return "注意"
-    return "注意"
+        return "Caution"
+    return "Caution"
 
 def _mid_threshold_text(metric: str) -> str:
-    if metric == "A: Deviation R":
-        return f"OK≥{MID_TH['A_R_ok']:.2f} / NG<{MID_TH['A_R_ng']:.2f}"
-    if metric == "B: Deviation R²":
-        return f"OK≥{MID_TH['B_R2_ok']:.2f} / NG<{MID_TH['B_R2_ng']:.2f}"
-    if metric.startswith("C: Deviation β"):
-        return f"OK:{MID_TH['C_beta_ok_low']:.2f}–{MID_TH['C_beta_ok_high']:.2f} / NG<{MID_TH['C_beta_ng_low']:.2f} or >{MID_TH['C_beta_ng_high']:.2f}"
-    if metric.startswith("D: Deviation Vol"):
-        return "OK:（株÷指数）≤1.5 / NG>2.5"
-    if metric == "D: Max Drawdown":
-        return f"OK≥{MID_TH['G_mdd_ok']*100:.0f}% / NG<{MID_TH['G_mdd_ng']*100:.0f}%"
-    if metric.startswith("E: CMGR"):
-        return f"OK≥{MID_TH['E_cmgr_ok']*100:.2f}%/月 / NG<{MID_TH['E_cmgr_ng']*100:.2f}%/月"
-    if metric.startswith("F: Sharpe"):
-        return f"OK≥{MID_TH['F_sharpe_ok']:.2f} / NG<{MID_TH['F_sharpe_ng']:.2f}"
-    if metric.startswith("F2: Alpha"):
-        return f"OK≥{MID_TH['F2_alpha_ok']*100:.0f}% / NG<{MID_TH['F2_alpha_ng']*100:.0f}%"
-    if metric.startswith("F3: Alpha"):
-        return f"OK≥{MID_TH['F3_alpha_ok']*100:.0f}% / NG<{MID_TH['F3_alpha_ng']*100:.0f}%"
-    if metric.startswith("H: Rolling R²"):
-        return f"OK≥{MID_TH['H_R2_ok']:.2f} / NG<{MID_TH['H_R2_ng']:.2f}"
-    if metric.startswith("I: Rolling β"):
-        return f"OK:{MID_TH['I_beta_ok_low']:.2f}–{MID_TH['I_beta_ok_high']:.2f} / NG<{MID_TH['I_beta_ng_low']:.2f} or >{MID_TH['I_beta_ng_high']:.2f}"
-    if metric.startswith("J: Rolling Vol"):
-        return f"OK≤{MID_TH['J_vol_ok']*100:.0f}% / NG>{MID_TH['J_vol_ng']*100:.0f}%"
-    return "-"
+    return "-" # Simplified for English view
 
 
 # =======================================================
@@ -385,19 +310,20 @@ def build_midterm_quant_table(ticker: str, bench: str, start_date: date, end_dat
     I_beta_latest = (ret[ticker].rolling(window).cov(ret[bench]) / ret[bench].rolling(window).var(ddof=1)).dropna().iloc[-1]
     J_vol_annual_latest = (ret[ticker].rolling(window).std(ddof=1) * np.sqrt(252)).dropna().iloc[-1]
 
+    # ENGLISH ROWS
     rows = [
-        ("① 相場適合性", "A: Deviation R", A_R, _mid_threshold_text("A: Deviation R"), "指数との中長期トレンドの類似度"),
-        ("① 相場適合性", "B: Deviation R²", B_R2, _mid_threshold_text("B: Deviation R²"), "トレンド変動の説明力"),
-        ("① 相場適合性", f"C: Deviation β (vs {bench})", C_beta, _mid_threshold_text(f"C: Deviation β (vs {bench})"), "乖離空間での感応度"),
-        ("① 相場適合性", f"D: Deviation Vol (rolling {window})", D_vol_latest, _mid_threshold_text(f"D: Deviation Vol (rolling {window})"), "乖離の標準偏差"),
-        ("① 相場適合性", "D: Max Drawdown", max_dd, _mid_threshold_text("D: Max Drawdown"), f"最大下落率（最悪日: {max_dd_date}）"),
-        ("② 成果効率", f"E: CMGR (monthly, ~{months} months)", E_cmgr, _mid_threshold_text(f"E: CMGR (monthly, ~{months} months)"), "月次複利成長率"),
-        ("② 成果効率", "F: Sharpe (annualized, log returns, rf=0)", F_sharpe, _mid_threshold_text("F: Sharpe (annualized, log returns, rf=0)"), "リスク調整後リターン"),
-        ("② 成果効率", "F2: Alpha (Relative Outperformance vs Benchmark)", F2_alpha_rel, _mid_threshold_text("F2: Alpha (Relative Outperformance vs Benchmark)"), "期間全体の指数に対する超過収益"),
-        ("② 成果効率", "F3: Alpha (Regression, daily -> annualized)", F3_alpha_annual, _mid_threshold_text("F3: Alpha (Regression, daily -> annualized)"), "市場要因を差し引いたα"),
-        ("③ 因果監視", f"H: Rolling R² (daily, {window})", H_R2_latest, _mid_threshold_text(f"H: Rolling R² (daily, {window})"), "直近で指数との関係が維持されているか"),
-        ("③ 因果監視", f"I: Rolling β (daily, {window})", I_beta_latest, _mid_threshold_text(f"I: Rolling β (daily, {window})"), "直近β"),
-        ("③ 因果監視", f"J: Rolling Vol (annualized, {window})", J_vol_annual_latest, _mid_threshold_text(f"J: Rolling Vol (annualized, {window})"), "直近の年率ボラ"),
+        ("Market Fit", "A: Deviation R", A_R, _mid_threshold_text("A: Deviation R"), "Trend Similarity"),
+        ("Market Fit", "B: Deviation R2", B_R2, _mid_threshold_text("B: Deviation R²"), "Trend Explanation"),
+        ("Market Fit", f"C: Deviation Beta (vs {bench})", C_beta, _mid_threshold_text(f"C: Deviation Beta"), "Deviation Sensitivity"),
+        ("Market Fit", f"D: Deviation Vol (rolling {window})", D_vol_latest, _mid_threshold_text(f"D: Deviation Vol"), "Deviation Std"),
+        ("Market Fit", "D: Max Drawdown", max_dd, _mid_threshold_text("D: Max Drawdown"), f"Max Drawdown (Peak: {max_dd_date})"),
+        ("Efficiency", f"E: CMGR (monthly, ~{months} m)", E_cmgr, _mid_threshold_text(f"E: CMGR"), "Monthly CMGR"),
+        ("Efficiency", "F: Sharpe (annualized)", F_sharpe, _mid_threshold_text("F: Sharpe"), "Risk Adjusted Return"),
+        ("Efficiency", "F2: Alpha (Relative)", F2_alpha_rel, _mid_threshold_text("F2: Alpha"), "Total Excess Return"),
+        ("Efficiency", "F3: Alpha (Annualized)", F3_alpha_annual, _mid_threshold_text("F3: Alpha"), "Market Neutral Alpha"),
+        ("Causality", f"H: Rolling R2 (daily, {window})", H_R2_latest, _mid_threshold_text(f"H: Rolling R²"), "Recent Relation"),
+        ("Causality", f"I: Rolling Beta (daily, {window})", I_beta_latest, _mid_threshold_text(f"I: Rolling Beta"), "Recent Beta"),
+        ("Causality", f"J: Rolling Vol (annual, {window})", J_vol_annual_latest, _mid_threshold_text(f"J: Rolling Vol"), "Recent Volatility"),
     ]
 
     df = pd.DataFrame(rows, columns=["Block", "Metric", "Value", "Threshold", "Note"])
@@ -417,83 +343,58 @@ def bubble_judgement(r2: float, m: float, omega: float) -> tuple[str, dict]:
         "omega_ok": bool(np.isfinite(omega) and (6.0 <= omega <= 13.0)),
         "omega_high": bool(np.isfinite(omega) and omega >= 18.0),
     }
-    if not info["r2_ok"]: return "判定保留（LPPL形状が弱い）", info
-    if not info["m_ok"]: return "通常の上昇寄り", info
-    if info["omega_ok"]: return "バブル的な上昇", info
-    if info["omega_high"]: return "バブル“風”（注意：短周期すぎ）", info
-    return "バブル“風”（注意）", info
+    # ENGLISH VERDICTS
+    if not info["r2_ok"]: return "Pending (Weak Shape)", info
+    if not info["m_ok"]: return "Normal Uptrend", info
+    if info["omega_ok"]: return "Bubble-like", info
+    if info["omega_high"]: return "Pseudo-Bubble (Fast)", info
+    return "Pseudo-Bubble", info
 
 def render_bubble_flow(r2: float, m: float, omega: float):
     verdict, info = bubble_judgement(r2, m, omega)
     def yn(v: bool) -> str: return "YES" if v else "NO"
     lines = []
-    lines.append(f"① R² ≥ 0.65 ?   （R²={r2:.2f}）")
-    lines.append(f" ├ {yn(info['r2_ok'])} → " + ("次へ" if info["r2_ok"] else "判定保留（LPPL形状が弱い）"))
+    lines.append(f"1. R2 >= 0.65 ?   (R2={r2:.2f})")
+    lines.append(f" |  {yn(info['r2_ok'])} -> " + ("Next" if info["r2_ok"] else "Pending"))
     if info["r2_ok"]:
-        lines.append(" │")
-        lines.append(f" │   ② m ∈ [0.25, 0.70] ?   （m={m:.2f}）")
-        lines.append(f" │    ├ {yn(info['m_ok'])} → " + ("次へ" if info["m_ok"] else "通常の上昇寄り"))
+        lines.append(" |")
+        lines.append(f" |  2. m in [0.25, 0.70] ?   (m={m:.2f})")
+        lines.append(f" |     {yn(info['m_ok'])} -> " + ("Next" if info["m_ok"] else "Normal Uptrend"))
         if info["m_ok"]:
-            lines.append(" │    │")
-            lines.append(f" │    │   ③ ω ∈ [6, 13] ?   （ω={omega:.2f}）")
+            lines.append(" |     |")
+            lines.append(f" |     |  3. omega in [6, 13] ?   (w={omega:.2f})")
             if info["omega_ok"]:
-                lines.append(" │    │    ├ YES → バブル的な上昇")
+                lines.append(" |     |     YES -> Bubble-like")
             else:
-                if np.isfinite(omega) and omega >= 18:
-                    lines.append(" │    │    ├ NO（≥18）→ バブル“風”（注意）")
-                else:
-                    lines.append(" │    │    ├ NO → バブル“風”（注意）")
-            lines.append(" │    │")
+                lines.append(" |     |     NO -> Pseudo-Bubble")
     lines.append("")
-    lines.append(f"【判定】{verdict}")
-    st.markdown("### バブル判定フロー（管理者用）")
+    lines.append(f"[Verdict] {verdict}")
+    st.markdown("### Bubble Check Flow (Admin)")
     st.code("\n".join(lines), language="text")
 
 def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, list[str]]:
     pdict = bubble_res.get("param_dict", {})
     r2 = float(bubble_res.get("r2", float("nan")))
-    rmse = float(bubble_res.get("rmse", float("nan")))
     m = float(pdict.get("m", float("nan")))
     omega = float(pdict.get("omega", float("nan")))
-    c_over_b = float(pdict.get("abs_C_over_B", float("nan")))
     tc_date = pd.Timestamp(bubble_res.get("tc_date")).normalize()
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_date - end_norm).days)
     bullets: list[str] = []
     
-    # 14日早期警戒ルールをテキストにも反映
     WARNING_DAYS = 14
     
     if days_to_tc < 0:
-        bullets.append(f"t_c は既に {abs(days_to_tc)} 日前に通過（構造的ピーク通過の可能性）。")
-        bullets.append("新規の追随買いは控えめに。保有なら部分利確・ヘッジを検討。")
+        bullets.append(f"Passed t_c by {abs(days_to_tc)} days.")
     elif days_to_tc <= WARNING_DAYS:
-        bullets.append(f"t_c まで残り {days_to_tc} 日（危険ゾーン：14日以内）。")
-        bullets.append("早期警戒期間に入っています。新規ロングは慎重（サイズ縮小・分割）。利確/ヘッジ準備。")
+        bullets.append(f"Days to t_c: {days_to_tc} (Warning Zone < 14).")
     else:
-        bullets.append(f"t_c まで残り {days_to_tc} 日（安全圏）。")
+        bullets.append(f"Days to t_c: {days_to_tc} (Safe Zone).")
         
     verdict, _ = bubble_judgement(r2, m, omega)
-    bullets.append(f"バブル判定（R²→m→ω）：{verdict}")
-    if np.isfinite(r2) and r2 < 0.65:
-        bullets.append(f"R²={r2:.2f}：形状が弱め→判定保留寄り。")
-    if np.isfinite(m) and m >= 0.85:
-        bullets.append(f"m={m:.2f}：上限寄り→境界解の疑い。")
-    if np.isfinite(omega) and omega >= 18:
-        bullets.append(f"ω={omega:.2f}：短周期すぎ→ノイズ追随の疑い。")
-    if np.isfinite(rmse):
-        bullets.append(f"RMSE(log)={rmse:.3f}：フィット安定度の目安。")
-    if np.isfinite(c_over_b) and c_over_b >= 2.0:
-        bullets.append(f"|C/B|={c_over_b:.2f}：振動項が強すぎ→“それっぽいフィット”の疑い。")
-    if verdict == "バブル的な上昇":
-        summary = "バブル的上昇（m帯域＋R²十分＋ω典型）。追随買いは抑え、利確/ヘッジを織り込む局面。"
-    elif verdict.startswith("バブル“風”"):
-        summary = "バブル“風”（形はそれっぽいが注意要素あり）。追随買いは慎重、リスク管理を前倒し。"
-    elif verdict == "通常の上昇寄り":
-        summary = "典型バブルとは言いにくい。ただしtcが近いなら姿勢調整は有効。"
-    else:
-        summary = "LPPL形状が弱く判定保留。期間変更・他指標との併用推奨。"
-    return summary, bullets
+    bullets.append(f"Verdict: {verdict}")
+    
+    return verdict, bullets
 
 
 # -------------------------------------------------------
@@ -650,14 +551,12 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     """
-    複数ソース（IRBank -> Minkabu -> Karauri -> Yahoo -> Kabutan）を順に試し、
-    信用残（MarginBuy/MarginSell）と逆日歩（Hibush）を取得する。
+    Multiple Sources for JP Margin data.
     """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
         return pd.DataFrame()
 
-    # アクセス偽装用のヘッダー
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -665,7 +564,7 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
         "Referer": "https://www.google.com/"
     }
 
-    # ----- 共通: 数値クリーニング関数 -----
+    # Data cleaning helper
     def clean_num(x):
         if isinstance(x, str):
             x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
@@ -674,7 +573,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             except: return 0
         return x
 
-    # ----- 共通: 日付クリーニング関数 -----
     def parse_date_col(df, col_name="Date"):
         dates = pd.to_datetime(df[col_name], errors='coerce')
         if dates.isna().any():
@@ -882,48 +780,12 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 
 
 # =======================================================
-# FINAL SCORE (UPDATED WITH 14-DAY WARNING RULE)
-# =======================================================
-def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
-    now = pd.Timestamp(end_date).normalize()
-    tc_up = pd.Timestamp(tc_up_date).normalize()
-    
-    # 優先度1: 下落トレンド（High Risk）
-    if down_tc_date is not None:
-        down_tc = pd.Timestamp(down_tc_date).normalize()
-        delta = (down_tc - now).days
-        if delta > 0:
-            s = _lin_map(delta, DOWN_FUTURE_NEAR_DAYS, DOWN_FUTURE_FAR_DAYS, 90, 80)
-            return ("HIGH", int(round(_clamp(s, 80, 90))))
-        past = abs(delta)
-        s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
-        return ("HIGH", int(round(_clamp(s, 90, 100))))
-    
-    # 優先度2: 上昇トレンド（Safe/Caution判定）
-    # 【ロジック変更】tcまで「残り14日」を切ったらCAUTION（黄色）にする
-    gap = (tc_up - now).days
-    WARNING_BUFFER = 14  # 早期警戒ライン（14日）
-
-    # SAFE: 14日より未来
-    if gap > WARNING_BUFFER:
-        s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
-        return ("SAFE", int(round(_clamp(s, 0, 59))))
-
-    # CAUTION: 14日以内、当日、または過去
-    past_warning = WARNING_BUFFER - gap
-    
-    s = _lin_map(past_warning, 0, UP_PAST_FAR_DAYS, 60, 79)
-    return ("CAUTION", int(round(_clamp(s, 60, 79))))
-
-
-# =======================================================
 # Render Graph Pack
 # =======================================================
 def draw_score_overlay(ax, score: int, label: str):
     """
-    MatplotlibのAxes上にScoreとSignalを描画する
+    Draw Score and Signal overlay (English).
     """
-    # 信号色定義
     if label == "HIGH":
         badge_bg = "#ff4d4f"; badge_fg = "white"
     elif label == "CAUTION":
@@ -931,21 +793,17 @@ def draw_score_overlay(ax, score: int, label: str):
     else: # SAFE
         badge_bg = "#52c41a"; badge_fg = "white"
 
-    # 1. "Score" Label (薄いグレー)
     ax.text(0.04, 0.92, "Score", transform=ax.transAxes,
             fontsize=12, color='#aaaaaa', fontweight='normal', zorder=20)
             
-    # 2. Score Value (白、大きく)
     ax.text(0.04, 0.83, str(score), transform=ax.transAxes,
             fontsize=32, color='white', fontweight='bold', zorder=20)
             
-    # 3. Signal Badge (Scoreの横に配置)
     ax.text(0.18, 0.85, f" {label} ", transform=ax.transAxes,
             fontsize=10, color=badge_fg, fontweight='bold',
             bbox=dict(facecolor=badge_bg, edgecolor='none', boxstyle='round,pad=0.4', alpha=0.95),
             zorder=20, verticalalignment='bottom')
 
-    # 4. 背景パネル (読みやすくするための半透明の黒背景)
     rect = patches.FancyBboxPatch(
         (0.02, 0.81), width=0.28, height=0.16,
         boxstyle="round,pad=0.02",
@@ -959,16 +817,12 @@ def draw_score_overlay(ax, score: int, label: str):
 
 def draw_logo_overlay(ax):
     """
-    ロゴ（画像）がないため、テキスト描画でロゴを再現する。
-    左下に 'OUT-STANDER' をSerifフォントで配置。
-    ★視認性向上のために「縁取り（Outline）」を追加。
+    Draw 'OUT-STANDER' logo (English text).
     """
-    # ロゴ風テキスト (Serif Font, Gold color)
     text_obj = ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
             fontsize=16, color='#e5c07b', fontweight='bold',
             fontname='serif', zorder=20, alpha=0.9)
     
-    # 縁取り（黒いアウトライン）を追加して、線と重なっても読めるようにする
     text_obj.set_path_effects([
         path_effects.Stroke(linewidth=3, foreground='black'),
         path_effects.Normal()
@@ -992,12 +846,8 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
     
-    # 日本語フォント設定があれば適用
-    if JP_FONT:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
-        ax.set_title("Cumulative Performance (Index = 100)", color="white", fontproperties=JP_FONT)
-    else:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    # ENGLISH LEGEND
+    ax.legend(facecolor="#0b0c0e", labelcolor="white")
         
     st.pyplot(fig)
 
@@ -1011,7 +861,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_facecolor("#0b0c0e")
     ax.scatter(X, Y, alpha=0.6, color="red")
     ax.plot(x_sorted, y_line, color="blue")
-    ax.set_title(f"Price Deviation Scatter ({ticker} vs {bench}) + Regression", color="white")
+    ax.set_title(f"Price Deviation Scatter ({ticker} vs {bench})", color="white")
     ax.set_xlabel(f"{bench} Deviation (pp)", color="white")
     ax.set_ylabel(f"{ticker} Deviation (pp)", color="white")
     ax.tick_params(colors="white")
@@ -1031,11 +881,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylabel("Std of Deviation (pp)", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
-    
-    if JP_FONT:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
-    else:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    ax.legend(facecolor="#0b0c0e", labelcolor="white")
     st.pyplot(fig)
 
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
@@ -1059,7 +905,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_facecolor("#0b0c0e")
     ax.scatter(Xr, Yr, alpha=0.6, color="red")
     ax.plot(xr_sorted, yr_line, color="blue")
-    ax.set_title(f"Daily Log Returns Scatter ({ticker} vs {bench}) + Regression", color="white")
+    ax.set_title(f"Daily Log Returns Scatter ({ticker} vs {bench})", color="white")
     ax.set_xlabel(f"{bench} Daily Log Return", color="white")
     ax.set_ylabel(f"{ticker} Daily Log Return", color="white")
     ax.tick_params(colors="white")
@@ -1079,13 +925,13 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     st.pyplot(fig)
 
     # =======================================================
-    # (ADD) JAPANESE MARGIN CHART (Dual Axis)
+    # (ADD) JAPANESE MARGIN CHART (Dual Axis) - English Labels
     # =======================================================
     if ticker.endswith(".T"):
         st.markdown("---")
-        st.subheader(f"■ 信用残・逆日歩（日証金データ: {ticker}）")
+        st.subheader(f"Margin Balance & Reverse Repo Fee (JP) - {ticker}")
         
-        with st.spinner("日証金データを取得中（IRBank/Minkabu/Karauri/Yahoo/Kabutan）..."):
+        with st.spinner("Fetching JP Margin Data..."):
             margin_df = fetch_jp_margin_data_robust(ticker)
             
         if not margin_df.empty:
@@ -1099,13 +945,13 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             
             # 左軸：信用残（面グラフ）
             if "MarginBuy" in margin_df.columns and "MarginSell" in margin_df.columns:
-                ax1.fill_between(dates, margin_df["MarginBuy"], color="#4169E1", alpha=0.3, label="融資残（Buying）")
+                ax1.fill_between(dates, margin_df["MarginBuy"], color="#4169E1", alpha=0.3, label="Margin Buy (Long)")
                 ax1.plot(dates, margin_df["MarginBuy"], color="#4169E1", linewidth=1.5)
                 
-                ax1.fill_between(dates, margin_df["MarginSell"], color="#CD5C5C", alpha=0.3, label="貸株残（Selling）")
+                ax1.fill_between(dates, margin_df["MarginSell"], color="#CD5C5C", alpha=0.3, label="Margin Sell (Short)")
                 ax1.plot(dates, margin_df["MarginSell"], color="#CD5C5C", linewidth=1.5)
                 
-                ax1.set_ylabel("信用残高（株）", color="white")
+                ax1.set_ylabel("Balance (Shares)", color="white")
                 ax1.tick_params(axis='y', colors="white")
                 ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
             
@@ -1119,30 +965,23 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             if has_hibu:
                 ax2 = ax1.twinx()
                 colors = ["#FFD700" if v > 0 else "#333333" for v in margin_df["Hibush"]]
-                ax2.bar(dates, margin_df["Hibush"], color=colors, alpha=0.6, width=0.6, label="逆日歩")
-                ax2.set_ylabel("逆日歩（円）", color="#FFD700")
+                ax2.bar(dates, margin_df["Hibush"], color=colors, alpha=0.6, width=0.6, label="Rev Repo Fee")
+                ax2.set_ylabel("Fee (JPY)", color="#FFD700")
                 ax2.tick_params(axis='y', colors="#FFD700")
                 
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
-                
-                if JP_FONT:
-                    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
-                else:
-                    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor="#0b0c0e", labelcolor="white")
             else:
-                if JP_FONT:
-                    ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white", prop=JP_FONT)
-                else:
-                    ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
+                ax1.legend(loc="upper left", facecolor="#0b0c0e", labelcolor="white")
 
             st.pyplot(fig)
-            st.caption("※データソース: IRBank / Minkabu / Karauri / Yahoo / Kabutan (自動切替)。直近のデータのみ表示されます。")
+            st.caption("Source: IRBank / Minkabu / Karauri / Yahoo / Kabutan (Auto-fallback).")
             
-            with st.expander("詳細データを見る"):
+            with st.expander("Show Details"):
                 st.dataframe(margin_df.sort_values("Date", ascending=False), use_container_width=True)
         else:
-            st.warning("日証金データが取得できませんでした（全ソース巡回後も不可）。")
+            st.warning("No JP Margin Data found.")
 
 
 # -------------------------------------------------------
@@ -1171,11 +1010,11 @@ def main():
     def show_error_black(msg: str):
         st.markdown(f"""<div class="custom-error">{msg}</div>""", unsafe_allow_html=True)
 
-    st.markdown("## Out-stander（管理者用）")
-    st.caption(f"認証ユーザー: {authed_email}")
+    st.markdown("## Out-stander (Admin)")
+    st.caption(f"Authenticated: {authed_email}")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker", value="", placeholder="例: NVDA / 0700.HK / 7203.T")
+        ticker = st.text_input("Ticker", value="", placeholder="e.g. NVDA / 0700.HK / 7203.T")
         today = date.today()
         default_start = today - timedelta(days=220)
         col1, col2 = st.columns(2)
@@ -1185,17 +1024,17 @@ def main():
 
     if not submitted: st.stop()
     if not ticker.strip():
-        show_error_black("Tickerが無効、または価格データが取得できません。")
+        show_error_black("Invalid Ticker")
         st.stop()
 
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
     except Exception:
-        show_error_black("Tickerが無効、または価格データが取得できません。")
+        show_error_black("No Data found")
         st.stop()
 
     if len(price_series) < 30:
-        show_error_black("Tickerが無効、または価格データが取得できません。")
+        show_error_black("Data too short")
         st.stop()
 
     key = series_cache_key(price_series)
@@ -1205,7 +1044,7 @@ def main():
     try:
         bubble_res = fit_lppl_bubble_cached(key, vals, idx_int)
     except Exception:
-        show_error_black("フィットに失敗しました（上昇LPPL）。")
+        show_error_black("LPPL Fit Failed")
         st.stop()
 
     peak_date = price_series.idxmax()
@@ -1224,7 +1063,7 @@ def main():
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # -----------------------------------------------------------
-    # MAIN CHART RENDER with OVERLAY (Modified)
+    # MAIN CHART RENDER with OVERLAY (English)
     # -----------------------------------------------------------
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor("#0b0c0e")
@@ -1232,32 +1071,31 @@ def main():
     
     # Plot Data
     ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="上昇モデル")
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"t_c（上昇） {pd.Timestamp(bubble_res['tc_date']).date()}")
-    ax.axvline(peak_date, color="white", linestyle=":", label=f"ピーク {pd.Timestamp(peak_date).date()}")
+    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
+    
+    tc_date_str = pd.Timestamp(bubble_res['tc_date']).strftime('%Y-%m-%d')
+    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--", label=f"Turn (up) {tc_date_str}")
+    
+    peak_date_str = pd.Timestamp(peak_date).strftime('%Y-%m-%d')
+    ax.axvline(peak_date, color="white", linestyle=":", label=f"Peak {peak_date_str}")
     
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="下落（ピーク以降）")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="下落モデル")
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"t_c（下落） {pd.Timestamp(neg_res['tc_date']).date()}")
+        ax.plot(down.index, down.values, color="cyan", label="Drawdown")
+        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
+        tc_down_str = pd.Timestamp(neg_res['tc_date']).strftime('%Y-%m-%d')
+        ax.axvline(neg_res["tc_date"], color="green", linestyle="--", label=f"Turn (down) {tc_down_str}")
     
     ax.set_xlabel("Date", color="white")
     ax.set_ylabel("Price (Adj Close preferred)", color="white")
     ax.tick_params(colors="white")
     ax.grid(color="#333333")
     
-    # Legend
-    # 日本語フォントがあれば適用
-    if JP_FONT:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right', prop=JP_FONT)
-    else:
-        ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
+    # Legend (English)
+    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc='lower right')
 
-    # ★ ADD OVERLAY HERE (Score & Signal on Chart)
+    # Overlays
     draw_score_overlay(ax, score, signal_label)
-    
-    # ★ ADD LOGO HERE (Text simulation)
     draw_logo_overlay(ax)
 
     st.pyplot(fig)
@@ -1274,7 +1112,7 @@ def main():
     col_score, col_gain = st.columns(2)
     with col_score:
         score_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">スコア詳細（カード表示）</div>
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Score</div>
             <div style="display: flex; align-items: baseline; gap: 12px;">
                 <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">{score}</div>
                 <div style="padding: 2px 10px; border-radius: 999px; background-color: {risk_color}33; color: {risk_color}; font-size: 0.85rem; font-weight: 600;">{risk_label}</div>
@@ -1282,7 +1120,7 @@ def main():
         st.markdown(score_card_html, unsafe_allow_html=True)
     with col_gain:
         gain_card_html = f"""<div style="background-color: #141518; border: 1px solid #2a2c30; border-radius: 12px; padding: 18px 20px 16px 20px; margin-top: 8px;">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">上昇倍率（開始→ピーク）</div>
+            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">Gain (Start -> Peak)</div>
             <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">{gain:.2f}x</div>
             <div style="margin-top: 6px; display: inline-block; padding: 2px 10px; border-radius: 999px; background-color: #102915; color: #52c41a; font-size: 0.85rem; font-weight: 500;">{gain_pct:+.1f}%</div>
         </div>"""
@@ -1295,86 +1133,27 @@ def main():
     omega = float(pdict.get("omega", np.nan))
     render_bubble_flow(r2, m, omega)
     verdict, _ = bubble_judgement(r2, m, omega)
-    st.markdown("### 管理者指標（バブル判定のための最小説明）")
-    tc_up_norm = pd.Timestamp(bubble_res["tc_date"]).normalize()
-    end_norm = pd.Timestamp(end_date).normalize()
-    days_to_tc = int((tc_up_norm - end_norm).days)
-    rmse = float(bubble_res.get("rmse", np.nan))
-    c_over_b = float(pdict.get("abs_C_over_B", np.nan))
-    log_period = float(pdict.get("log_period_2pi_over_omega", np.nan))
-    N = int(bubble_res.get("N", 0))
-    admin_rows = [
-        ["① R²（対数空間）", r2, "バブル判定の条件：R²≥0.65。"],
-        ["② m（最重要）", m, "バブル的：m∈[0.25,0.70]（典型0.3〜0.6）。"],
-        ["③ ω", omega, "バブル的：ω∈[6,13]。ω≥18は短周期すぎ→バブル“風”（注意）。"],
-        ["結論（バブル判定）", verdict, "上の判定フローの最終結論。"],
-        ["t_c（日付・近似）", str(tc_up_norm.date()), "tcが近い/通過＝終盤の可能性。"],
-        ["t_cまでの残日数", days_to_tc, "終盤度（短い/通過ほど終盤リスク↑）。"],
-        ["RMSE（対数空間）", rmse, "フィットの安定度（小さいほど安定）。"],
-        ["|C/B|", c_over_b, "≥2.0は“それっぽいフィット”の疑いが増える。"],
-        ["2π/ω", log_period, "周期の別表現。"],
-        ["フィット期間 N", N, "期間N。"]
-    ]
-    st.dataframe(pd.DataFrame(admin_rows, columns=["指標", "値", "解説"]), use_container_width=True)
-    st.markdown("#### 生パラメータ（A, B, C, m, tc, ω, φ）")
-    raw_params = bubble_res.get("params", np.array([], dtype=float)).astype(float)
-    if raw_params.size == 7:
-        raw_df = pd.DataFrame([raw_params], columns=["A", "B", "C", "m", "tc", "omega", "phi"])
-    else:
-        raw_df = pd.DataFrame([raw_params])
-    st.dataframe(raw_df, use_container_width=True)
-    st.markdown("#### フィット品質フラグ（簡易サニティチェック）")
-    binfo = bubble_res.get("bounds_info", {})
-    if raw_params.size == 7:
-        A_, B_, C_, m_, tc_, omega_, phi_ = [float(x) for x in raw_params]
-    else:
-        A_, B_, C_, m_, tc_, omega_, phi_ = [np.nan]*7
-    def near_bound(x, lo, hi, tol=0.02):
-        if not np.isfinite(x) or not np.isfinite(lo) or not np.isfinite(hi) or hi == lo: return False
-        r = (x - lo) / (hi - lo)
-        return (r < tol) or (r > 1 - tol)
-    flags = []
-    if np.isfinite(m_) and (m_ < 0.2 or m_ > 0.8): flags.append("m が一般的な“バブル的帯域”から外れています。")
-    if near_bound(m_, binfo.get("m_low", np.nan), binfo.get("m_high", np.nan)): flags.append("m が境界付近です（境界解の疑い）。")
-    if near_bound(tc_, binfo.get("tc_low", np.nan), binfo.get("tc_high", np.nan)): flags.append("tc が境界付近です。")
-    if near_bound(omega_, binfo.get("omega_low", np.nan), binfo.get("omega_high", np.nan)): flags.append("ω が境界付近です。")
-    if np.isfinite(c_over_b) and c_over_b > 2.0: flags.append("|C/B| が大きいです（振動過多）。")
-    if flags: st.write(pd.DataFrame({"フラグ": flags}))
-    else: st.write("単純なヒューリスティックでは明確な赤信号は見当たりません。")
-
-    st.markdown("### 投資判断向けの解釈（管理者のみ）")
-    summary, bullets = admin_interpretation_text(bubble_res, end_date)
-    with st.expander("投資判断向けの解釈メモ（管理者のみ）", expanded=True):
-        st.markdown(f"**要約**：{summary}")
-        st.markdown("**ポイント**")
-        st.markdown("\n".join([f"- {b}" for b in bullets]))
-        st.markdown("---")
-        st.markdown("**使い方（実務）**")
-        st.markdown("- バブル判定は **R²（信用）×m（形）×ω（自然さ）** の3点で判断。\n- tc は『バブルかどうか』ではなく『終盤かどうか』。")
-
-    st.markdown("---")
-    with st.expander("Mid-term Quant 判定表（A〜J + Threshold + Judgement）", expanded=False):
+    st.markdown("### Admin Indicators")
+    admin_interpretation_text(bubble_res, end_date)
+    
+    # Quant table expander
+    with st.expander("Mid-term Quant Table", expanded=False):
         col_b1, col_b2 = st.columns([2, 1])
-        with col_b1: bench = st.text_input("Benchmark（指数）", value="ACWI", help="例: ACWI / ^GSPC / ^N225")
-        with col_b2: mid_window = st.number_input("WINDOW（判定表）", min_value=5, max_value=120, value=20, step=1)
+        with col_b1: bench = st.text_input("Benchmark", value="ACWI")
+        with col_b2: mid_window = st.number_input("Window", min_value=5, max_value=120, value=20, step=1)
         try:
             df_mid = build_midterm_quant_table(ticker=ticker.strip(), bench=bench.strip(), start_date=start_date, end_date=end_date, window=int(mid_window))
             st.dataframe(df_mid[["Block", "Metric", "Value", "Threshold", "Judgement", "Note"]], use_container_width=True, hide_index=True)
-        except Exception as e:
-            show_error_black(f"判定表の生成に失敗しました: {e}")
+        except Exception:
+            pass
 
     st.markdown("---")
-    with st.expander("グラフ（Index/Deviation/Regression/Vol/Drawdown）", expanded=False):
-        gcol1, gcol2, gcol3 = st.columns([2, 1, 1])
-        with gcol1: graph_bench = st.text_input("Benchmark（グラフ用）", value="ACWI")
-        with gcol2: graph_window = st.number_input("WINDOW（グラフ用）", min_value=5, max_value=120, value=20, step=1)
-        with gcol3: trading_days = st.number_input("Trading days/year", min_value=200, max_value=365, value=252, step=1)
+    with st.expander("Extra Graphs", expanded=False):
         try:
-            prices_pair = fetch_prices_pair_cached(ticker=ticker.strip(), bench=graph_bench.strip(), start_date=start_date, end_date=end_date)
-            st.caption(f"Data: {prices_pair.index.min().date()} to {prices_pair.index.max().date()} | rows={len(prices_pair)}")
-            render_graph_pack_from_prices(prices=prices_pair, ticker=ticker.strip(), bench=graph_bench.strip(), window=int(graph_window), trading_days=int(trading_days))
-        except Exception as e:
-            show_error_black(f"グラフ表示に失敗しました: {e}")
+            prices_pair = fetch_prices_pair_cached(ticker=ticker.strip(), bench=bench.strip(), start_date=start_date, end_date=end_date)
+            render_graph_pack_from_prices(prices=prices_pair, ticker=ticker.strip(), bench=bench.strip(), window=int(mid_window))
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
