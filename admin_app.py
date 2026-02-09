@@ -890,7 +890,8 @@ def draw_score_overlay(ax, score: int, label: str):
     TEXT_MAIN = "#E0E0E0"
     TEXT_DIM = "#808080"
     
-    # Position: Top Right
+    # Position: Top Right (Modified to avoid overlap)
+    # Move slightly left to ensure it doesn't touch the frame edge
     x_pos = 0.95
     y_pos = 0.95
     
@@ -1155,7 +1156,7 @@ def main():
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # -----------------------------------------------------------
-    # MAIN CHART RENDER with OVERLAY (REDESIGNED FOR LUXURY)
+    # MAIN CHART RENDER with OVERLAY (REDESIGNED FOR LUXURY & NO OVERLAP)
     # -----------------------------------------------------------
     # Use a slightly wider aspect ratio for cinematic look
     fig, ax = plt.subplots(figsize=(12, 6.5))
@@ -1170,7 +1171,6 @@ def main():
     ax.plot(price_series.index, price_series.values, color="#F0F0F0", linewidth=0.8, alpha=0.9, zorder=5)
     
     # 2. Model (Gold, Smooth, Prominent)
-    # Using a Champagne Gold color
     GOLD_COLOR = "#C5A059" 
     ax.plot(price_series.index, bubble_res["price_fit"], color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
     
@@ -1183,29 +1183,34 @@ def main():
         ax.plot(down.index, down.values, color="cyan", linewidth=0.8, alpha=0.7)
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="#008b8b", linewidth=1.5, alpha=0.8)
 
-    # --- Direct Labeling (No Legend Box) ---
+    # --- FIX: Ensure Right Margin for Labels to Avoid Overlap ---
+    # Extend X-axis to the right by about 15% to create a "margin" area for text
     last_date = price_series.index[-1]
+    total_days = (last_date - price_series.index[0]).days
+    margin_days = int(total_days * 0.15)
+    margin_limit_date = last_date + timedelta(days=margin_days)
+    ax.set_xlim(right=margin_limit_date)
+
+    # --- Direct Labeling (In the new margin area) ---
     last_price = price_series.values[-1]
     last_model_val = bubble_res["price_fit"][-1]
     
-    # Offset dates slightly for text placement
-    text_date_offset = last_date + timedelta(days=2)
+    # Offset dates into the margin
+    text_date_offset = last_date + timedelta(days=2) # Start of margin
     
     # Label: Ticker
-    ax.text(text_date_offset, last_price, f" {ticker.strip()}", color="#F0F0F0", 
-            fontsize=10, fontweight='bold', fontname='serif', va='center')
+    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0", 
+            fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
     
     # Label: Model
-    ax.text(text_date_offset, last_model_val, " Model", color=GOLD_COLOR, 
-            fontsize=10, fontweight='bold', fontname='serif', va='center')
+    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR, 
+            fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
     
-    # Label: Peak
-    # Find peak coordinates
+    # Label: Peak (Shifted slightly up to avoid collision with line)
     peak_val = price_series.max()
     peak_dt = price_series.idxmax()
-    ax.text(peak_dt, peak_val * 1.02, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", 
+    ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", 
             color="#888888", fontsize=7, ha='center', fontname='sans-serif')
-
 
     # --- Header (Editorial Style) ---
     # Top Left: Ticker Name + Subtitle
