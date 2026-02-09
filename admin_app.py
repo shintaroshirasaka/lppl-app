@@ -888,14 +888,12 @@ def draw_score_overlay(ax, score: int, label: str):
             fontsize=32, color='white', fontweight='bold', zorder=20)
             
     # 3. Signal Badge (Scoreの横に配置)
-    # bboxを使って角丸四角形を描画
     ax.text(0.18, 0.85, f" {label} ", transform=ax.transAxes,
             fontsize=10, color=badge_fg, fontweight='bold',
             bbox=dict(facecolor=badge_bg, edgecolor='none', boxstyle='round,pad=0.4', alpha=0.95),
             zorder=20, verticalalignment='bottom')
 
     # 4. 背景パネル (読みやすくするための半透明の黒背景)
-    # スコア表示エリア全体をカバーする
     rect = patches.FancyBboxPatch(
         (0.02, 0.81), width=0.28, height=0.16,
         boxstyle="round,pad=0.02",
@@ -905,6 +903,17 @@ def draw_score_overlay(ax, score: int, label: str):
         zorder=15
     )
     ax.add_patch(rect)
+
+
+def draw_logo_overlay(ax):
+    """
+    ロゴ（画像）がないため、テキスト描画でロゴを再現する。
+    左下に 'OUT-STANDER' をSerifフォントで配置。
+    """
+    # ロゴ風テキスト (Serif Font, Gold color)
+    ax.text(0.02, 0.03, "OUT-STANDER", transform=ax.transAxes,
+            fontsize=16, color='#e5c07b', fontweight='bold',
+            fontname='serif', zorder=20, alpha=0.9)
 
 
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
@@ -1166,6 +1175,9 @@ def main():
 
     # ★ ADD OVERLAY HERE (Score & Signal on Chart)
     draw_score_overlay(ax, score, signal_label)
+    
+    # ★ ADD LOGO HERE (Text simulation)
+    draw_logo_overlay(ax)
 
     st.pyplot(fig)
     # -----------------------------------------------------------
