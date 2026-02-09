@@ -1211,8 +1211,11 @@ def main():
     # Top Left: Ticker Name + Subtitle
     ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes,
             fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
-    ax.text(0.02, 0.88, "MARKET ANALYSIS SYSTEM", transform=ax.transAxes,
-            fontsize=7, color="#666666", fontweight='bold', fontname='sans-serif', letter_spacing=2)
+    
+    # Manually space the subtitle to simulate tracking
+    subtitle_text = " ".join("MARKET ANALYSIS SYSTEM")
+    ax.text(0.02, 0.88, subtitle_text, transform=ax.transAxes,
+            fontsize=7, color="#666666", fontweight='bold', fontname='sans-serif')
 
     # --- Styling ---
     # Remove top and right spines
