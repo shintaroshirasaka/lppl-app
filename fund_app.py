@@ -3,15 +3,85 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.patches as patches
+import matplotlib.font_manager as fm
+import matplotlib.patheffects as path_effects
+from matplotlib.colors import ListedColormap
 import streamlit as st
 import yfinance as yf
 import re
 
-# ※ Assumes auth_gate file exists in the same directory
+# =======================================================
+# FONT & STYLE SETUP (Luxury / HNWI Design)
+# =======================================================
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif', 'Georgia', 'serif']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['axes.titlesize'] = 16
+plt.rcParams['axes.labelsize'] = 10
+plt.rcParams['xtick.labelsize'] = 9
+plt.rcParams['ytick.labelsize'] = 9
+
+# --- Luxury Color Palette ---
+HNWI_BG = "#050505"       # Deepest Black
+HNWI_AX_BG = "#0b0c0e"    # Off-Black for Axes
+TEXT_COLOR = "#F0F0F0"    # Off-White text
+TICK_COLOR = "#888888"    # Grey ticks
+GRID_COLOR = "#333333"    # Subtle grid
+
+# Data Colors
+C_GOLD = "#C5A059"        # Main Gold
+C_SILVER = "#A0A0A0"      # Secondary Silver
+C_BRONZE = "#cd7f32"      # Tertiary Bronze
+C_BLUE = "#4682B4"        # Steel Blue (Muted)
+C_SLATE = "#708090"       # Slate Grey
+
+# Custom Colormap for Stacked Bars
+LUXURY_CMAP = ListedColormap([C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE, "#8B4513", "#556B2F"])
+
+# =======================================================
+# VISUALIZATION HELPERS
+# =======================================================
+def draw_logo_overlay(ax):
+    """Adds the OUT-STANDER watermark logo."""
+    ax.text(0.98, 0.03, "OUT-STANDER", transform=ax.transAxes,
+            fontsize=20, color='#3d3320', fontweight='bold',
+            fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
+
+def style_hnwi_ax(ax, title=None, dual_y=False):
+    """Applies the luxury styling to an axes object."""
+    ax.set_facecolor(HNWI_AX_BG)
+    if title:
+        # Minimalist Title styling
+        ax.set_title(title, color=TEXT_COLOR, fontweight='normal', fontname='serif', pad=15)
+    
+    ax.tick_params(colors=TICK_COLOR, which='both')
+    ax.xaxis.label.set_color(TEXT_COLOR)
+    ax.yaxis.label.set_color(TEXT_COLOR)
+    
+    # Minimalist Grid (Dotted)
+    ax.grid(color=GRID_COLOR, linestyle=":", linewidth=0.5, alpha=0.5)
+    
+    # Spine styling (Open look)
+    ax.spines['top'].set_visible(False)
+    ax.spines['left'].set_color(GRID_COLOR)
+    ax.spines['bottom'].set_color(GRID_COLOR)
+    
+    if dual_y:
+        ax.spines['right'].set_visible(True)
+        ax.spines['right'].set_color(GRID_COLOR)
+    else:
+        ax.spines['right'].set_visible(False)
+        
+    draw_logo_overlay(ax)
+
+# =======================================================
+# AUTH GATE (Dummy for compatibility)
+# =======================================================
 try:
     from auth_gate import require_admin_token
 except ImportError:
-    # Dummy function for testing purposes
     def require_admin_token():
         return "debug@example.com"
 
@@ -69,23 +139,16 @@ def fetch_company_facts(cik10: str) -> dict:
 # XBRL annual extractor (USD)
 # =========================
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False, min_duration: int = 0) -> pd.DataFrame:
-    """
-    Extract Annual Series (USD) from 10-K type filings.
-    If min_duration > 0, exclude data with duration (days) less than specified (e.g., exclude Q4 specific data).
-    """
     facts_root = facts_json.get("facts", {})
     if not facts_root:
         return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "filed", "segment"])
 
     node = []
-    
-    # Search for known prefixes
     for prefix in ["us-gaap", "srt", "ifrs-full", "dei"]:
         if prefix in facts_root and xbrl_tag in facts_root[prefix]:
             node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
             break
     
-    # Search custom tags if not found
     if not node:
         for k in facts_root.keys():
             if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
@@ -99,7 +162,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
         end = x.get("end")
-        start = x.get("start") # Period start date
+        start = x.get("start")
         val = x.get("val")
         fy_raw = x.get("fy", None)
         filed = x.get("filed")
@@ -107,7 +170,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
         if not end or val is None:
             continue
-        # Allow 10-K, 20-F (ADR), 40-F, etc.
         if not (form.startswith("10-K") or form.startswith("20-F") or form.startswith("40-F")):
             continue
 
@@ -118,18 +180,13 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         if pd.isna(end_ts):
             continue
 
-        # ▼▼ Duration Check ▼▼
         if min_duration > 0:
-            # Exclude instant concepts if a duration is expected
             if pd.isna(start_ts):
                 continue
-            
             days = (end_ts - start_ts).days
             if days < min_duration:
                 continue
-        # ▲▲ Duration Check End ▲▲
 
-        # Extract only annual (FY/CY)
         annual_fp = fp in {"FY", "CY"}
         
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
@@ -150,14 +207,10 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "filed", "segment"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
-    
-    # Filter only annual flags
     df = df[df["annual_fp"] == 1]
 
     if not include_segments:
-        # Consolidated data only
         df = df[df["segment"].isnull()]
-        # Remove duplicates (prioritize latest filed)
         df = df.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
         df = df.sort_values("year")
         return df
@@ -166,9 +219,6 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
 
 def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str], min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
-    """
-    Select tag from fixed list (prioritizing latest year availability).
-    """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
     best_max_year = -1
@@ -194,43 +244,32 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str], min
 
 
 def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None, min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
-    """
-    Scan all tags in XBRL, find matching keywords, and select the one with latest data.
-    """
     if exclude_keywords is None:
         exclude_keywords = []
     
-    # List all tags
     all_tags = []
     facts_root = facts_json.get("facts", {})
     for prefix in facts_root:
         for tag in facts_root[prefix]:
             all_tags.append(tag)
             
-    # Keyword matching
     candidates = []
     for tag in all_tags:
         tag_lower = tag.lower()
-        
-        # Mandatory Check
         if not any(k.lower() in tag_lower for k in keywords):
             continue
-        # Exclude Check
         if any(ek.lower() in tag_lower for ek in exclude_keywords):
             continue
-        # Suffix Check
         if must_end_with and not tag_lower.endswith(must_end_with.lower()):
             continue
-            
         candidates.append(tag)
     
     if not candidates:
         return None, pd.DataFrame()
 
-    # Extraction and Evaluation
     best_tag = None
     best_df = pd.DataFrame(columns=["year"])
-    best_score = (-1, -1) # (max_year, count)
+    best_score = (-1, -1)
 
     for tag in candidates:
         df = _extract_annual_series_usd(facts_json, tag, include_segments=False, min_duration=min_duration)
@@ -239,8 +278,6 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
             
         max_year = int(df["year"].max())
         count = len(df)
-        
-        # Priority: Latest Year -> Count
         score = (max_year, count)
         
         if score > best_score:
@@ -266,13 +303,7 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
     return table[table[col] >= min_year].sort_values(col).reset_index(drop=True)
 
 
-# =========================
-# Composite (USD) fill-by-year
-# =========================
 def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str], min_duration: int = 0) -> tuple[pd.DataFrame, dict]:
-    """
-    Synthesize the most likely value for each fiscal year from a priority list of tags.
-    """
     tag_series = {}
     tag_years = {}
     for tag in tag_priority:
@@ -346,13 +377,11 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["year", "val", "dimension", "member"])
     
     out = pd.DataFrame(rows)
-    # Remove duplicates: prioritize latest filed
     out = out.sort_values(["year", "dimension", "member", "filed"]).drop_duplicates(subset=["year", "dimension", "member"], keep="last")
     return out
 
 
 def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # (7) Segment: Expand tag candidates
     revenue_tags = [
         "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "SalesToExternalCustomers", "RevenuesNetOfInterestExpense", 
@@ -362,7 +391,6 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     all_seg_rows = []
     
-    # Segment revenue is a Duration concept, so use 350-day filter
     for tag in revenue_tags:
         df = _extract_annual_series_usd(facts_json, tag, include_segments=True, min_duration=350)
         if df.empty:
@@ -436,19 +464,16 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     df_m = df / 1_000_000.0
     
     fig, ax = plt.subplots(figsize=(12, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
     
-    colors = plt.get_cmap("tab20")(np.linspace(0, 1, len(df_m.columns)))
+    # Use Luxury Colormap instead of default
+    df_m.plot(kind="bar", stacked=True, ax=ax, colormap=LUXURY_CMAP, width=0.7)
     
-    df_m.plot(kind="bar", stacked=True, ax=ax, color=colors, width=0.8)
-    
-    ax.set_ylabel("Revenue (Million USD)", color="white")
-    ax.tick_params(colors="white", axis='x', rotation=0)
-    ax.tick_params(colors="white", axis='y')
-    ax.grid(color="#333333", alpha=0.6, axis="y")
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    ax.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
+    ax.tick_params(colors=TICK_COLOR, axis='x', rotation=0)
+    ax.tick_params(colors=TICK_COLOR, axis='y')
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
     st.pyplot(fig)
 
 
@@ -478,7 +503,6 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     
     meta = {}
     
-    # PL items are Duration concepts, so apply 350-day filter
     rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority, min_duration=350)
     meta["revenue_composite"] = rev_meta
     
@@ -525,24 +549,34 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     op = df["OpIncome(M$)"].astype(float).to_numpy()
     ni = df["NetIncome(M$)"].astype(float).to_numpy()
 
-    fig, ax_left = plt.subplots(figsize=(12, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax_left.set_facecolor("#0b0c0e")
+    fig, ax_left = plt.subplots(figsize=(12, 6))
+    fig.patch.set_facecolor(HNWI_BG)
+    # Apply styling to main axis
+    style_hnwi_ax(ax_left, title=title, dual_y=True)
 
-    ax_left.plot(x, op, label="Operating Income", linewidth=2.5, marker="o", markersize=6)
-    ax_left.plot(x, ni, label="Net Income (Attributable)", linewidth=2.5, marker="o", markersize=6)
+    # Plot Income Lines (Gold & Bronze)
+    ax_left.plot(x, op, label="Operating Income", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+    ax_left.plot(x, ni, label="Net Income", color=C_BRONZE, linewidth=2.5, marker="o", markersize=6)
 
-    ax_left.set_ylabel("Profit (Million USD)", color="white")
-    ax_left.tick_params(colors="white")
-    ax_left.grid(color="#333333", alpha=0.6)
+    ax_left.set_ylabel("Profit (Million USD)", color=TEXT_COLOR)
 
+    # Secondary Axis for Revenue (Bars)
     ax_right = ax_left.twinx()
-    ax_right.bar(x, revenue, alpha=0.55, width=0.6, label="Revenue")
-    ax_right.set_ylabel("Revenue (Million USD)", color="white")
-    ax_right.tick_params(colors="white")
+    ax_right.bar(x, revenue, color=C_SILVER, alpha=0.3, width=0.6, label="Revenue")
+    
+    # Manually style the twin axis to match
+    ax_right.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
+    ax_right.tick_params(colors=TICK_COLOR, which='both')
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['left'].set_visible(False)
+    ax_right.spines['right'].set_color(GRID_COLOR)
+    ax_right.spines['bottom'].set_visible(False)
 
-    ax_left.set_title(title, color="white")
-    ax_left.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    # Legend handling
+    lines1, labels1 = ax_left.get_legend_handles_labels()
+    lines2, labels2 = ax_right.get_legend_handles_labels()
+    ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+    
     st.pyplot(fig)
 
 
@@ -559,23 +593,18 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
             margin[i] = op[i] / rev[i] * 100.0
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
-    ax.plot(x, margin, linewidth=2.5, marker="o", markersize=6, label="Operating Margin (%)")
-    ax.set_ylabel("%", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(f"{title} (GAAP Base)", color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.plot(x, margin, color=C_GOLD, linewidth=2.5, marker="o", markersize=6, label="Operating Margin (%)")
+    ax.set_ylabel("%", color=TEXT_COLOR)
     st.pyplot(fig)
 
 
 # =========================
-# BS (latest) - FIXED PIE CHART LOGIC
+# BS (latest)
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
-    # BS is Instant concept, so no duration filter (0)
     df = _extract_annual_series_usd(facts_json, "Assets", min_duration=0)
     if df.empty:
         return None
@@ -629,8 +658,8 @@ def build_bs_latest_simple(facts_json: dict, year: int):
     if np.isfinite(assets_total) and np.isfinite(eq):
          calc_liab = assets_total - eq
          if np.isfinite(liab_total) and abs(liab_total - calc_liab) > (assets_total * 0.05):
-              liab_total = calc_liab
-              liab_tag = "CALC:Assets-Equity (Override)"
+             liab_total = calc_liab
+             liab_tag = "CALC:Assets-Equity (Override)"
 
     if (not np.isfinite(ncl)) and np.isfinite(liab_total) and np.isfinite(cl):
         ncl = liab_total - cl
@@ -670,28 +699,28 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     vals = dict(zip(snap["Item"], snap["Value"]))
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
+    # Assets
     bottom = 0.0
-    ax.bar(0, vals["Noncurrent Assets (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Assets")
+    ax.bar(0, vals["Noncurrent Assets (M$)"], bottom=bottom, color=C_SLATE, alpha=0.9, label="Noncurrent Assets", width=0.6)
     bottom += vals["Noncurrent Assets (M$)"]
-    ax.bar(0, vals["Current Assets (M$)"], bottom=bottom, alpha=0.7, label="Current Assets")
+    ax.bar(0, vals["Current Assets (M$)"], bottom=bottom, color=C_BLUE, alpha=0.9, label="Current Assets", width=0.6)
 
+    # Liabilities + Equity
     bottom = 0.0
-    ax.bar(1, vals["Equity (M$)"], bottom=bottom, alpha=0.7, label="Equity")
+    ax.bar(1, vals["Equity (M$)"], bottom=bottom, color=C_GOLD, alpha=0.9, label="Equity", width=0.6)
     bottom += vals["Equity (M$)"]
-    ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Noncurrent Liabilities")
+    ax.bar(1, vals["Noncurrent Liabilities (M$)"], bottom=bottom, color=C_BRONZE, alpha=0.9, label="Noncurrent Liab", width=0.6)
     bottom += vals["Noncurrent Liabilities (M$)"]
-    ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, alpha=0.7, label="Current Liabilities")
+    ax.bar(1, vals["Current Liabilities (M$)"], bottom=bottom, color="#8B4513", alpha=0.9, label="Current Liab", width=0.6)
 
     ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Assets", "Liabilities + Equity"], color="white")
-    ax.set_ylabel("Million USD", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    ax.set_xticklabels(["Assets", "Liab + Equity"], color=TEXT_COLOR)
+    ax.set_ylabel("Million USD", color=TEXT_COLOR)
+    
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
     st.pyplot(fig)
 
 
@@ -740,7 +769,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
         total_le = total_assets
 
     asset_candidates = [
-        ("Cash & Equivalents", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
+        ("Cash & Equiv", ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "CashAndCashEquivalents"]),
         ("Receivables", ["AccountsReceivableNetCurrent", "AccountsReceivableNet", "ReceivablesNetCurrent"]),
         ("Inventory", ["InventoryNet", "Inventory"]),
         ("PPE (Net)", [
@@ -768,11 +797,11 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     le_items = []
     
     liab_candidates = [
-        ("Accounts Payable", ["AccountsPayableCurrent", "AccountsPayableTradeCurrent", "AccountsPayable"]),
-        ("Deferred Revenue", ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredRevenue"]),
-        ("Short-term Debt", ["ShortTermBorrowings", "CommercialPaper", "DebtCurrent", "LongTermDebtCurrent"]),
-        ("Long-term Debt", ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"]),
-        ("Other Liabilities", ["OtherLiabilitiesNoncurrent", "OtherLiabilities"])
+        ("Acct Payable", ["AccountsPayableCurrent", "AccountsPayableTradeCurrent", "AccountsPayable"]),
+        ("Def Revenue", ["ContractWithCustomerLiabilityCurrent", "DeferredRevenueCurrent", "DeferredRevenue"]),
+        ("ST Debt", ["ShortTermBorrowings", "CommercialPaper", "DebtCurrent", "LongTermDebtCurrent"]),
+        ("LT Debt", ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"]),
+        ("Other Liab", ["OtherLiabilitiesNoncurrent", "OtherLiabilities"])
     ]
     sum_liab_found = 0.0
     for name, tags in liab_candidates:
@@ -785,11 +814,11 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     if np.isfinite(total_liab) and total_liab > sum_liab_found:
         other_liab = total_liab - sum_liab_found
         if other_liab > 0:
-            le_items.append(("Other Liabilities (Calc)", other_liab))
+            le_items.append(("Other Liab (Calc)", other_liab))
 
     eq_candidates = [
         ("Retained Earnings", ["RetainedEarningsAccumulatedDeficit"]),
-        ("Add. Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
+        ("Paid-in Capital", ["AdditionalPaidInCapital", "AdditionalPaidInCapitalCommonStock"]),
         ("Common Stock", ["CommonStockValue"]),
         ("Treasury Stock", ["TreasuryStockValue"])
     ]
@@ -806,7 +835,7 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
     if np.isfinite(total_eq) and total_eq > sum_eq_found:
         other_eq = total_eq - sum_eq_found
         if other_eq > 0:
-            le_items.append(("Other Equity (Calc)", other_eq))
+            le_items.append(("Other Eq (Calc)", other_eq))
 
     sum_le_items = sum(v for _, v in le_items if np.isfinite(v) and v > 0)
     if not np.isfinite(total_le) or total_le <= 0:
@@ -823,23 +852,36 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 
 def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
     col1, col2 = st.columns(2)
+    
+    # Luxury colors for Pie
+    colors = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE]
 
     def _pie(ax, labels, sizes, title):
-        ax.pie(sizes, labels=labels, autopct=lambda p: f"{p:.0f}%", startangle=90, textprops={"color": "white"})
-        ax.set_title(title, color="white")
+        wedges, texts, autotexts = ax.pie(
+            sizes, labels=labels, autopct=lambda p: f"{p:.0f}%", 
+            startangle=90, colors=colors,
+            textprops={"color": TEXT_COLOR}
+        )
+        ax.set_title(title, color=TEXT_COLOR, fontname='serif')
+        # Style the percentage text
+        for autotext in autotexts:
+            autotext.set_color('#000000') # Black text on colored slices
+            autotext.set_fontweight('bold')
 
     with col1:
         fig, ax = plt.subplots(figsize=(5.5, 5.0))
-        fig.patch.set_facecolor("#0b0c0e")
-        ax.set_facecolor("#0b0c0e")
-        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"A: Assets Top3 + Other ({year})")
+        fig.patch.set_facecolor(HNWI_BG)
+        style_hnwi_ax(ax)
+        ax.axis('equal') # Remove axes for pie
+        _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"Asset Breakdown ({year})")
         st.pyplot(fig)
 
     with col2:
         fig, ax = plt.subplots(figsize=(5.5, 5.0))
-        fig.patch.set_facecolor("#0b0c0e")
-        ax.set_facecolor("#0b0c0e")
-        _pie(ax, le_pie["labels"], le_pie["sizes"], f"B: L+E Top3 + Other ({year})")
+        fig.patch.set_facecolor(HNWI_BG)
+        style_hnwi_ax(ax)
+        ax.axis('equal')
+        _pie(ax, le_pie["labels"], le_pie["sizes"], f"Liab & Equity Breakdown ({year})")
         st.pyplot(fig)
 
 
@@ -853,7 +895,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
     capex_tags = ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireFixedAssets"]
 
-    # CF is Duration concept, so use 350-day filter
     tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags, min_duration=350)
     meta["cfo_tag"] = tag
     tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags, min_duration=350)
@@ -905,17 +946,14 @@ def plot_cf_annual(table: pd.DataFrame, title: str):
     fcf = df["FCF(M$)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
-    ax.plot(x, cfo, label="CFO (Operating)", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, fcf, label="FCF (Free)", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, cfo, label="CFO (Operating)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, fcf, label="FCF (Free)", color=C_SILVER, linewidth=2.5, marker="o", markersize=6)
 
-    ax.set_ylabel("Million USD", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.set_ylabel("Million USD", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
 
@@ -928,7 +966,6 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
     rpo_exclude = ["Satisfied", "Recognized", "Billings"]
     
-    # RPO is Instant concept, no filter
     tag_rpo, df_rpo = _find_best_tag_dynamic(
         facts_json, 
         keywords=rpo_keywords, 
@@ -1031,21 +1068,18 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     clc = df["ContractLiabCurrent(M$)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
     if np.isfinite(rpo).any():
-        ax.plot(x, rpo, label="RPO / Backlog", linewidth=2.5, marker="o", markersize=6)
+        ax.plot(x, rpo, label="RPO / Backlog", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
     if np.isfinite(cl).any():
-        ax.plot(x, cl, label="Contract Liabilities (Total)", linewidth=2.5, marker="o", markersize=6)
+        ax.plot(x, cl, label="Contract Liabilities (Total)", color=C_SILVER, linewidth=2.5, marker="o", markersize=6)
     if np.isfinite(clc).any():
-        ax.plot(x, clc, label="Contract Liabilities (Current)", linewidth=2.5, marker="o", markersize=6)
+        ax.plot(x, clc, label="Contract Liabilities (Current)", color=C_BRONZE, linewidth=2.5, marker="o", markersize=6)
 
-    ax.set_ylabel("Million USD", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.set_ylabel("Million USD", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
 
@@ -1062,12 +1096,10 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
 
     ni_priority = ["NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss", "ProfitLoss", "IncomeLossFromContinuingOperations"]
-    # NI is Duration, so 350-day filter
     ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority, min_duration=350)
     meta["net_income_composite"] = ni_meta
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
 
-    # BS items are Instant, so no filter
     assets_tag, assets_map = _annual_series_map_usd(facts_json, ["Assets"], min_duration=0)
     meta["assets_tag"] = assets_tag
 
@@ -1080,7 +1112,6 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet", "InventoryGross", "Inventory"], min_duration=0)
     meta["inventory_tag"] = inv_tag
 
-    # COGS is Duration, so 350-day filter
     cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfSales", "CostOfGoodsSold"]
     cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates, min_duration=350)
     meta["cogs_tag"] = cogs_tag
@@ -1122,17 +1153,14 @@ def plot_roa_roe(table: pd.DataFrame, title: str):
     roe = df["ROE(%)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
-    ax.plot(x, roa, label="ROA (%)", linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, roe, label="ROE (%)", linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, roa, label="ROA (%)", color=C_SILVER, linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, roe, label="ROE (%)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
 
-    ax.set_ylabel("%", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.set_ylabel("%", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
 
@@ -1142,15 +1170,12 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
     it = df["InventoryTurnover(x)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
-    ax.plot(x, it, label="Inventory Turnover (x)", linewidth=2.5, marker="o", markersize=6)
-    ax.set_ylabel("x", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.plot(x, it, label="Inventory Turnover (x)", color=C_BLUE, linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel("x", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
 
@@ -1199,7 +1224,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
             form = str(x.get("form", "")).upper().strip()
             fp = str(x.get("fp", "")).upper().strip()
             end = x.get("end")
-            start = x.get("start") # For duration check
+            start = x.get("start")
             val = x.get("val")
             fy_raw = x.get("fy", None)
             filed = x.get("filed")
@@ -1216,14 +1241,12 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
             if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
 
-            # ▼▼ EPS Duration Check ▼▼
             if min_duration > 0:
                 if pd.isna(start_ts):
                     continue
                 days = (end_ts - start_ts).days
                 if days < min_duration:
                     continue 
-            # ▲▲ Duration Check End ▲▲
 
             annual_fp = fp in {"FY", "CY"}
 
@@ -1245,8 +1268,6 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
         return pd.DataFrame(columns=["year", "end", "val", "annual_fp", "unit", "filed"])
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
-    
-    # Filter Annual (FY/CY)
     df = df[df["annual_fp"] == 1]
 
     def unit_score(u: str) -> int:
@@ -1276,7 +1297,6 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     best_tag = None
 
     for tag in eps_tags:
-        # EPS is Duration concept, use 350-day filter
         df = _extract_eps_series_any_unit(facts_json, tag, min_duration=350)
         if df.empty:
             continue
@@ -1317,15 +1337,12 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     eps = df["EPS"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
 
-    ax.plot(x, eps, label="EPS (Adjusted, Diluted)", linewidth=2.5, marker="o", markersize=6)
-    ax.set_ylabel(unit_label, color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333", alpha=0.6)
-    ax.set_title(title, color="white")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white", loc="upper left")
+    ax.plot(x, eps, label="EPS (Adjusted, Diluted)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel(unit_label, color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
 
@@ -1333,24 +1350,29 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
 # UI
 # =========================
 def render(authed_email: str):
-    st.set_page_config(page_title="Fundamentals (Staging)", layout="wide")
+    st.set_page_config(page_title="Fundamentals (Luxury Edition)", layout="wide")
+    # Apply Luxury CSS
     st.markdown(
         """
         <style>
-        .stApp { background-color: #0b0c0e !important; color: #ffffff !important; }
-        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; }
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap');
+        .stApp { background-color: #050505 !important; color: #f0f0f0 !important; font-family: 'Times New Roman', serif; }
+        div[data-testid="stMarkdownContainer"] p, label, h1, h2, h3 { color: #f0f0f0 !important; font-family: 'Times New Roman', serif !important; }
+        input.st-ai, input.st-ah, div[data-baseweb="input"] { background-color: #111111 !important; color: #C5A059 !important; border-color: #333 !important; }
+        div[data-testid="stFormSubmitButton"] button { background-color: #1a1a1a !important; color: #C5A059 !important; border: 1px solid #333 !important; font-family: 'Times New Roman', serif; }
+        div[data-testid="stFormSubmitButton"] button:hover { background-color: #C5A059 !important; border-color: #C5A059 !important; color: #000000 !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown("## Long-term Fundamentals (PL / BS / CF / Segments / RPO / Ratios / EPS)")
+    st.markdown("## Fundamental Analysis")
     st.caption(f"Authenticated User: {authed_email}")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker (US Stock)", value="AVGO")
-        n_years = st.slider("Period (Common: Latest N Years)", min_value=3, max_value=15, value=10)
-        submitted = st.form_submit_button("Run")
+        ticker = st.text_input("Ticker (US Stock)", value="MSFT")
+        n_years = st.slider("Period (Years)", min_value=3, max_value=15, value=10)
+        submitted = st.form_submit_button("Run Analysis")
 
     if not submitted:
         st.stop()
@@ -1370,7 +1392,7 @@ def render(authed_email: str):
     company_name = facts.get("entityName", ticker.upper())
 
     tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps = st.tabs(
-        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments (Revenue)", "Backlog / RPO", "Ratios", "EPS"]
+        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments", "Backlog", "Ratios", "EPS"]
     )
 
     with tab_pl:
@@ -1380,16 +1402,19 @@ def render(authed_email: str):
             st.write(pl_meta)
             st.stop()
         pl_disp = _slice_latest_n_years(pl_table, int(n_years))
-        st.caption(f"PL: Showing {len(pl_disp)} years (Latest: {int(pl_table['FY'].max())})")
-        plot_pl_annual(pl_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
+        st.caption(f"Showing {len(pl_disp)} years")
+        
+        # Simplified Title
+        plot_pl_annual(pl_disp, f"Income Statement")
+        
         st.markdown("### Annual PL (Million USD)")
         st.dataframe(
             pl_disp.style.format({"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        st.markdown("### Operating Margin Trend (%)")
-        plot_operating_margin(pl_disp, f"{company_name} ({ticker.upper()}) - Operating Margin (%)")
+        st.markdown("### Operating Margin Trend")
+        plot_operating_margin(pl_disp, f"Operating Margin")
         with st.expander("PL Debug", expanded=False):
             st.write(pl_meta)
 
@@ -1399,11 +1424,11 @@ def render(authed_email: str):
             st.error("Could not retrieve Assets.")
             st.stop()
         snap, bs_meta = build_bs_latest_simple(facts, year)
-        st.caption(f"BS: Latest Year {year}")
-        plot_bs_bar(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
+        st.caption(f"Latest Year {year}")
+        plot_bs_bar(snap, f"Balance Sheet Summary")
         assets_pie, le_pie, pie_meta = build_bs_pies_latest(facts, year)
         plot_two_pies(assets_pie, le_pie, year)
-        with st.expander("BS Debug (Tag Usage)", expanded=False):
+        with st.expander("BS Debug", expanded=False):
             st.write({"bs": bs_meta, "pies": pie_meta})
 
     with tab_cf:
@@ -1413,26 +1438,26 @@ def render(authed_email: str):
             st.write(cf_meta)
             st.stop()
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
-        st.caption(f"CF: Showing {len(cf_disp)} years (Latest: {int(cf_table['FY'].max())})")
-        plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
+        st.caption(f"Showing {len(cf_disp)} years")
+        plot_cf_annual(cf_disp, f"Cash Flow Statement")
         st.markdown("### Annual CF (Million USD)")
         st.dataframe(
             cf_disp.style.format({"CFO(M$)": "{:,.0f}", "CFI(M$)": "{:,.0f}", "CFF(M$)": "{:,.0f}", "FCF(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        with st.expander("CF Debug (Tag Usage)", expanded=False):
+        with st.expander("CF Debug", expanded=False):
             st.write(cf_meta)
 
     with tab_seg:
-        st.caption("Note: Segment info appears only if the company uses standard XBRL dimensions.")
+        st.caption("Revenue Segments")
         biz_df, geo_df = build_segment_table(facts)
         
         col1, col2 = st.columns(2)
         with col1:
             if not biz_df.empty:
                 biz_disp = biz_df[biz_df.index >= int(biz_df.index.max()) - n_years + 1]
-                plot_stacked_bar(biz_disp, f"{company_name} - Revenue by Business Segment")
+                plot_stacked_bar(biz_disp, f"Revenue by Business")
                 st.dataframe(biz_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
                 st.info("No Business Segment info found.")
@@ -1440,7 +1465,7 @@ def render(authed_email: str):
         with col2:
             if not geo_df.empty:
                 geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
-                plot_stacked_bar(geo_disp, f"{company_name} - Revenue by Geography")
+                plot_stacked_bar(geo_disp, f"Revenue by Geography")
                 st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
                 st.info("No Geography Segment info found.")
@@ -1448,54 +1473,44 @@ def render(authed_email: str):
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
         if rpo_table.empty:
-            st.warning("RPO/Contract Liabilities (Annual) might not be available in XBRL for this ticker.")
-            st.write(rpo_meta)
+            st.warning("RPO data unavailable.")
         else:
             rpo_disp = _slice_latest_n_years(rpo_table, int(n_years))
-            st.caption(f"RPO: Showing {len(rpo_disp)} years (Latest: {int(rpo_table['FY'].max())})")
-            plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
+            st.caption(f"Showing {len(rpo_disp)} years")
+            plot_rpo_annual(rpo_disp, f"RPO & Contract Liabilities")
             st.dataframe(
                 rpo_disp.style.format({"RPO(M$)": "{:,.0f}", "ContractLiab(M$)": "{:,.0f}", "ContractLiabCurrent(M$)": "{:,.0f}"}),
                 use_container_width=True,
                 hide_index=True,
             )
-            with st.expander("RPO Debug (Tag Usage)", expanded=False):
-                st.write(rpo_meta)
 
     with tab_turn:
         rat_table, rat_meta = build_ratios_table(facts)
         if rat_table.empty:
-            st.error("Could not retrieve data necessary for Turnover/ROA/ROE calculations.")
-            st.write(rat_meta)
+            st.error("Data unavailable for Ratios.")
             st.stop()
         rat_disp = _slice_latest_n_years(rat_table, int(n_years))
-        st.caption(f"Ratios: Showing {len(rat_disp)} years (Latest: {int(rat_table['FY'].max())})")
-        st.markdown("### ROA / ROE (%) Trend")
-        plot_roa_roe(rat_disp, f"{company_name} ({ticker.upper()}) - ROA / ROE (%)")
-        st.markdown("### Inventory Turnover (x) Trend")
-        plot_inventory_turnover(rat_disp, f"{company_name} ({ticker.upper()}) - Inventory Turnover (x)")
+        st.caption(f"Showing {len(rat_disp)} years")
+        st.markdown("### Return Ratios")
+        plot_roa_roe(rat_disp, f"ROA / ROE")
+        st.markdown("### Efficiency")
+        plot_inventory_turnover(rat_disp, f"Inventory Turnover")
         st.dataframe(
             rat_disp.style.format({"ROA(%)": "{:.2f}", "ROE(%)": "{:.2f}", "InventoryTurnover(x)": "{:.2f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        with st.expander("Ratios Debug (Tag Usage)", expanded=False):
-            st.write(rat_meta)
 
     with tab_eps:
         eps_table, eps_meta = build_eps_table(facts, ticker_symbol=t)
         if eps_table.empty:
             st.error("Could not retrieve EPS.")
-            st.write(eps_meta)
         else:
             eps_disp = _slice_latest_n_years(eps_table, int(n_years))
             unit_label = eps_meta.get("eps_unit", "USD/share")
-            split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
-            st.caption(f"EPS: Showing {len(eps_disp)} years (Latest: {int(eps_table['FY'].max())}) / unit: {unit_label}{split_note}")
-            plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS (Diluted)", unit_label="USD/share")
+            st.caption(f"Showing {len(eps_disp)} years")
+            plot_eps(eps_disp, f"EPS (Diluted)", unit_label=unit_label)
             st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
-            with st.expander("EPS Debug", expanded=False):
-                st.write(eps_meta)
 
 
 def main():
