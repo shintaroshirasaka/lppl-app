@@ -944,6 +944,10 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     HNWI_AX_BG = "#0b0c0e"
     TEXT_COLOR = "#F0F0F0"
     TICK_COLOR = "#888888"
+    # NEW LUXURY PALETTE: Gold for main ticker, Muted Silver for benchmark
+    HNWI_TICKER_COLOR = "#C5A059" # Muted Gold
+    HNWI_BENCH_COLOR = "#A0A0A0"  # Muted Silver/Grey
+    
     grid_kwargs = {"color": "#333333", "linestyle": ":", "linewidth": 0.5, "alpha": 0.5}
     
     def style_hnwi_ax(ax, title=None):
@@ -966,10 +970,10 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     # 1. Cumulative Performance
     fig, ax = plt.subplots(figsize=(11, 6))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Cumulative Return (Indexed)") # Shortened Title
-    # Use elegant colors: Gold/Red for ticker, Deep Blue for bench
-    ax.plot(index100.index, index100[ticker], label=f"{ticker}", color="#C5A059", linewidth=1.5)
-    ax.plot(index100.index, index100[bench],  label=f"{bench}",  color="#4169E1", linewidth=1.2, alpha=0.8)
+    style_hnwi_ax(ax, title="Cumulative Return (Indexed)")
+    # Use new Gold/Silver palette
+    ax.plot(index100.index, index100[ticker], label=f"{ticker}", color=HNWI_TICKER_COLOR, linewidth=1.5)
+    ax.plot(index100.index, index100[bench],  label=f"{bench}",  color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
     ax.set_xlabel("Date")
     ax.set_ylabel("Index (Base=100)")
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
@@ -984,23 +988,23 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     # 2. Price Deviation Scatter
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Deviation Scatter & Trend") # Shortened Title
-    # Elegant Scatter: Red with transparency, Deep Blue line
-    ax.scatter(X, Y, alpha=0.5, color="#ff4d4f", edgecolor='none', s=40)
-    ax.plot(x_sorted, y_line, color="#4169E1", linewidth=1.5)
+    style_hnwi_ax(ax, title="Deviation Scatter & Trend")
+    # Points are Gold, Trendline is Gold
+    ax.scatter(X, Y, alpha=0.6, color=HNWI_TICKER_COLOR, edgecolor='none', s=40)
+    ax.plot(x_sorted, y_line, color=HNWI_TICKER_COLOR, linewidth=2.0, alpha=0.8)
     ax.set_xlabel(f"{bench} Deviation (pp)")
     ax.set_ylabel(f"{ticker} Deviation (pp)")
     st.pyplot(fig)
-    # st.write(f"Deviation regression: slope={slope_dev:.6f}, intercept={intercept_dev:.6f}") # Optional: keep or remove for cleaner look
 
     # 3. Rolling Volatility of Price Deviation
     vol_dev_t = dev[ticker].rolling(int(window)).std(ddof=1)
     vol_dev_b = dev[bench].rolling(int(window)).std(ddof=1)
     fig, ax = plt.subplots(figsize=(11, 5))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Deviation Volatility (Rolling)") # Shortened Title
-    ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker}", color="#ff4d4f", linewidth=1.5)
-    ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench}", color="#4169E1", linewidth=1.2, alpha=0.8)
+    style_hnwi_ax(ax, title="Deviation Volatility (Rolling)")
+    # Ticker is Gold, Benchmark is Silver
+    ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker}", color=HNWI_TICKER_COLOR, linewidth=1.5)
+    ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench}", color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
     ax.set_xlabel("Date")
     ax.set_ylabel("Std Deviation (pp)")
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
@@ -1010,13 +1014,13 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
     fig, ax = plt.subplots(figsize=(11, 4))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Drawdown Profile") # Shortened Title
-    # Use a striking color for drawdown, e.g., deep red fill
-    ax.fill_between(dd.index, dd * 100.0, 0, color="#ff4d4f", alpha=0.3)
-    ax.plot(dd.index, dd * 100.0, color="#ff4d4f", linewidth=1.0)
+    style_hnwi_ax(ax, title="Drawdown Profile")
+    # Use Gold fill for a rich, less alarming look
+    ax.fill_between(dd.index, dd * 100.0, 0, color=HNWI_TICKER_COLOR, alpha=0.3)
+    ax.plot(dd.index, dd * 100.0, color=HNWI_TICKER_COLOR, linewidth=1.0)
     ax.set_xlabel("Date")
     ax.set_ylabel("Drawdown (%)")
-    ax.set_ylim(top=0.5) # Ensure 0 is clearly visible at top
+    ax.set_ylim(top=0.5)
     st.pyplot(fig)
 
     # Pre-calculate regression for chart 5
@@ -1028,10 +1032,10 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     # 5. Daily Log Returns Scatter
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Daily Returns Scatter") # Shortened Title
-    # Same elegant styling as chart 2
-    ax.scatter(Xr, Yr, alpha=0.5, color="#ff4d4f", edgecolor='none', s=40)
-    ax.plot(xr_sorted, yr_line, color="#4169E1", linewidth=1.5)
+    style_hnwi_ax(ax, title="Daily Returns Scatter")
+    # Same Gold styling as chart 2
+    ax.scatter(Xr, Yr, alpha=0.6, color=HNWI_TICKER_COLOR, edgecolor='none', s=40)
+    ax.plot(xr_sorted, yr_line, color=HNWI_TICKER_COLOR, linewidth=2.0, alpha=0.8)
     ax.set_xlabel(f"{bench} Daily Log Return")
     ax.set_ylabel(f"{ticker} Daily Log Return")
     st.pyplot(fig)
@@ -1040,9 +1044,9 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     roll_vol = ret[ticker].rolling(int(window)).std(ddof=1) * np.sqrt(float(trading_days))
     fig, ax = plt.subplots(figsize=(11, 4))
     fig.patch.set_facecolor(HNWI_BG)
-    style_hnwi_ax(ax, title="Annualized Volatility (Rolling)") # Shortened Title
-    # Use Gold or Red for emphasis
-    ax.plot(roll_vol.index, roll_vol * 100.0, color="#C5A059", linewidth=1.5)
+    style_hnwi_ax(ax, title="Annualized Volatility (Rolling)")
+    # Use Gold for emphasis
+    ax.plot(roll_vol.index, roll_vol * 100.0, color=HNWI_TICKER_COLOR, linewidth=1.5)
     ax.set_xlabel("Date")
     ax.set_ylabel("Annualized Vol (%)")
     st.pyplot(fig)
@@ -1061,18 +1065,21 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             # Draw Graph
             fig, ax1 = plt.subplots(figsize=(11, 6))
             fig.patch.set_facecolor(HNWI_BG)
-            style_hnwi_ax(ax1, title=None) # No title needed, header implies it
+            style_hnwi_ax(ax1, title=None)
 
             # X axis
             dates = margin_df["Date"]
             
-            # Left Axis: Margin Balance (Fill Between) - Use deeper, richer colors
+            # Left Axis: Margin Balance (Fill Between)
+            # CHANGE: Longs = Gold, Shorts = Silver
             if "MarginBuy" in margin_df.columns and "MarginSell" in margin_df.columns:
-                ax1.fill_between(dates, margin_df["MarginBuy"], color="#4169E1", alpha=0.2, label="Margin Buy (Longs)")
-                ax1.plot(dates, margin_df["MarginBuy"], color="#4169E1", linewidth=1.2)
+                # Buy (Long) -> Gold
+                ax1.fill_between(dates, margin_df["MarginBuy"], color=HNWI_TICKER_COLOR, alpha=0.3, label="Margin Buy (Longs)")
+                ax1.plot(dates, margin_df["MarginBuy"], color=HNWI_TICKER_COLOR, linewidth=1.5)
                 
-                ax1.fill_between(dates, margin_df["MarginSell"], color="#CD5C5C", alpha=0.2, label="Margin Sell (Shorts)")
-                ax1.plot(dates, margin_df["MarginSell"], color="#CD5C5C", linewidth=1.2)
+                # Sell (Short) -> Silver
+                ax1.fill_between(dates, margin_df["MarginSell"], color=HNWI_BENCH_COLOR, alpha=0.3, label="Margin Sell (Shorts)")
+                ax1.plot(dates, margin_df["MarginSell"], color=HNWI_BENCH_COLOR, linewidth=1.5)
                 
                 ax1.set_ylabel("Margin Balance (Shares)")
                 ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
