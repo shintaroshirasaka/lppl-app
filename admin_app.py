@@ -886,11 +886,11 @@ def draw_score_overlay(ax, score: int, label: str):
     Color coded by score value.
     """
     # Colors
-    # 0-59: Green (Safe) - Updated from Blue
+    # 0-59: Green (Safe) - Updated from Blue to Muted Green
     # 60-79: Yellow (Caution)
     # 80+: Red (High)
     if score < 60:
-        score_color = "#52c41a" # Green (Safe)
+        score_color = "#3CB371" # Medium Sea Green (Calm/Muted Safe)
     elif score < 80:
         score_color = "#ffc53d" # Gold/Yellow
     else:
