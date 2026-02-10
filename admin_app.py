@@ -886,11 +886,11 @@ def draw_score_overlay(ax, score: int, label: str):
     Color coded by score value.
     """
     # Colors
-    # 0-59: Blue (Safe) -> Using Deep Sky Blue for visibility against black
+    # 0-59: Green (Safe) - Updated from Blue
     # 60-79: Yellow (Caution)
     # 80+: Red (High)
     if score < 60:
-        score_color = "#00BFFF" # Deep Sky Blue
+        score_color = "#52c41a" # Green (Safe)
     elif score < 80:
         score_color = "#ffc53d" # Gold/Yellow
     else:
@@ -904,11 +904,12 @@ def draw_score_overlay(ax, score: int, label: str):
     x_pos = 0.02
     y_pos = 0.86
     
-    # 1. Label "RISK SCORE"
-    ax.text(x_pos, y_pos, "RISK SCORE", transform=ax.transAxes,
-            fontsize=9, color=TEXT_DIM, fontweight='normal', ha='left', va='bottom', fontname='serif', zorder=20)
+    # 1. Label "RISK SCORE" - DELETED as requested
+    # ax.text(x_pos, y_pos, "RISK SCORE", transform=ax.transAxes,
+    #         fontsize=9, color=TEXT_DIM, fontweight='normal', ha='left', va='bottom', fontname='serif', zorder=20)
     
     # 2. Score Value (Large, Color Coded)
+    # Slightly adjusted y_pos since label is gone
     ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes,
             fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
     
