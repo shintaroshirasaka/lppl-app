@@ -7,11 +7,11 @@ import streamlit as st
 import yfinance as yf
 import re
 
-# ※ auth_gateファイルが同階層にある前提です
+# ※ Assumes auth_gate file exists in the same directory
 try:
     from auth_gate import require_admin_token
 except ImportError:
-    # テスト用にダミー関数を用意
+    # Dummy function for testing purposes
     def require_admin_token():
         return "debug@example.com"
 
@@ -50,7 +50,7 @@ def fetch_ticker_cik_map() -> dict:
                 out[t] = cik.zfill(10)
         return out
     except Exception as e:
-        st.error(f"Tickerマップの取得に失敗しました: {e}")
+        st.error(f"Failed to fetch Ticker map: {e}")
         return {}
 
 
@@ -70,8 +70,8 @@ def fetch_company_facts(cik10: str) -> dict:
 # =========================
 def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments: bool = False, min_duration: int = 0) -> pd.DataFrame:
     """
-    年次相当（USD）抽出（10-K系）
-    min_duration > 0 の場合、期間が指定日数未満のデータ（Q4など）を除外する
+    Extract Annual Series (USD) from 10-K type filings.
+    If min_duration > 0, exclude data with duration (days) less than specified (e.g., exclude Q4 specific data).
     """
     facts_root = facts_json.get("facts", {})
     if not facts_root:
@@ -79,13 +79,13 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
     node = []
     
-    # 既知のプレフィックスを探す
+    # Search for known prefixes
     for prefix in ["us-gaap", "srt", "ifrs-full", "dei"]:
         if prefix in facts_root and xbrl_tag in facts_root[prefix]:
             node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
             break
     
-    # 見つからなければカスタムタグを探す
+    # Search custom tags if not found
     if not node:
         for k in facts_root.keys():
             if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
@@ -99,7 +99,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         form = str(x.get("form", "")).upper().strip()
         fp = str(x.get("fp", "")).upper().strip()
         end = x.get("end")
-        start = x.get("start") # 期間開始日
+        start = x.get("start") # Period start date
         val = x.get("val")
         fy_raw = x.get("fy", None)
         filed = x.get("filed")
@@ -107,7 +107,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
         if not end or val is None:
             continue
-        # 10-K, 20-F (ADR), 40-F などを許容
+        # Allow 10-K, 20-F (ADR), 40-F, etc.
         if not (form.startswith("10-K") or form.startswith("20-F") or form.startswith("40-F")):
             continue
 
@@ -118,18 +118,18 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
         if pd.isna(end_ts):
             continue
 
-        # ▼▼ 期間チェック (Duration Check) ▼▼
+        # ▼▼ Duration Check ▼▼
         if min_duration > 0:
-            # 期間指定があるのに開始日がない（Instant概念のデータなど）は除外
+            # Exclude instant concepts if a duration is expected
             if pd.isna(start_ts):
                 continue
             
             days = (end_ts - start_ts).days
             if days < min_duration:
                 continue
-        # ▲▲ 期間チェックここまで ▲▲
+        # ▲▲ Duration Check End ▲▲
 
-        # 年次(FY/CY)のみ抽出
+        # Extract only annual (FY/CY)
         annual_fp = fp in {"FY", "CY"}
         
         if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
@@ -151,13 +151,13 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     
-    # 年次フラグがあるものだけ
+    # Filter only annual flags
     df = df[df["annual_fp"] == 1]
 
     if not include_segments:
-        # 連結データのみ
+        # Consolidated data only
         df = df[df["segment"].isnull()]
-        # 重複排除（最新のfiled優先）
+        # Remove duplicates (prioritize latest filed)
         df = df.sort_values(["year", "filed"]).drop_duplicates(subset=["year"], keep="last")
         df = df.sort_values("year")
         return df
@@ -167,7 +167,7 @@ def _extract_annual_series_usd(facts_json: dict, xbrl_tag: str, include_segments
 
 def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str], min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
     """
-    固定リストからタグを選択（最新年優先）
+    Select tag from fixed list (prioritizing latest year availability).
     """
     best_tag = None
     best_df = pd.DataFrame(columns=["year", "end", "val", "annual_fp"])
@@ -195,30 +195,30 @@ def _pick_best_tag_latest_first_usd(facts_json: dict, candidates: list[str], min
 
 def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywords: list[str] = None, must_end_with: str = None, min_duration: int = 0) -> tuple[str | None, pd.DataFrame]:
     """
-    XBRL内の全タグをスキャンし、キーワードに合致し、かつ最新データを持つタグを探す
+    Scan all tags in XBRL, find matching keywords, and select the one with latest data.
     """
     if exclude_keywords is None:
         exclude_keywords = []
     
-    # 検索対象の全タグをリストアップ
+    # List all tags
     all_tags = []
     facts_root = facts_json.get("facts", {})
     for prefix in facts_root:
         for tag in facts_root[prefix]:
             all_tags.append(tag)
             
-    # キーワードマッチング
+    # Keyword matching
     candidates = []
     for tag in all_tags:
         tag_lower = tag.lower()
         
-        # 必須条件チェック
+        # Mandatory Check
         if not any(k.lower() in tag_lower for k in keywords):
             continue
-        # 除外キーワードチェック
+        # Exclude Check
         if any(ek.lower() in tag_lower for ek in exclude_keywords):
             continue
-        # 末尾チェック
+        # Suffix Check
         if must_end_with and not tag_lower.endswith(must_end_with.lower()):
             continue
             
@@ -227,7 +227,7 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
     if not candidates:
         return None, pd.DataFrame()
 
-    # データ抽出と評価
+    # Extraction and Evaluation
     best_tag = None
     best_df = pd.DataFrame(columns=["year"])
     best_score = (-1, -1) # (max_year, count)
@@ -240,7 +240,7 @@ def _find_best_tag_dynamic(facts_json: dict, keywords: list[str], exclude_keywor
         max_year = int(df["year"].max())
         count = len(df)
         
-        # 最新年を最優先、次にデータ数
+        # Priority: Latest Year -> Count
         score = (max_year, count)
         
         if score > best_score:
@@ -271,7 +271,7 @@ def _slice_latest_n_years(table: pd.DataFrame, n_years: int) -> pd.DataFrame:
 # =========================
 def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str], min_duration: int = 0) -> tuple[pd.DataFrame, dict]:
     """
-    優先順位の高いタグリストから、年度ごとに最も確からしい値を合成する
+    Synthesize the most likely value for each fiscal year from a priority list of tags.
     """
     tag_series = {}
     tag_years = {}
@@ -346,13 +346,13 @@ def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["year", "val", "dimension", "member"])
     
     out = pd.DataFrame(rows)
-    # 重複排除: 最新のfiledを優先
+    # Remove duplicates: prioritize latest filed
     out = out.sort_values(["year", "dimension", "member", "filed"]).drop_duplicates(subset=["year", "dimension", "member"], keep="last")
     return out
 
 
 def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # (7) セグメント: タグ候補を拡充
+    # (7) Segment: Expand tag candidates
     revenue_tags = [
         "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
         "SalesToExternalCustomers", "RevenuesNetOfInterestExpense", 
@@ -362,7 +362,7 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     
     all_seg_rows = []
     
-    # セグメント売上はDuration概念なので350日フィルタ
+    # Segment revenue is a Duration concept, so use 350-day filter
     for tag in revenue_tags:
         df = _extract_annual_series_usd(facts_json, tag, include_segments=True, min_duration=350)
         if df.empty:
@@ -430,7 +430,7 @@ def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def plot_stacked_bar(df: pd.DataFrame, title: str):
     if df.empty:
-        st.info(f"{title}: データが見つかりませんでした。")
+        st.info(f"{title}: Data not found.")
         return
 
     df_m = df / 1_000_000.0
@@ -478,7 +478,7 @@ def build_pl_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     
     meta = {}
     
-    # PL項目はDuration概念なので 350日フィルタ を適用
+    # PL items are Duration concepts, so apply 350-day filter
     rev_df, rev_meta = _build_composite_by_year_usd(facts_json, revenue_priority, min_duration=350)
     meta["revenue_composite"] = rev_meta
     
@@ -575,7 +575,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
 # BS (latest) - FIXED PIE CHART LOGIC
 # =========================
 def _latest_year_from_assets(facts_json: dict) -> int | None:
-    # BSはInstant概念なので期間フィルタなし(0)
+    # BS is Instant concept, so no duration filter (0)
     df = _extract_annual_series_usd(facts_json, "Assets", min_duration=0)
     if df.empty:
         return None
@@ -853,7 +853,7 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
     capex_tags = ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireFixedAssets"]
 
-    # CFはDuration概念なので 350日フィルタ
+    # CF is Duration concept, so use 350-day filter
     tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags, min_duration=350)
     meta["cfo_tag"] = tag
     tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags, min_duration=350)
@@ -928,7 +928,7 @@ def build_rpo_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     rpo_keywords = ["RemainingPerformanceObligation", "PerformanceObligation", "TransactionPriceAllocated", "Backlog"]
     rpo_exclude = ["Satisfied", "Recognized", "Billings"]
     
-    # RPOはInstant概念なのでフィルタなし
+    # RPO is Instant concept, no filter
     tag_rpo, df_rpo = _find_best_tag_dynamic(
         facts_json, 
         keywords=rpo_keywords, 
@@ -1062,12 +1062,12 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
 
     ni_priority = ["NetIncomeLossAvailableToCommonStockholdersBasic", "NetIncomeLoss", "ProfitLoss", "IncomeLossFromContinuingOperations"]
-    # NIはDuration概念なので350日フィルタ
+    # NI is Duration, so 350-day filter
     ni_df, ni_meta = _build_composite_by_year_usd(facts_json, ni_priority, min_duration=350)
     meta["net_income_composite"] = ni_meta
     ni_map = dict(zip(ni_df["year"].astype(int), ni_df["value"].astype(float))) if not ni_df.empty else {}
 
-    # BS項目はInstant概念なのでフィルタなし
+    # BS items are Instant, so no filter
     assets_tag, assets_map = _annual_series_map_usd(facts_json, ["Assets"], min_duration=0)
     meta["assets_tag"] = assets_tag
 
@@ -1080,7 +1080,7 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     inv_tag, inv_map = _annual_series_map_usd(facts_json, ["InventoryNet", "InventoryGross", "Inventory"], min_duration=0)
     meta["inventory_tag"] = inv_tag
 
-    # COGSはDuration概念なので350日フィルタ
+    # COGS is Duration, so 350-day filter
     cogs_candidates = ["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfSales", "CostOfGoodsSold"]
     cogs_tag, cogs_map = _annual_series_map_usd(facts_json, cogs_candidates, min_duration=350)
     meta["cogs_tag"] = cogs_tag
@@ -1185,7 +1185,7 @@ def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> t
 
 def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: int = 0) -> pd.DataFrame:
     """
-    EPS抽出（min_duration対応）
+    Extract EPS (Supports min_duration)
     """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     tag_obj = us.get(xbrl_tag, {})
@@ -1199,7 +1199,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
             form = str(x.get("form", "")).upper().strip()
             fp = str(x.get("fp", "")).upper().strip()
             end = x.get("end")
-            start = x.get("start") # 期間チェック用
+            start = x.get("start") # For duration check
             val = x.get("val")
             fy_raw = x.get("fy", None)
             filed = x.get("filed")
@@ -1216,14 +1216,14 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
             if pd.isna(end_ts) or pd.isna(filed_ts):
                 continue
 
-            # ▼▼ EPSの期間（Duration）チェック ▼▼
+            # ▼▼ EPS Duration Check ▼▼
             if min_duration > 0:
                 if pd.isna(start_ts):
                     continue
                 days = (end_ts - start_ts).days
                 if days < min_duration:
                     continue 
-            # ▲▲ 期間チェックここまで ▲▲
+            # ▲▲ Duration Check End ▲▲
 
             annual_fp = fp in {"FY", "CY"}
 
@@ -1246,7 +1246,7 @@ def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: 
 
     df = pd.DataFrame(rows).dropna(subset=["val"])
     
-    # 年次(FY/CY)のみ抽出
+    # Filter Annual (FY/CY)
     df = df[df["annual_fp"] == 1]
 
     def unit_score(u: str) -> int:
@@ -1276,7 +1276,7 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
     best_tag = None
 
     for tag in eps_tags:
-        # EPSはDuration概念なので350日フィルタ
+        # EPS is Duration concept, use 350-day filter
         df = _extract_eps_series_any_unit(facts_json, tag, min_duration=350)
         if df.empty:
             continue
@@ -1344,12 +1344,12 @@ def render(authed_email: str):
         unsafe_allow_html=True,
     )
 
-    st.markdown("## 長期ファンダ（PL / BS / CF / セグメント / 受注残・RPO / 回転率 / EPS）")
-    st.caption(f"認証ユーザー: {authed_email}")
+    st.markdown("## Long-term Fundamentals (PL / BS / CF / Segments / RPO / Ratios / EPS)")
+    st.caption(f"Authenticated User: {authed_email}")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker（米国株）", value="AVGO")
-        n_years = st.slider("期間（共通：最新から過去N年）", min_value=3, max_value=15, value=10)
+        ticker = st.text_input("Ticker (US Stock)", value="AVGO")
+        n_years = st.slider("Period (Common: Latest N Years)", min_value=3, max_value=15, value=10)
         submitted = st.form_submit_button("Run")
 
     if not submitted:
@@ -1357,75 +1357,75 @@ def render(authed_email: str):
 
     t = ticker.strip().lower()
     if not t:
-        st.error("Tickerを入力してください。")
+        st.error("Please enter a Ticker.")
         st.stop()
 
     cik_map = fetch_ticker_cik_map()
     cik10 = cik_map.get(t)
     if not cik10:
-        st.error("このTickerのCIKが見つかりませんでした。")
+        st.error("CIK not found for this Ticker.")
         st.stop()
 
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
     tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps = st.tabs(
-        ["PL（年次）", "BS（最新年）", "CF（年次）", "セグメント（売上）", "受注残 / RPO", "回転率", "EPS"]
+        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments (Revenue)", "Backlog / RPO", "Ratios", "EPS"]
     )
 
     with tab_pl:
         pl_table, pl_meta = build_pl_annual_table(facts)
         if pl_table.empty:
-            st.error("PLデータが取得できませんでした。")
+            st.error("Could not retrieve PL data.")
             st.write(pl_meta)
             st.stop()
         pl_disp = _slice_latest_n_years(pl_table, int(n_years))
-        st.caption(f"PL: 表示 {len(pl_disp)} 年（最新年: {int(pl_table['FY'].max())}）")
+        st.caption(f"PL: Showing {len(pl_disp)} years (Latest: {int(pl_table['FY'].max())})")
         plot_pl_annual(pl_disp, f"{company_name} ({ticker.upper()}) - Income Statement (Annual)")
-        st.markdown("### 年次PL（百万USD）")
+        st.markdown("### Annual PL (Million USD)")
         st.dataframe(
             pl_disp.style.format({"Revenue(M$)": "{:,.0f}", "OpIncome(M$)": "{:,.0f}", "NetIncome(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        st.markdown("### 営業利益率の推移（%）")
+        st.markdown("### Operating Margin Trend (%)")
         plot_operating_margin(pl_disp, f"{company_name} ({ticker.upper()}) - Operating Margin (%)")
-        with st.expander("PLデバッグ", expanded=False):
+        with st.expander("PL Debug", expanded=False):
             st.write(pl_meta)
 
     with tab_bs:
         year = _latest_year_from_assets(facts)
         if year is None:
-            st.error("Assets（総資産）が取得できませんでした。")
+            st.error("Could not retrieve Assets.")
             st.stop()
         snap, bs_meta = build_bs_latest_simple(facts, year)
-        st.caption(f"BS: 最新年 {year}")
+        st.caption(f"BS: Latest Year {year}")
         plot_bs_bar(snap, f"{company_name} ({ticker.upper()}) - Balance Sheet (Latest)")
         assets_pie, le_pie, pie_meta = build_bs_pies_latest(facts, year)
         plot_two_pies(assets_pie, le_pie, year)
-        with st.expander("BSデバッグ（タグ採用状況）", expanded=False):
+        with st.expander("BS Debug (Tag Usage)", expanded=False):
             st.write({"bs": bs_meta, "pies": pie_meta})
 
     with tab_cf:
         cf_table, cf_meta = build_cf_annual_table(facts)
         if cf_table.empty:
-            st.error("CFデータが取得できませんでした。")
+            st.error("Could not retrieve CF data.")
             st.write(cf_meta)
             st.stop()
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
-        st.caption(f"CF: 表示 {len(cf_disp)} 年（最新年: {int(cf_table['FY'].max())}）")
+        st.caption(f"CF: Showing {len(cf_disp)} years (Latest: {int(cf_table['FY'].max())})")
         plot_cf_annual(cf_disp, f"{company_name} ({ticker.upper()}) - Cash Flow (Annual)")
-        st.markdown("### 年次CF（百万USD）")
+        st.markdown("### Annual CF (Million USD)")
         st.dataframe(
             cf_disp.style.format({"CFO(M$)": "{:,.0f}", "CFI(M$)": "{:,.0f}", "CFF(M$)": "{:,.0f}", "FCF(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        with st.expander("CFデバッグ（採用タグ）", expanded=False):
+        with st.expander("CF Debug (Tag Usage)", expanded=False):
             st.write(cf_meta)
 
     with tab_seg:
-        st.caption("注: セグメント情報は企業がXBRL標準タクソノミ（Dimension）を使用している場合のみ表示されます。")
+        st.caption("Note: Segment info appears only if the company uses standard XBRL dimensions.")
         biz_df, geo_df = build_segment_table(facts)
         
         col1, col2 = st.columns(2)
@@ -1435,7 +1435,7 @@ def render(authed_email: str):
                 plot_stacked_bar(biz_disp, f"{company_name} - Revenue by Business Segment")
                 st.dataframe(biz_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
-                st.info("事業セグメント情報が見つかりませんでした。")
+                st.info("No Business Segment info found.")
         
         with col2:
             if not geo_df.empty:
@@ -1443,58 +1443,58 @@ def render(authed_email: str):
                 plot_stacked_bar(geo_disp, f"{company_name} - Revenue by Geography")
                 st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
-                st.info("地域セグメント情報が見つかりませんでした。")
+                st.info("No Geography Segment info found.")
 
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
         if rpo_table.empty:
-            st.warning("この銘柄ではRPO/契約負債（年次）がXBRL上で取得できない可能性があります。")
+            st.warning("RPO/Contract Liabilities (Annual) might not be available in XBRL for this ticker.")
             st.write(rpo_meta)
         else:
             rpo_disp = _slice_latest_n_years(rpo_table, int(n_years))
-            st.caption(f"RPO: 表示 {len(rpo_disp)} 年（最新年: {int(rpo_table['FY'].max())}）")
+            st.caption(f"RPO: Showing {len(rpo_disp)} years (Latest: {int(rpo_table['FY'].max())})")
             plot_rpo_annual(rpo_disp, f"{company_name} ({ticker.upper()}) - RPO / Contract Liabilities (Annual)")
             st.dataframe(
                 rpo_disp.style.format({"RPO(M$)": "{:,.0f}", "ContractLiab(M$)": "{:,.0f}", "ContractLiabCurrent(M$)": "{:,.0f}"}),
                 use_container_width=True,
                 hide_index=True,
             )
-            with st.expander("RPOデバッグ（採用タグ）", expanded=False):
+            with st.expander("RPO Debug (Tag Usage)", expanded=False):
                 st.write(rpo_meta)
 
     with tab_turn:
         rat_table, rat_meta = build_ratios_table(facts)
         if rat_table.empty:
-            st.error("回転率・ROA/ROEの計算に必要なデータが取得できませんでした。")
+            st.error("Could not retrieve data necessary for Turnover/ROA/ROE calculations.")
             st.write(rat_meta)
             st.stop()
         rat_disp = _slice_latest_n_years(rat_table, int(n_years))
-        st.caption(f"回転率: 表示 {len(rat_disp)} 年（最新年: {int(rat_table['FY'].max())}）")
-        st.markdown("### ROA / ROE（%）推移")
+        st.caption(f"Ratios: Showing {len(rat_disp)} years (Latest: {int(rat_table['FY'].max())})")
+        st.markdown("### ROA / ROE (%) Trend")
         plot_roa_roe(rat_disp, f"{company_name} ({ticker.upper()}) - ROA / ROE (%)")
-        st.markdown("### 棚卸資産回転率（回）推移")
+        st.markdown("### Inventory Turnover (x) Trend")
         plot_inventory_turnover(rat_disp, f"{company_name} ({ticker.upper()}) - Inventory Turnover (x)")
         st.dataframe(
             rat_disp.style.format({"ROA(%)": "{:.2f}", "ROE(%)": "{:.2f}", "InventoryTurnover(x)": "{:.2f}"}),
             use_container_width=True,
             hide_index=True,
         )
-        with st.expander("回転率デバッグ（採用タグ）", expanded=False):
+        with st.expander("Ratios Debug (Tag Usage)", expanded=False):
             st.write(rat_meta)
 
     with tab_eps:
         eps_table, eps_meta = build_eps_table(facts, ticker_symbol=t)
         if eps_table.empty:
-            st.error("EPSが取得できませんでした。")
+            st.error("Could not retrieve EPS.")
             st.write(eps_meta)
         else:
             eps_disp = _slice_latest_n_years(eps_table, int(n_years))
             unit_label = eps_meta.get("eps_unit", "USD/share")
             split_note = " (Split Adjusted)" if eps_meta.get("split_adjusted") else ""
-            st.caption(f"EPS: 表示 {len(eps_disp)} 年（最新年: {int(eps_table['FY'].max())}） / unit: {unit_label}{split_note}")
+            st.caption(f"EPS: Showing {len(eps_disp)} years (Latest: {int(eps_table['FY'].max())}) / unit: {unit_label}{split_note}")
             plot_eps(eps_disp, f"{company_name} ({ticker.upper()}) - EPS (Diluted)", unit_label="USD/share")
             st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
-            with st.expander("EPSデバッグ", expanded=False):
+            with st.expander("EPS Debug", expanded=False):
                 st.write(eps_meta)
 
 
