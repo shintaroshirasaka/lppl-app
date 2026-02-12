@@ -1504,6 +1504,413 @@ def plot_per(table: pd.DataFrame, title: str):
 
 
 # =========================
+# Quarterly PL & EPS
+# =========================
+def _extract_all_periods_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
+    """Extract all 10-Q and 10-K entries for a tag (USD unit), with duration info."""
+    facts_root = facts_json.get("facts", {})
+    if not facts_root:
+        return pd.DataFrame()
+
+    node = []
+    for prefix in ["us-gaap", "srt", "ifrs-full", "dei"]:
+        if prefix in facts_root and xbrl_tag in facts_root[prefix]:
+            node = facts_root[prefix][xbrl_tag].get("units", {}).get("USD", [])
+            break
+
+    if not node:
+        for k in facts_root.keys():
+            if k not in ["us-gaap", "srt", "ifrs-full", "dei"]:
+                if xbrl_tag in facts_root[k]:
+                    node = facts_root[k][xbrl_tag].get("units", {}).get("USD", [])
+                    if node:
+                        break
+
+    rows = []
+    for x in node:
+        form = str(x.get("form", "")).upper().strip()
+        fp = str(x.get("fp", "")).upper().strip()
+        end = x.get("end")
+        start = x.get("start")
+        val = x.get("val")
+        fy_raw = x.get("fy", None)
+        filed = x.get("filed")
+        segment = x.get("segment")
+
+        if not end or not start or val is None:
+            continue
+        if not (form.startswith("10-K") or form.startswith("10-Q") or form.startswith("20-F") or form.startswith("40-F")):
+            continue
+        if segment is not None:
+            continue
+
+        end_ts = pd.to_datetime(end, errors="coerce")
+        start_ts = pd.to_datetime(start, errors="coerce")
+        filed_ts = pd.to_datetime(filed, errors="coerce")
+
+        if pd.isna(end_ts) or pd.isna(start_ts):
+            continue
+
+        days = (end_ts - start_ts).days
+
+        if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+            fy = int(fy_raw)
+        else:
+            fy = int(end_ts.year)
+
+        rows.append({
+            "fy": fy,
+            "fp": fp,
+            "start": start_ts,
+            "end": end_ts,
+            "days": days,
+            "val": _safe_float(val),
+            "filed": filed_ts,
+            "form": form,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).dropna(subset=["val"])
+    return df
+
+
+def _build_individual_quarters(facts_json: dict, tag_priority: list[str]) -> pd.DataFrame:
+    """Build individual quarter values (Q1-Q4) from composite tags.
+    
+    Q1-Q3: extracted from 10-Q with duration 60-100 days.
+    Q4: derived as FY_annual - (Q1 + Q2 + Q3).
+    Returns DataFrame with columns: [fy, q, end, val, source]
+    """
+    all_periods = pd.DataFrame()
+    used_tag = None
+
+    for tag in tag_priority:
+        df = _extract_all_periods_usd(facts_json, tag)
+        if df.empty:
+            continue
+        if all_periods.empty or df["fy"].max() > all_periods["fy"].max():
+            all_periods = df
+            used_tag = tag
+        elif df["fy"].max() == all_periods["fy"].max() and len(df) > len(all_periods):
+            all_periods = df
+            used_tag = tag
+
+    if all_periods.empty:
+        return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
+
+    # Individual quarters from 10-Q (duration 60-100 days)
+    q_mask = (all_periods["days"] >= 60) & (all_periods["days"] <= 100) & (all_periods["fp"].isin({"Q1", "Q2", "Q3"}))
+    q_data = all_periods[q_mask].copy()
+
+    # Map fp to quarter number
+    fp_to_q = {"Q1": 1, "Q2": 2, "Q3": 3}
+    q_data["q"] = q_data["fp"].map(fp_to_q)
+    q_data = q_data.sort_values(["fy", "q", "filed"]).drop_duplicates(subset=["fy", "q"], keep="last")
+
+    # Annual totals from 10-K (duration > 330 days)
+    fy_mask = (all_periods["days"] >= 330) & (all_periods["fp"] == "FY")
+    fy_data = all_periods[fy_mask].copy()
+    fy_data = fy_data.sort_values(["fy", "filed"]).drop_duplicates(subset=["fy"], keep="last")
+    fy_map = dict(zip(fy_data["fy"].astype(int), fy_data["val"].astype(float)))
+    fy_end_map = dict(zip(fy_data["fy"].astype(int), fy_data["end"]))
+
+    # Build result
+    result_rows = []
+
+    # Add Q1-Q3
+    for _, r in q_data.iterrows():
+        result_rows.append({
+            "fy": int(r["fy"]),
+            "q": int(r["q"]),
+            "end": r["end"],
+            "val": float(r["val"]),
+            "source": "direct",
+        })
+
+    # Derive Q4 = FY - (Q1 + Q2 + Q3)
+    q_pivot = q_data.groupby("fy").apply(
+        lambda g: {int(r["q"]): float(r["val"]) for _, r in g.iterrows()}
+    )
+
+    for fy_year, fy_total in fy_map.items():
+        if not np.isfinite(fy_total):
+            continue
+        q_dict = q_pivot.get(fy_year, {})
+        q1 = q_dict.get(1, np.nan)
+        q2 = q_dict.get(2, np.nan)
+        q3 = q_dict.get(3, np.nan)
+
+        if np.isfinite(q1) and np.isfinite(q2) and np.isfinite(q3):
+            q4_val = fy_total - (q1 + q2 + q3)
+            q4_end = fy_end_map.get(fy_year)
+            result_rows.append({
+                "fy": fy_year,
+                "q": 4,
+                "end": q4_end,
+                "val": q4_val,
+                "source": "derived_FY-Q123",
+            })
+
+    if not result_rows:
+        return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
+
+    out = pd.DataFrame(result_rows)
+    out["quarter_label"] = out["fy"].astype(str) + "Q" + out["q"].astype(str)
+    out = out.sort_values(["fy", "q"]).reset_index(drop=True)
+    return out
+
+
+def _extract_quarterly_eps(facts_json: dict, tag_priority: list[str]) -> pd.DataFrame:
+    """Extract quarterly EPS from per-share units (10-Q + 10-K derived Q4)."""
+    us = facts_json.get("facts", {}).get("us-gaap", {})
+
+    all_periods = pd.DataFrame()
+    used_tag = None
+
+    for tag in tag_priority:
+        tag_obj = us.get(tag, {})
+        units = tag_obj.get("units", {})
+        if not units:
+            continue
+
+        rows = []
+        for unit_key, node in units.items():
+            u_lower = unit_key.lower().replace(" ", "")
+            if not ("usd/share" in u_lower or "usd/shr" in u_lower or "usdper" in u_lower):
+                continue
+
+            for x in node:
+                form = str(x.get("form", "")).upper().strip()
+                fp = str(x.get("fp", "")).upper().strip()
+                end = x.get("end")
+                start = x.get("start")
+                val = x.get("val")
+                fy_raw = x.get("fy", None)
+                filed = x.get("filed")
+                segment = x.get("segment")
+
+                if not end or not start or val is None:
+                    continue
+                if not (form.startswith("10-K") or form.startswith("10-Q")):
+                    continue
+                if segment is not None:
+                    continue
+
+                end_ts = pd.to_datetime(end, errors="coerce")
+                start_ts = pd.to_datetime(start, errors="coerce")
+                filed_ts = pd.to_datetime(filed, errors="coerce")
+
+                if pd.isna(end_ts) or pd.isna(start_ts):
+                    continue
+
+                days = (end_ts - start_ts).days
+
+                if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+                    fy = int(fy_raw)
+                else:
+                    fy = int(end_ts.year)
+
+                rows.append({
+                    "fy": fy, "fp": fp, "start": start_ts, "end": end_ts,
+                    "days": days, "val": _safe_float(val), "filed": filed_ts,
+                })
+
+        if not rows:
+            continue
+
+        df = pd.DataFrame(rows).dropna(subset=["val"])
+        if df.empty:
+            continue
+
+        if all_periods.empty or df["fy"].max() > all_periods["fy"].max():
+            all_periods = df
+            used_tag = tag
+        elif df["fy"].max() == all_periods["fy"].max() and len(df) > len(all_periods):
+            all_periods = df
+            used_tag = tag
+
+    if all_periods.empty:
+        return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
+
+    # Individual quarters (60-100 days)
+    q_mask = (all_periods["days"] >= 60) & (all_periods["days"] <= 100) & (all_periods["fp"].isin({"Q1", "Q2", "Q3"}))
+    q_data = all_periods[q_mask].copy()
+    fp_to_q = {"Q1": 1, "Q2": 2, "Q3": 3}
+    q_data["q"] = q_data["fp"].map(fp_to_q)
+    q_data = q_data.sort_values(["fy", "q", "filed"]).drop_duplicates(subset=["fy", "q"], keep="last")
+
+    # Annual EPS (FY, > 330 days)
+    fy_mask = (all_periods["days"] >= 330) & (all_periods["fp"] == "FY")
+    fy_data = all_periods[fy_mask].copy()
+    fy_data = fy_data.sort_values(["fy", "filed"]).drop_duplicates(subset=["fy"], keep="last")
+    fy_map = dict(zip(fy_data["fy"].astype(int), fy_data["val"].astype(float)))
+    fy_end_map = dict(zip(fy_data["fy"].astype(int), fy_data["end"]))
+
+    result_rows = []
+    for _, r in q_data.iterrows():
+        result_rows.append({
+            "fy": int(r["fy"]), "q": int(r["q"]), "end": r["end"],
+            "val": float(r["val"]), "source": "direct",
+        })
+
+    # Q4 EPS = FY EPS - (Q1 + Q2 + Q3) EPS
+    q_pivot = q_data.groupby("fy").apply(
+        lambda g: {int(r["q"]): float(r["val"]) for _, r in g.iterrows()}
+    )
+
+    for fy_year, fy_total in fy_map.items():
+        if not np.isfinite(fy_total):
+            continue
+        q_dict = q_pivot.get(fy_year, {})
+        q1 = q_dict.get(1, np.nan)
+        q2 = q_dict.get(2, np.nan)
+        q3 = q_dict.get(3, np.nan)
+        if np.isfinite(q1) and np.isfinite(q2) and np.isfinite(q3):
+            q4_val = fy_total - (q1 + q2 + q3)
+            result_rows.append({
+                "fy": fy_year, "q": 4, "end": fy_end_map.get(fy_year),
+                "val": q4_val, "source": "derived_FY-Q123",
+            })
+
+    if not result_rows:
+        return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
+
+    out = pd.DataFrame(result_rows)
+    out["quarter_label"] = out["fy"].astype(str) + "Q" + out["q"].astype(str)
+    out = out.sort_values(["fy", "q"]).reset_index(drop=True)
+    return out
+
+
+def build_quarterly_pl_table(facts_json: dict, n_quarters: int = 8) -> tuple[pd.DataFrame, dict]:
+    meta = {}
+
+    revenue_tags = [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "NetOperatingRevenues",
+        "SalesRevenueGoodsNet",
+        "SalesRevenueNet",
+        "SalesRevenue",
+    ]
+    op_income_tags = ["OperatingIncomeLoss", "OperatingIncome"]
+    pretax_tags = [
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesDomestic",
+    ]
+
+    rev_q = _build_individual_quarters(facts_json, revenue_tags)
+    meta["rev_quarters"] = len(rev_q) if not rev_q.empty else 0
+
+    op_q = _build_individual_quarters(facts_json, op_income_tags)
+    meta["op_quarters"] = len(op_q) if not op_q.empty else 0
+
+    pt_q = _build_individual_quarters(facts_json, pretax_tags)
+    meta["pretax_quarters"] = len(pt_q) if not pt_q.empty else 0
+
+    # Merge all on quarter_label
+    if rev_q.empty:
+        return pd.DataFrame(), meta
+
+    base = rev_q[["fy", "q", "quarter_label", "end"]].copy()
+    base["Revenue(M$)"] = rev_q["val"].apply(_to_musd)
+
+    if not op_q.empty:
+        op_map = dict(zip(op_q["quarter_label"], op_q["val"].apply(_to_musd)))
+        base["OpIncome(M$)"] = base["quarter_label"].map(op_map)
+    else:
+        base["OpIncome(M$)"] = np.nan
+
+    if not pt_q.empty:
+        pt_map = dict(zip(pt_q["quarter_label"], pt_q["val"].apply(_to_musd)))
+        base["PreTaxIncome(M$)"] = base["quarter_label"].map(pt_map)
+    else:
+        base["PreTaxIncome(M$)"] = np.nan
+
+    base = base.sort_values(["fy", "q"]).reset_index(drop=True)
+
+    # Slice to latest n_quarters
+    if len(base) > n_quarters:
+        base = base.iloc[-n_quarters:].reset_index(drop=True)
+
+    out = base[["quarter_label", "Revenue(M$)", "OpIncome(M$)", "PreTaxIncome(M$)"]].copy()
+    out.rename(columns={"quarter_label": "Quarter"}, inplace=True)
+    meta["total_quarters"] = len(out)
+    return out, meta
+
+
+def build_quarterly_eps_table(facts_json: dict, ticker_symbol: str = "", n_quarters: int = 8) -> tuple[pd.DataFrame, dict]:
+    meta = {}
+
+    eps_tags = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
+    eps_q = _extract_quarterly_eps(facts_json, eps_tags)
+
+    if eps_q.empty:
+        return pd.DataFrame(), meta
+
+    # Split adjustment
+    if ticker_symbol:
+        eps_q["end"] = pd.to_datetime(eps_q["end"])
+        factors, split_debug = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(eps_q["end"]))
+        eps_q["val"] = eps_q["val"] * factors.values
+        meta["split_adjusted"] = True
+    else:
+        meta["split_adjusted"] = False
+
+    eps_q = eps_q.sort_values(["fy", "q"]).reset_index(drop=True)
+
+    if len(eps_q) > n_quarters:
+        eps_q = eps_q.iloc[-n_quarters:].reset_index(drop=True)
+
+    out = pd.DataFrame({
+        "Quarter": eps_q["quarter_label"],
+        "EPS": eps_q["val"].astype(float),
+    })
+    meta["total_quarters"] = len(out)
+    return out, meta
+
+
+def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=None):
+    if color is None:
+        color = C_GOLD
+    df = table.copy()
+    x = df["Quarter"].tolist()
+    vals = df[value_col].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    colors = [C_GOLD if v >= 0 else C_BRONZE for v in vals]
+    ax.bar(x, vals, color=colors, alpha=0.85, width=0.6)
+
+    ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
+    ax.set_ylabel("Million USD", color=TEXT_COLOR)
+    ax.tick_params(axis='x', rotation=45)
+    st.pyplot(fig)
+
+
+def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["Quarter"].tolist()
+    eps = df["EPS"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    colors = [C_GOLD if v >= 0 else C_BRONZE for v in eps]
+    ax.bar(x, eps, color=colors, alpha=0.85, width=0.6)
+
+    ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
+    ax.set_ylabel("USD / share", color=TEXT_COLOR)
+    ax.tick_params(axis='x', rotation=45)
+    st.pyplot(fig)
+
+
+# =========================
 # UI
 # =========================
 def render(authed_email: str):
@@ -1548,8 +1955,8 @@ def render(authed_email: str):
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
-    tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps = st.tabs(
-        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments", "Backlog", "Ratios", "EPS"]
+    tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps, tab_qtly = st.tabs(
+        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments", "Backlog", "Ratios", "EPS", "Quarterly"]
     )
 
     with tab_pl:
@@ -1762,6 +2169,46 @@ def render(authed_email: str):
             st.markdown("### EPS Data")
             eps_display_cols = eps_disp[["FY", "EPS"]].copy()
             st.dataframe(eps_display_cols.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
+
+    with tab_qtly:
+        n_q = st.slider("Quarters to show", min_value=4, max_value=20, value=8, key="q_slider")
+
+        st.markdown("### Quarterly Income Statement")
+        q_pl, q_pl_meta = build_quarterly_pl_table(facts, n_quarters=n_q)
+        if q_pl.empty:
+            st.warning("Quarterly PL data not available.")
+        else:
+            st.caption(f"Showing {len(q_pl)} quarters")
+
+            plot_quarterly_bars(q_pl, "Revenue(M$)", "Quarterly Revenue")
+
+            if q_pl["OpIncome(M$)"].notna().any():
+                plot_quarterly_bars(q_pl, "OpIncome(M$)", "Quarterly Operating Income")
+
+            if q_pl["PreTaxIncome(M$)"].notna().any():
+                plot_quarterly_bars(q_pl, "PreTaxIncome(M$)", "Quarterly Pre-Tax Income")
+
+            st.dataframe(
+                q_pl.style.format({
+                    "Revenue(M$)": "{:,.0f}",
+                    "OpIncome(M$)": "{:,.0f}",
+                    "PreTaxIncome(M$)": "{:,.0f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown("### Quarterly EPS (Diluted)")
+        q_eps, q_eps_meta = build_quarterly_eps_table(facts, ticker_symbol=t, n_quarters=n_q)
+        if q_eps.empty:
+            st.warning("Quarterly EPS data not available.")
+        else:
+            plot_quarterly_eps_chart(q_eps, "Quarterly EPS (Split-Adjusted)")
+            st.dataframe(
+                q_eps.style.format({"EPS": "{:.2f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def main():
