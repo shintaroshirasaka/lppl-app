@@ -812,130 +812,68 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_us_short_volume(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
     """
-    Scrapes daily FINRA Short Volume data for US-listed stocks.
-    Primary source: chartexchange.com
-    Fallback: stocksera.pythonanywhere.com
+    Fetches daily FINRA Reg SHO Short Volume data for US-listed stocks.
+    Primary source: FINRA public API (no auth required)
+      POST https://api.finra.org/data/group/otcmarket/name/regShoDaily
     Returns: DataFrame[Date, ShortVolume, TotalVolume, NonShortVolume, ShortRatio]
+    Data is aggregated across all TRFs (NQTRF, NYTRF, NCTRF).
     """
     symbol = ticker.strip().upper()
-    if symbol.endswith(".T") or symbol.endswith(".HK") or symbol.endswith(".L") or symbol.endswith(".DE"):
+    non_us_suffixes = [".T", ".HK", ".L", ".DE", ".PA", ".AS", ".MI", ".SW", ".TO", ".AX"]
+    if any(symbol.endswith(sfx) for sfx in non_us_suffixes):
         return pd.DataFrame()
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.google.com/"
-    }
-
-    def _try_chartexchange():
-        for exch in ["nasdaq", "nyse", "amex"]:
-            url = f"https://chartexchange.com/symbol/{exch}-{symbol.lower()}/short-volume/"
-            try:
-                res = requests.get(url, headers=headers, timeout=10)
-                if res.status_code != 200:
-                    continue
-                try:
-                    dfs = pd.read_html(io.BytesIO(res.content))
-                except Exception:
-                    continue
-                for df in dfs:
-                    col_lower = [str(c).lower().strip() for c in df.columns]
-                    has_short = any('short' in c and 'volume' in c for c in col_lower)
-                    has_total = any('total' in c and ('vol' in c or 'volume' in c) for c in col_lower)
-                    has_date = any('date' in c for c in col_lower)
-                    if has_short and has_date:
-                        rename_map = {}
-                        for c in df.columns:
-                            cl = str(c).lower().strip()
-                            if 'date' in cl:
-                                rename_map[c] = 'Date'
-                            elif 'short' in cl and 'exempt' not in cl and ('vol' in cl or 'volume' in cl) and 'ratio' not in cl and '%' not in cl:
-                                rename_map[c] = 'ShortVolume'
-                            elif 'total' in cl and ('vol' in cl or 'volume' in cl):
-                                rename_map[c] = 'TotalVolume'
-                            elif '%' in cl or 'ratio' in cl or 'percent' in cl:
-                                rename_map[c] = 'ShortRatio'
-                        df = df.rename(columns=rename_map)
-                        if 'Date' not in df.columns or 'ShortVolume' not in df.columns:
-                            continue
-                        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                        for col in ['ShortVolume', 'TotalVolume', 'ShortRatio']:
-                            if col in df.columns:
-                                df[col] = df[col].apply(_clean_num_global)
-                        df = df.dropna(subset=['Date']).sort_values('Date')
-                        if 'TotalVolume' in df.columns:
-                            df['TotalVolume'] = df['TotalVolume'].replace(0, np.nan)
-                            if 'ShortRatio' not in df.columns:
-                                df['ShortRatio'] = (df['ShortVolume'] / df['TotalVolume'] * 100).round(2)
-                            df['NonShortVolume'] = df['TotalVolume'] - df['ShortVolume']
-                            df['NonShortVolume'] = df['NonShortVolume'].clip(lower=0)
-                        elif 'ShortRatio' in df.columns:
-                            df['TotalVolume'] = np.where(
-                                df['ShortRatio'] > 0,
-                                df['ShortVolume'] / (df['ShortRatio'] / 100),
-                                np.nan
-                            )
-                            df['NonShortVolume'] = df['TotalVolume'] - df['ShortVolume']
-                            df['NonShortVolume'] = df['NonShortVolume'].clip(lower=0)
-                        df = df.dropna(subset=['ShortVolume'])
-                        if len(df) > 0:
-                            return df.tail(lookback_days).reset_index(drop=True)
-            except Exception:
-                continue
-        return pd.DataFrame()
-
-    def _try_stocksera():
-        url = f"https://stocksera.pythonanywhere.com/ticker/short_volume/?quote={symbol}"
+    def _try_finra_api():
+        url = "https://api.finra.org/data/group/otcmarket/name/regShoDaily"
+        api_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "limit": 5000,
+            "compareFilters": [
+                {
+                    "compareType": "equal",
+                    "fieldName": "securitiesInformationProcessorSymbolIdentifier",
+                    "fieldValue": symbol
+                }
+            ]
+        }
         try:
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.post(url, headers=api_headers, json=payload, timeout=15)
             if res.status_code != 200:
                 return pd.DataFrame()
-            try:
-                dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception:
+            data = res.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
                 return pd.DataFrame()
-            for df in dfs:
-                col_lower = [str(c).lower().strip() for c in df.columns]
-                has_short = any('short' in c for c in col_lower)
-                has_date = any('date' in c for c in col_lower)
-                if has_short and has_date:
-                    rename_map = {}
-                    for c in df.columns:
-                        cl = str(c).lower().strip()
-                        if 'date' in cl:
-                            rename_map[c] = 'Date'
-                        elif 'short' in cl and 'vol' in cl and 'total' not in cl and '%' not in cl and 'ratio' not in cl and 'exempt' not in cl:
-                            rename_map[c] = 'ShortVolume'
-                        elif 'total' in cl and ('vol' in cl or 'volume' in cl):
-                            rename_map[c] = 'TotalVolume'
-                        elif '%' in cl or 'short' in cl and ('ratio' in cl or 'percent' in cl):
-                            rename_map[c] = 'ShortRatio'
-                    df = df.rename(columns=rename_map)
-                    if 'Date' not in df.columns or 'ShortVolume' not in df.columns:
-                        continue
-                    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                    for col in ['ShortVolume', 'TotalVolume', 'ShortRatio']:
-                        if col in df.columns:
-                            df[col] = df[col].apply(_clean_num_global)
-                    df = df.dropna(subset=['Date']).sort_values('Date')
-                    if 'TotalVolume' in df.columns:
-                        df['TotalVolume'] = df['TotalVolume'].replace(0, np.nan)
-                        if 'ShortRatio' not in df.columns:
-                            df['ShortRatio'] = (df['ShortVolume'] / df['TotalVolume'] * 100).round(2)
-                        df['NonShortVolume'] = (df['TotalVolume'] - df['ShortVolume']).clip(lower=0)
-                    df = df.dropna(subset=['ShortVolume'])
-                    if len(df) > 0:
-                        return df.tail(lookback_days).reset_index(drop=True)
+            raw = pd.DataFrame(data)
+            required_cols = ["tradeReportDate", "shortParQuantity", "totalParQuantity"]
+            for col in required_cols:
+                if col not in raw.columns:
+                    return pd.DataFrame()
+            raw["tradeReportDate"] = pd.to_datetime(raw["tradeReportDate"], errors="coerce")
+            raw["shortParQuantity"] = pd.to_numeric(raw["shortParQuantity"], errors="coerce").fillna(0)
+            raw["totalParQuantity"] = pd.to_numeric(raw["totalParQuantity"], errors="coerce").fillna(0)
+            if "shortExemptParQuantity" in raw.columns:
+                raw["shortExemptParQuantity"] = pd.to_numeric(raw["shortExemptParQuantity"], errors="coerce").fillna(0)
+            daily = raw.groupby("tradeReportDate").agg(
+                ShortVolume=("shortParQuantity", "sum"),
+                TotalVolume=("totalParQuantity", "sum")
+            ).reset_index()
+            daily = daily.rename(columns={"tradeReportDate": "Date"})
+            daily = daily.dropna(subset=["Date"]).sort_values("Date")
+            daily["TotalVolume"] = daily["TotalVolume"].replace(0, np.nan)
+            daily["ShortRatio"] = (daily["ShortVolume"] / daily["TotalVolume"] * 100).round(2)
+            daily["NonShortVolume"] = (daily["TotalVolume"] - daily["ShortVolume"]).clip(lower=0)
+            daily = daily.dropna(subset=["ShortVolume"])
+            if len(daily) > 0:
+                return daily.tail(lookback_days).reset_index(drop=True)
         except Exception:
             pass
         return pd.DataFrame()
 
-    df = _try_chartexchange()
-    if not df.empty and 'ShortVolume' in df.columns:
-        return df
-    df = _try_stocksera()
-    if not df.empty and 'ShortVolume' in df.columns:
+    df = _try_finra_api()
+    if not df.empty and "ShortVolume" in df.columns:
         return df
     return pd.DataFrame()
 
@@ -1545,7 +1483,7 @@ def main():
             short_df = fetch_us_short_volume(ticker_clean)
         if not short_df.empty:
             render_short_volume_chart(short_df, ticker_clean, is_jp=False)
-            st.caption("※Source: Chartexchange.com / Stocksera (FINRA TRF data). Scraping-based — may break if site structure changes.")
+            st.caption("※Source: FINRA Reg SHO Daily Short Sale Volume API (public, no auth). Data aggregated across all TRFs (NQTRF/NYTRF/NCTRF).")
             with st.expander("View Short Volume Raw Data"):
                 display_cols = [c for c in ["Date", "ShortVolume", "TotalVolume", "NonShortVolume", "ShortRatio"] if c in short_df.columns]
                 st.dataframe(short_df[display_cols].sort_values("Date", ascending=False), use_container_width=True)
@@ -1566,8 +1504,8 @@ def main():
                 baseline_label = "Bullish (<40%)" if avg_ratio < 40 else ("Bearish (>50%)" if avg_ratio > 50 else "Neutral (40-50%)")
                 st.metric("Sentiment", baseline_label)
         else:
-            st.warning("Could not fetch FINRA short volume data. Source may be unavailable or ticker not supported.")
-            st.info("Supported: US-listed stocks (NASDAQ/NYSE/AMEX). Data from chartexchange.com.")
+            st.warning("Could not fetch FINRA short volume data. The FINRA API may be temporarily unavailable.")
+            st.info("Supported: US-listed stocks (NASDAQ/NYSE/AMEX). Data from FINRA Reg SHO API (api.finra.org).")
 
     elif is_jp:
         with st.spinner(f"Fetching JP Short Selling Data for {ticker_clean}..."):
