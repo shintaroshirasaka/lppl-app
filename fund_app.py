@@ -388,7 +388,7 @@ def _fetch_xbrl_instance(cik10: str, accession: str) -> tuple[str | None, str]:
     """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg)."""
     cik_int = str(int(cik10))
     acc_nd = accession.replace("-", "")
-    base = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
     debug = f"acc={accession}\n"
 
     # --- Try JSON index first (more reliable) ---
