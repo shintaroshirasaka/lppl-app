@@ -1184,19 +1184,31 @@ def build_ratios_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     return out, meta
 
 
-def plot_roa_roe(table: pd.DataFrame, title: str):
+def plot_roa(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     roa = df["ROA(%)"].astype(float).to_numpy()
-    roe = df["ROE(%)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 4))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
     ax.plot(x, roa, label="ROA (%)", color=C_SILVER, linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, roe, label="ROE (%)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+    ax.set_ylabel("%", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+    st.pyplot(fig)
 
+
+def plot_roe(table: pd.DataFrame, title: str):
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    roe = df["ROE(%)"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    ax.plot(x, roe, label="ROE (%)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
     ax.set_ylabel("%", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
@@ -1408,8 +1420,8 @@ def render(authed_email: str):
     st.caption(f"Authenticated User: {authed_email}")
 
     with st.form("input_form"):
-        ticker = st.text_input("Ticker (US Stock)", value="MSFT")
-        n_years = st.slider("Period (Years)", min_value=3, max_value=15, value=10)
+        ticker = st.text_input("Ticker (US Stock)", value="")
+        n_years = st.slider("Period (Years)", min_value=3, max_value=15, value=15)
         submitted = st.form_submit_button("Run Analysis")
 
     if not submitted:
@@ -1532,8 +1544,43 @@ def render(authed_email: str):
             st.stop()
         rat_disp = _slice_latest_n_years(rat_table, int(n_years))
         st.caption(f"Showing {len(rat_disp)} years")
-        st.markdown("### Return Ratios")
-        plot_roa_roe(rat_disp, f"ROA / ROE")
+
+        # --- ROA Summary ---
+        st.markdown("### ROA")
+        plot_roa(rat_disp, f"ROA (Return on Assets)")
+        roa_vals = rat_disp["ROA(%)"].dropna()
+        if len(roa_vals) >= 2:
+            avg_roa = roa_vals.mean()
+            first_roa = roa_vals.iloc[0]
+            last_roa = roa_vals.iloc[-1]
+            n_roa = len(roa_vals) - 1
+            if first_roa > 0 and last_roa > 0 and n_roa > 0:
+                cagr_roa = ((last_roa / first_roa) ** (1.0 / n_roa) - 1.0) * 100.0
+            else:
+                cagr_roa = np.nan
+            col_a, col_b = st.columns(2)
+            col_a.metric("Average ROA", f"{avg_roa:.2f}%")
+            if np.isfinite(cagr_roa):
+                col_b.metric("CAGR (ROA)", f"{cagr_roa:+.2f}% / yr")
+
+        # --- ROE Summary ---
+        st.markdown("### ROE")
+        plot_roe(rat_disp, f"ROE (Return on Equity)")
+        roe_vals = rat_disp["ROE(%)"].dropna()
+        if len(roe_vals) >= 2:
+            avg_roe = roe_vals.mean()
+            first_roe = roe_vals.iloc[0]
+            last_roe = roe_vals.iloc[-1]
+            n_roe = len(roe_vals) - 1
+            if first_roe > 0 and last_roe > 0 and n_roe > 0:
+                cagr_roe = ((last_roe / first_roe) ** (1.0 / n_roe) - 1.0) * 100.0
+            else:
+                cagr_roe = np.nan
+            col_c, col_d = st.columns(2)
+            col_c.metric("Average ROE", f"{avg_roe:.2f}%")
+            if np.isfinite(cagr_roe):
+                col_d.metric("CAGR (ROE)", f"{cagr_roe:+.2f}% / yr")
+
         st.markdown("### Efficiency")
         plot_inventory_turnover(rat_disp, f"Inventory Turnover")
         st.dataframe(
@@ -1551,6 +1598,22 @@ def render(authed_email: str):
             unit_label = eps_meta.get("eps_unit", "USD/share")
             st.caption(f"Showing {len(eps_disp)} years")
             plot_eps(eps_disp, f"EPS (Diluted)", unit_label=unit_label)
+
+            eps_vals = eps_disp["EPS"].dropna()
+            if len(eps_vals) >= 2:
+                avg_eps = eps_vals.mean()
+                first_eps = eps_vals.iloc[0]
+                last_eps = eps_vals.iloc[-1]
+                n_eps = len(eps_vals) - 1
+                if first_eps > 0 and last_eps > 0 and n_eps > 0:
+                    cagr_eps = ((last_eps / first_eps) ** (1.0 / n_eps) - 1.0) * 100.0
+                else:
+                    cagr_eps = np.nan
+                col_e, col_f = st.columns(2)
+                col_e.metric("Average EPS", f"{avg_eps:.2f}")
+                if np.isfinite(cagr_eps):
+                    col_f.metric("CAGR (EPS)", f"{cagr_eps:+.2f}% / yr")
+
             st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
 
 
