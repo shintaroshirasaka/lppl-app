@@ -1952,6 +1952,334 @@ def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
 
 
 # =========================
+# Auto DCF Valuation
+# =========================
+def _get_shares_outstanding(facts_json: dict) -> tuple[float, str | None]:
+    """Get diluted shares outstanding from SEC EDGAR (dei or us-gaap)."""
+    candidates = [
+        ("dei", "EntityCommonStockSharesOutstanding"),
+        ("dei", "CommonStockSharesOutstanding"),
+        ("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding"),
+        ("us-gaap", "CommonStockSharesOutstanding"),
+    ]
+    facts_root = facts_json.get("facts", {})
+
+    best_val = np.nan
+    best_tag = None
+    best_year = -1
+
+    for prefix, tag in candidates:
+        tag_obj = facts_root.get(prefix, {}).get(tag, {})
+        units = tag_obj.get("units", {})
+
+        node = units.get("shares", []) or units.get("USD", [])
+        if not node:
+            continue
+
+        for x in node:
+            form = str(x.get("form", "")).upper().strip()
+            fp = str(x.get("fp", "")).upper().strip()
+            val = x.get("val")
+            fy_raw = x.get("fy", None)
+            filed = x.get("filed")
+
+            if val is None:
+                continue
+            if not (form.startswith("10-K") or form.startswith("20-F") or form.startswith("40-F") or form.startswith("10-Q")):
+                continue
+
+            if isinstance(fy_raw, (int, np.integer)) or (isinstance(fy_raw, str) and str(fy_raw).isdigit()):
+                fy = int(fy_raw)
+            else:
+                continue
+
+            v = _safe_float(val)
+            if np.isfinite(v) and v > 0 and fy > best_year:
+                best_val = v
+                best_tag = f"{prefix}:{tag}"
+                best_year = fy
+
+    return best_val, best_tag
+
+
+def _get_net_cash(facts_json: dict, year: int) -> tuple[float, dict]:
+    """Calculate net cash = cash - total debt for a given year."""
+    meta = {}
+
+    cash_tags = [
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashAndCashEquivalents",
+    ]
+    _, cash = _value_for_year_usd(facts_json, cash_tags, year)
+    meta["cash"] = _to_musd(cash) if np.isfinite(cash) else np.nan
+
+    st_debt_tags = ["ShortTermBorrowings", "CommercialPaper", "DebtCurrent", "LongTermDebtCurrent"]
+    _, st_debt = _value_for_year_usd(facts_json, st_debt_tags, year)
+
+    lt_debt_tags = ["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"]
+    _, lt_debt = _value_for_year_usd(facts_json, lt_debt_tags, year)
+
+    total_debt = 0.0
+    if np.isfinite(st_debt):
+        total_debt += st_debt
+    if np.isfinite(lt_debt):
+        total_debt += lt_debt
+    meta["total_debt"] = _to_musd(total_debt)
+
+    net_cash = np.nan
+    if np.isfinite(cash):
+        net_cash = cash - total_debt
+    meta["net_cash"] = _to_musd(net_cash) if np.isfinite(net_cash) else np.nan
+
+    return net_cash, meta
+
+
+def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
+    """Fully automated DCF valuation using historical data.
+
+    Fixed assumptions:
+        WACC = 10%, Terminal growth = 2.5%
+    Derived from historical data (3-year averages):
+        Revenue CAGR, CFO margin, Capex/Revenue ratio
+    """
+    WACC = 0.10
+    TERMINAL_G = 0.025
+    PROJECTION_YEARS = 10
+    meta = {"wacc": WACC * 100, "terminal_g": TERMINAL_G * 100}
+
+    # --- Gather historical data ---
+    # Revenue
+    revenue_tags = [
+        "RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+        "NetOperatingRevenues", "SalesRevenueNet", "SalesRevenue",
+    ]
+    rev_df, _ = _build_composite_by_year_usd(facts_json, revenue_tags, min_duration=350)
+    if rev_df.empty or len(rev_df) < 3:
+        return {}, {"error": "Insufficient revenue data for DCF (need >= 3 years)"}
+    rev_map = dict(zip(rev_df["year"].astype(int), rev_df["value"].astype(float)))
+
+    # CFO
+    cfo_tags = [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ]
+    cfo_df, _ = _build_composite_by_year_usd(facts_json, cfo_tags, min_duration=350)
+    cfo_map = dict(zip(cfo_df["year"].astype(int), cfo_df["value"].astype(float))) if not cfo_df.empty else {}
+
+    # Capex
+    capex_tags = [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "PaymentsToAcquireFixedAssets",
+    ]
+    capex_df, _ = _build_composite_by_year_usd(facts_json, capex_tags, min_duration=350)
+    capex_map = dict(zip(capex_df["year"].astype(int), capex_df["value"].astype(float))) if not capex_df.empty else {}
+
+    # --- Calculate 3-year averages ---
+    sorted_years = sorted(rev_map.keys())
+    latest_year = sorted_years[-1]
+    last3 = [y for y in sorted_years if y >= latest_year - 2]
+
+    # Revenue CAGR (3yr)
+    y_start = last3[0]
+    y_end = last3[-1]
+    rev_start = rev_map.get(y_start, np.nan)
+    rev_end = rev_map.get(y_end, np.nan)
+    n_cagr = y_end - y_start
+    if np.isfinite(rev_start) and np.isfinite(rev_end) and rev_start > 0 and rev_end > 0 and n_cagr > 0:
+        rev_cagr = (rev_end / rev_start) ** (1.0 / n_cagr) - 1.0
+    else:
+        rev_cagr = 0.05
+    meta["revenue_cagr_3yr"] = rev_cagr * 100
+
+    # CFO margin (3yr avg)
+    cfo_margins = []
+    for y in last3:
+        r = rev_map.get(y, np.nan)
+        c = cfo_map.get(y, np.nan)
+        if np.isfinite(r) and np.isfinite(c) and r > 0:
+            cfo_margins.append(c / r)
+    avg_cfo_margin = float(np.mean(cfo_margins)) if cfo_margins else 0.30
+    meta["avg_cfo_margin"] = avg_cfo_margin * 100
+
+    # Capex/Revenue ratio (3yr avg)
+    capex_ratios = []
+    for y in last3:
+        r = rev_map.get(y, np.nan)
+        cx = capex_map.get(y, np.nan)
+        if np.isfinite(r) and np.isfinite(cx) and r > 0:
+            capex_ratios.append(abs(cx) / r)
+    avg_capex_ratio = float(np.mean(capex_ratios)) if capex_ratios else 0.10
+    meta["avg_capex_ratio"] = avg_capex_ratio * 100
+
+    # Base revenue (latest year)
+    base_revenue = rev_end
+    meta["base_revenue_m"] = _to_musd(base_revenue)
+    meta["base_year"] = int(latest_year)
+
+    # --- 10-year FCF projection ---
+    # Revenue growth linearly decays from rev_cagr to terminal_g
+    projection = []
+    prev_revenue = base_revenue
+    for i in range(1, PROJECTION_YEARS + 1):
+        t = i / PROJECTION_YEARS
+        growth = rev_cagr * (1 - t) + TERMINAL_G * t
+        revenue = prev_revenue * (1 + growth)
+        cfo = revenue * avg_cfo_margin
+        capex = revenue * avg_capex_ratio
+        fcf = cfo - capex
+        projection.append({
+            "Year": f"Y{i} ({int(latest_year) + i})",
+            "Revenue(M$)": _to_musd(revenue),
+            "CFO(M$)": _to_musd(cfo),
+            "Capex(M$)": _to_musd(-capex),
+            "FCF(M$)": _to_musd(fcf),
+            "Growth(%)": growth * 100,
+        })
+        prev_revenue = revenue
+
+    proj_df = pd.DataFrame(projection)
+
+    # --- Discount FCFs ---
+    pv_fcfs = 0.0
+    for i, row in enumerate(projection):
+        fcf_raw = row["FCF(M$)"] * 1_000_000
+        pv = fcf_raw / ((1 + WACC) ** (i + 1))
+        pv_fcfs += pv
+
+    # Terminal value
+    last_fcf = projection[-1]["FCF(M$)"] * 1_000_000
+    if WACC > TERMINAL_G and last_fcf > 0:
+        terminal_value = last_fcf * (1 + TERMINAL_G) / (WACC - TERMINAL_G)
+    else:
+        terminal_value = 0.0
+    pv_terminal = terminal_value / ((1 + WACC) ** PROJECTION_YEARS)
+
+    ev = pv_fcfs + pv_terminal
+
+    # --- Net cash & shares ---
+    bs_year = _latest_year_from_assets(facts_json)
+    if bs_year is None:
+        bs_year = int(latest_year)
+    net_cash_raw, nc_meta = _get_net_cash(facts_json, bs_year)
+    meta["net_cash_detail"] = nc_meta
+
+    if not np.isfinite(net_cash_raw):
+        net_cash_raw = 0.0
+
+    equity_value = ev + net_cash_raw
+
+    shares_raw, shares_tag = _get_shares_outstanding(facts_json)
+    meta["shares_tag"] = shares_tag
+    if not np.isfinite(shares_raw) or shares_raw <= 0:
+        return {}, {"error": "Could not retrieve shares outstanding"}
+    meta["shares_outstanding"] = shares_raw
+
+    fair_price = equity_value / shares_raw
+    meta["fair_price"] = fair_price
+
+    # Current price and PER
+    current_price = np.nan
+    current_eps = np.nan
+    fair_per = np.nan
+    current_per = np.nan
+    try:
+        tk = yf.Ticker(ticker_symbol.upper())
+        hist = tk.history(period="5d", auto_adjust=True)
+        if not hist.empty:
+            current_price = float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    # Get latest EPS
+    eps_table, eps_meta = build_eps_table(facts_json, ticker_symbol=ticker_symbol)
+    if not eps_table.empty:
+        current_eps = float(eps_table["EPS"].iloc[-1])
+
+    if np.isfinite(current_eps) and current_eps > 0:
+        fair_per = fair_price / current_eps
+        if np.isfinite(current_price):
+            current_per = current_price / current_eps
+
+    # --- Build result ---
+    result = {
+        "projection": proj_df,
+        "pv_fcfs_m": _to_musd(pv_fcfs),
+        "terminal_value_m": _to_musd(terminal_value),
+        "pv_terminal_m": _to_musd(pv_terminal),
+        "enterprise_value_m": _to_musd(ev),
+        "net_cash_m": _to_musd(net_cash_raw),
+        "equity_value_m": _to_musd(equity_value),
+        "shares": shares_raw,
+        "fair_price": fair_price,
+        "current_price": current_price,
+        "upside_pct": ((fair_price / current_price) - 1) * 100 if np.isfinite(current_price) and current_price > 0 else np.nan,
+        "current_eps": current_eps,
+        "fair_per": fair_per,
+        "current_per": current_per,
+    }
+    return result, meta
+
+
+def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
+    """Chart: projected FCF bars with revenue line."""
+    df = proj_df.copy()
+    x = df["Year"].tolist()
+    fcf = df["FCF(M$)"].astype(float).to_numpy()
+    revenue = df["Revenue(M$)"].astype(float).to_numpy()
+
+    fig, ax_left = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax_left, title=title, dual_y=True)
+
+    bar_colors = [C_GOLD if v >= 0 else C_BRONZE for v in fcf]
+    ax_left.bar(x, fcf, color=bar_colors, alpha=0.85, width=0.6, label="FCF")
+    ax_left.set_ylabel("FCF (Million USD)", color=TEXT_COLOR)
+    ax_left.tick_params(axis='x', rotation=45)
+
+    ax_right = ax_left.twinx()
+    ax_right.plot(x, revenue, color=C_SILVER, linewidth=2.0, marker="o", markersize=5, label="Revenue")
+    ax_right.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
+    ax_right.tick_params(colors=TICK_COLOR, which='both')
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['left'].set_visible(False)
+    ax_right.spines['right'].set_color(GRID_COLOR)
+    ax_right.spines['bottom'].set_visible(False)
+
+    lines1, labels1 = ax_left.get_legend_handles_labels()
+    lines2, labels2 = ax_right.get_legend_handles_labels()
+    ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+
+    st.pyplot(fig)
+
+
+def plot_dcf_waterfall(result: dict, title: str):
+    """Horizontal bar showing EV breakdown: PV of FCFs + PV of Terminal + Net Cash."""
+    pv_fcfs = result["pv_fcfs_m"]
+    pv_term = result["pv_terminal_m"]
+    net_cash = result["net_cash_m"]
+    equity = result["equity_value_m"]
+
+    labels = ["PV of FCFs", "PV of Terminal", "Net Cash", "Equity Value"]
+    values = [pv_fcfs, pv_term, net_cash, equity]
+    colors = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE]
+
+    fig, ax = plt.subplots(figsize=(10, 3.5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    ax.barh(labels, values, color=colors, alpha=0.85, height=0.5)
+    ax.set_xlabel("Million USD", color=TEXT_COLOR)
+
+    for i, v in enumerate(values):
+        ax.text(v + max(values) * 0.01, i, f"{v:,.0f}", va='center', color=TEXT_COLOR, fontsize=9)
+
+    ax.invert_yaxis()
+    st.pyplot(fig)
+
+
+# =========================
 # UI
 # =========================
 def render(authed_email: str):
@@ -1996,8 +2324,8 @@ def render(authed_email: str):
     facts = fetch_company_facts(cik10)
     company_name = facts.get("entityName", ticker.upper())
 
-    tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps, tab_qtly = st.tabs(
-        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments", "Backlog", "Ratios", "EPS", "Quarterly"]
+    tab_pl, tab_bs, tab_cf, tab_seg, tab_rpo, tab_turn, tab_eps, tab_qtly, tab_dcf = st.tabs(
+        ["PL (Annual)", "BS (Latest)", "CF (Annual)", "Segments", "Backlog", "Ratios", "EPS", "Quarterly", "DCF"]
     )
 
     with tab_pl:
@@ -2247,6 +2575,89 @@ def render(authed_email: str):
             plot_quarterly_eps_chart(q_eps, "Quarterly EPS (Split-Adjusted)")
             st.dataframe(
                 q_eps.style.format({"EPS": "{:.2f}"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tab_dcf:
+        st.markdown("### Auto DCF Valuation")
+        st.caption("⚠️ Simplified estimate — WACC 10%, Terminal Growth 2.5%, historical averages projected. Not investment advice.")
+
+        dcf_result, dcf_meta = build_auto_dcf(facts, ticker_symbol=t)
+
+        if not dcf_result:
+            st.warning(f"DCF calculation failed: {dcf_meta.get('error', 'Unknown error')}")
+        else:
+            # --- Assumptions ---
+            st.markdown("#### Assumptions (Auto-derived)")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("WACC", f"{dcf_meta.get('wacc', 0):.1f}%")
+            c2.metric("Terminal Growth", f"{dcf_meta.get('terminal_g', 0):.1f}%")
+            c3.metric("Base Year", str(dcf_meta.get("base_year", "N/A")))
+
+            c4, c5, c6 = st.columns(3)
+            c4.metric("Revenue CAGR (3yr)", f"{dcf_meta.get('revenue_cagr_3yr', 0):.1f}%")
+            c5.metric("Avg CFO Margin (3yr)", f"{dcf_meta.get('avg_cfo_margin', 0):.1f}%")
+            c6.metric("Avg Capex/Rev (3yr)", f"{dcf_meta.get('avg_capex_ratio', 0):.1f}%")
+
+            st.markdown("---")
+
+            # --- Key Results ---
+            st.markdown("#### Valuation Results")
+            r1, r2, r3 = st.columns(3)
+            fair_p = dcf_result.get("fair_price", np.nan)
+            cur_p = dcf_result.get("current_price", np.nan)
+            upside = dcf_result.get("upside_pct", np.nan)
+            r1.metric("Fair Value / share", f"${fair_p:,.1f}" if np.isfinite(fair_p) else "N/A")
+            r2.metric("Current Price", f"${cur_p:,.1f}" if np.isfinite(cur_p) else "N/A")
+            r3.metric(
+                "Upside / Downside",
+                f"{upside:+.1f}%" if np.isfinite(upside) else "N/A",
+                delta=f"{upside:+.1f}%" if np.isfinite(upside) else None,
+                delta_color="normal",
+            )
+
+            r4, r5, r6 = st.columns(3)
+            fair_per = dcf_result.get("fair_per", np.nan)
+            cur_per = dcf_result.get("current_per", np.nan)
+            cur_eps = dcf_result.get("current_eps", np.nan)
+            r4.metric("DCF Fair PER", f"{fair_per:.1f}x" if np.isfinite(fair_per) else "N/A")
+            r5.metric("Current PER", f"{cur_per:.1f}x" if np.isfinite(cur_per) else "N/A")
+            r6.metric("Latest EPS", f"${cur_eps:.2f}" if np.isfinite(cur_eps) else "N/A")
+
+            st.markdown("---")
+
+            # --- EV Breakdown ---
+            st.markdown("#### Enterprise Value Breakdown")
+            ev_c1, ev_c2, ev_c3, ev_c4 = st.columns(4)
+            ev_c1.metric("PV of FCFs", f"{dcf_result['pv_fcfs_m']:,.0f} M$")
+            ev_c2.metric("PV of Terminal", f"{dcf_result['pv_terminal_m']:,.0f} M$")
+            ev_c3.metric("Net Cash", f"{dcf_result['net_cash_m']:,.0f} M$")
+            ev_c4.metric("Equity Value", f"{dcf_result['equity_value_m']:,.0f} M$")
+
+            # Terminal as % of EV
+            ev_total = dcf_result.get("enterprise_value_m", 0)
+            if ev_total > 0:
+                tv_pct = dcf_result["pv_terminal_m"] / ev_total * 100
+                st.caption(f"Terminal Value accounts for {tv_pct:.0f}% of Enterprise Value")
+
+            plot_dcf_waterfall(dcf_result, "EV Breakdown (Million USD)")
+
+            st.markdown("---")
+
+            # --- FCF Projection Chart & Table ---
+            st.markdown("#### 10-Year FCF Projection")
+            proj_df = dcf_result["projection"]
+            plot_dcf_fcf_projection(proj_df, "Projected FCF & Revenue")
+
+            st.dataframe(
+                proj_df.style.format({
+                    "Revenue(M$)": "{:,.0f}",
+                    "CFO(M$)": "{:,.0f}",
+                    "Capex(M$)": "{:,.0f}",
+                    "FCF(M$)": "{:,.0f}",
+                    "Growth(%)": "{:.1f}",
+                }),
                 use_container_width=True,
                 hide_index=True,
             )
