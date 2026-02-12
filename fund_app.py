@@ -890,40 +890,50 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
 # =========================
 def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
-    cfo_tags = ["NetCashProvidedByUsedInOperatingActivities"]
-    cfi_tags = ["NetCashProvidedByUsedInInvestingActivities"]
-    cff_tags = ["NetCashProvidedByUsedInFinancingActivities"]
-    capex_tags = ["PaymentsToAcquirePropertyPlantAndEquipment", "PaymentsToAcquireProductiveAssets", "PaymentsToAcquireFixedAssets"]
+    cfo_tags = [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ]
+    cfi_tags = [
+        "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",
+    ]
+    cff_tags = [
+        "NetCashProvidedByUsedInFinancingActivities",
+        "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",
+    ]
+    capex_tags = [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "PaymentsToAcquireFixedAssets",
+    ]
 
-    tag, df_cfo = _pick_best_tag_latest_first_usd(facts_json, cfo_tags, min_duration=350)
-    meta["cfo_tag"] = tag
-    tag, df_cfi = _pick_best_tag_latest_first_usd(facts_json, cfi_tags, min_duration=350)
-    meta["cfi_tag"] = tag
-    tag, df_cff = _pick_best_tag_latest_first_usd(facts_json, cff_tags, min_duration=350)
-    meta["cff_tag"] = tag
+    cfo_df, cfo_meta = _build_composite_by_year_usd(facts_json, cfo_tags, min_duration=350)
+    meta["cfo_composite"] = cfo_meta
+    cfo_map = dict(zip(cfo_df["year"].astype(int), cfo_df["value"].astype(float))) if not cfo_df.empty else {}
+
+    cfi_df, cfi_meta = _build_composite_by_year_usd(facts_json, cfi_tags, min_duration=350)
+    meta["cfi_composite"] = cfi_meta
+    cfi_map = dict(zip(cfi_df["year"].astype(int), cfi_df["value"].astype(float))) if not cfi_df.empty else {}
+
+    cff_df, cff_meta = _build_composite_by_year_usd(facts_json, cff_tags, min_duration=350)
+    meta["cff_composite"] = cff_meta
+    cff_map = dict(zip(cff_df["year"].astype(int), cff_df["value"].astype(float))) if not cff_df.empty else {}
 
     capex_df, capex_meta = _build_composite_by_year_usd(facts_json, capex_tags, min_duration=350)
     meta["capex_composite"] = capex_meta
     capex_map = dict(zip(capex_df["year"].astype(int), capex_df["value"].astype(float))) if not capex_df.empty else {}
 
-    years = sorted(set(df_cfo["year"].tolist()) | set(df_cfi["year"].tolist()) | set(df_cff["year"].tolist()) | set(capex_map.keys()))
+    years = sorted(set(cfo_map.keys()) | set(cfi_map.keys()) | set(cff_map.keys()) | set(capex_map.keys()))
     years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
 
-    def val_at(df: pd.DataFrame, y: int) -> float:
-        if df.empty:
-            return np.nan
-        r = df[df["year"] == y]
-        if r.empty:
-            return np.nan
-        return float(r["val"].iloc[-1])
-
     rows = []
     for y in years:
-        cfo = val_at(df_cfo, y)
-        cfi = val_at(df_cfi, y)
-        cff = val_at(df_cff, y)
+        cfo = cfo_map.get(y, np.nan)
+        cfi = cfi_map.get(y, np.nan)
+        cff = cff_map.get(y, np.nan)
         capex_raw = capex_map.get(y, np.nan)
 
         capex_out = np.nan
