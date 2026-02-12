@@ -2406,6 +2406,45 @@ def render(authed_email: str):
             else:
                 st.info("No Geography Segment info found.")
 
+        # Debug: raw segment data inspection
+        with st.expander("🔍 Segment Debug Info"):
+            rev_tags_dbg = [
+                "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "SalesRevenueNet", "SalesToExternalCustomers",
+            ]
+            found_any = False
+            for tag in rev_tags_dbg:
+                df_dbg = _extract_annual_series_usd(facts, tag, include_segments=True, min_duration=350)
+                if df_dbg.empty:
+                    continue
+                seg_rows = df_dbg[df_dbg["segment"].apply(lambda x: x is not None)]
+                st.write(f"**{tag}**: {len(df_dbg)} total rows, {len(seg_rows)} with segment data")
+                if not seg_rows.empty:
+                    found_any = True
+                    samples = seg_rows.head(5)
+                    for _, sr in samples.iterrows():
+                        st.code(f"year={sr['year']} val={sr['val']}\nsegment={sr['segment']}\ntype={type(sr['segment']).__name__}")
+
+            # Also show raw SEC JSON entries with segment field
+            st.write("---")
+            st.write("**Raw SEC JSON sample (entries with 'segment' key):**")
+            facts_root = facts.get("facts", {})
+            raw_found = False
+            for prefix in ["us-gaap", "srt"]:
+                for tag in rev_tags_dbg:
+                    node = facts_root.get(prefix, {}).get(tag, {}).get("units", {}).get("USD", [])
+                    seg_entries = [x for x in node if "segment" in x and x.get("form", "").upper().startswith("10-K")]
+                    if seg_entries:
+                        raw_found = True
+                        st.write(f"**{prefix}:{tag}** — {len(seg_entries)} entries with segment")
+                        for entry in seg_entries[:3]:
+                            st.json(entry)
+                        break
+                if raw_found:
+                    break
+            if not raw_found:
+                st.warning("No entries with 'segment' key found in raw SEC JSON for revenue tags.")
+
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
         if rpo_table.empty:
