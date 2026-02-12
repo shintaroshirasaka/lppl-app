@@ -384,99 +384,100 @@ def _get_10k_filings_list(cik10: str, max_filings: int = 8) -> list[dict]:
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
-def _fetch_xbrl_instance(cik10: str, accession: str) -> tuple[str | None, str]:
-    """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg)."""
+def _fetch_xbrl_instance(cik10: str, accession: str, primary_doc: str = "") -> tuple[str | None, str]:
+    """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg).
+    
+    Strategy: Construct _htm.xml URL directly from primaryDocument name
+    (avoids directory listing which may be blocked).
+    """
     cik_int = str(int(cik10))
     acc_nd = accession.replace("-", "")
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
-    debug = f"acc={accession}\n"
+    debug = f"acc={accession} primary_doc={primary_doc}\n"
 
-    # --- Try JSON index first (more reliable) ---
-    index_url = base + "index.json"
-    file_list = []
-    try:
-        time.sleep(0.12)
-        r = requests.get(index_url, headers=SEC_HEADERS, timeout=30)
-        r.raise_for_status()
-        idx_json = r.json()
-        items = idx_json.get("directory", {}).get("item", [])
-        file_list = [item.get("name", "") for item in items if isinstance(item, dict)]
-        debug += f"index.json: {len(file_list)} files\n"
-    except Exception as e:
-        debug += f"index.json failed: {e}\n"
-        # Fallback: HTML directory listing
-        try:
-            r = requests.get(base, headers=SEC_HEADERS, timeout=30)
-            r.raise_for_status()
-            file_list = re.findall(r'href="([^"]+)"', r.text)
-            debug += f"HTML index: {len(file_list)} links\n"
-        except Exception as e2:
-            debug += f"HTML index also failed: {e2}\n"
-            return None, debug
+    # Build candidate URLs (try multiple domains and patterns)
+    candidates = []
 
-    if not file_list:
-        debug += "No files found in index\n"
-        return None, debug
+    # Pattern 1: _htm.xml derived from primaryDocument (most reliable for recent filings)
+    if primary_doc:
+        stem = primary_doc
+        for ext in [".htm", ".html"]:
+            if stem.lower().endswith(ext):
+                stem = stem[:-len(ext)]
+                break
+        htm_xml_name = stem + "_htm.xml"
+        for domain in ["www.sec.gov", "data.sec.gov"]:
+            candidates.append(
+                (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/{htm_xml_name}",
+                 f"{domain} _htm.xml")
+            )
 
-    # --- Priority order for XBRL instance ---
-    target = None
+    # Pattern 2: Try common XBRL instance naming with accession
+    for domain in ["www.sec.gov", "data.sec.gov"]:
+        # Some filings use {acc}-xbrl.zip or just the primaryDocument directly
+        if primary_doc:
+            candidates.append(
+                (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/{primary_doc}",
+                 f"{domain} primaryDoc (HTML/iXBRL)")
+            )
 
-    # Priority 1: _htm.xml (SEC's IXBRL-to-XBRL conversion)
-    htm_xml = [f for f in file_list if f.endswith("_htm.xml")]
-    if htm_xml:
-        target = htm_xml[0]
-        debug += f"Found _htm.xml: {target}\n"
+    # Pattern 3: Try directory index.json (works for some filings)
+    for domain in ["www.sec.gov", "data.sec.gov"]:
+        candidates.append(
+            (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/index.json",
+             f"{domain} index.json")
+        )
 
-    # Priority 2: FilingSummary.xml to find instance doc name
-    if not target and "FilingSummary.xml" in file_list:
+    # --- Try each candidate ---
+    for url, label in candidates:
         try:
             time.sleep(0.12)
-            fs_r = requests.get(base + "FilingSummary.xml", headers=SEC_HEADERS, timeout=30)
-            fs_r.raise_for_status()
-            inst_match = re.search(r'<InputFiles>.*?<File>(.*?\.xml)</File>', fs_r.text, re.DOTALL)
-            if inst_match:
-                candidate = inst_match.group(1)
-                if candidate in file_list:
-                    target = candidate
-                    debug += f"Found via FilingSummary: {target}\n"
-        except Exception:
-            pass
+            r = requests.get(url, headers=SEC_HEADERS, timeout=60)
+            if r.status_code == 200:
+                debug += f"✓ {label}: {r.status_code} ({len(r.text)} chars)\n"
 
-    # Priority 3: Any .xml that's not a taxonomy file
-    if not target:
-        exclude_suffixes = ['_cal.xml', '_def.xml', '_lab.xml', '_pre.xml']
-        exclude_names = ['filingsummary.xml']
-        xml_files = [
-            f for f in file_list
-            if f.lower().endswith('.xml')
-            and not any(f.lower().endswith(s) for s in exclude_suffixes)
-            and f.lower() not in exclude_names
-            and not re.match(r'^[Rr]\d+', f)
-        ]
-        debug += f"XML candidates: {xml_files[:8]}\n"
-        if xml_files:
-            target = xml_files[0]
-            debug += f"Using first XML candidate: {target}\n"
+                # If it's index.json, parse it to find _htm.xml
+                if url.endswith("index.json"):
+                    try:
+                        idx_json = r.json()
+                        items = idx_json.get("directory", {}).get("item", [])
+                        file_list = [item.get("name", "") for item in items if isinstance(item, dict)]
+                        htm_files = [f for f in file_list if f.endswith("_htm.xml")]
+                        if htm_files:
+                            base_url = url.replace("index.json", "")
+                            target_url = base_url + htm_files[0]
+                            time.sleep(0.12)
+                            r2 = requests.get(target_url, headers=SEC_HEADERS, timeout=90)
+                            if r2.status_code == 200:
+                                debug += f"✓ Downloaded {htm_files[0]}: {len(r2.text)} chars\n"
+                                return r2.text, debug
+                    except Exception:
+                        pass
+                    continue
 
-    if not target:
-        debug += "No suitable XBRL file found\n"
-        return None, debug
+                # If it's an HTML file (iXBRL), return it directly for parsing
+                content = r.text
+                if len(content) > 1000:
+                    # Check if it's XML (XBRL instance) or HTML (iXBRL)
+                    if content.strip()[:100].lower().startswith("<?xml") or "<xbrl" in content[:500].lower():
+                        return content, debug
+                    elif "ix:nonfraction" in content.lower() or "ix:nonnumeric" in content.lower():
+                        # It's inline XBRL (iXBRL) HTML — also usable
+                        debug += f"  → iXBRL HTML detected\n"
+                        return content, debug
+                    else:
+                        debug += f"  → Content doesn't look like XBRL, skipping\n"
+                        continue
+            else:
+                debug += f"✗ {label}: {r.status_code}\n"
+        except Exception as e:
+            debug += f"✗ {label}: {e}\n"
 
-    # --- Download ---
-    url = base + target
-    try:
-        time.sleep(0.12)
-        r = requests.get(url, headers=SEC_HEADERS, timeout=90)
-        r.raise_for_status()
-        debug += f"OK: {len(r.text)} chars\n"
-        return r.text, debug
-    except Exception as e:
-        debug += f"Download failed: {e}\n"
-        return None, debug
+    debug += "All candidates failed\n"
+    return None, debug
 
 
 def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
-    """Extract dimensioned revenue facts from XBRL instance XML via regex."""
+    """Extract dimensioned revenue facts from XBRL/iXBRL via regex."""
 
     # --- Step 1: Parse contexts with dimensional segment info ---
     ctx_re = re.compile(
@@ -525,52 +526,95 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
         "segmentreportinginformationrevenue",
     }
 
-    # Match XBRL facts: <ns:Tag contextRef="..." ...>value</ns:Tag>
+    results = []
+
+    # --- Pattern A: Standard XBRL ---
+    # <ns:Tag contextRef="..." ...>value</ns:Tag>
     fact_re = re.compile(
         r'<(?:(\w+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:\w+:)?\2>'
     )
-
-    results = []
     for m in fact_re.finditer(xml_text):
         tag = m.group(2)
         if tag.lower() not in revenue_tags:
             continue
-
         ctx_ref = m.group(4)
         if ctx_ref not in contexts:
             continue
-
-        ctx = contexts[ctx_ref]
-        # Only annual periods (> 330 days)
-        if ctx["dur"] < 330:
-            continue
-
         val_str = m.group(6).strip().replace(",", "")
         try:
             val = float(val_str)
         except ValueError:
             continue
-
         if val == 0:
             continue
+        _collect_segment_result(results, tag, ctx_ref, val, contexts)
 
-        # Only single-dimension contexts (avoid cross-dimensional intersections)
-        if len(ctx["dims"]) > 1:
-            continue
+    # --- Pattern B: Inline XBRL (iXBRL) ---
+    # <ix:nonFraction contextRef="..." name="us-gaap:Revenues" ...>value</ix:nonFraction>
+    ixbrl_re = re.compile(
+        r'<ix:nonFraction\s+([^>]*?)contextRef="([^"]+)"([^>]*?)name="([^"]+)"([^>]*?)>([^<]*)</ix:nonFraction>',
+        re.IGNORECASE
+    )
+    # Also match with name before contextRef
+    ixbrl_re2 = re.compile(
+        r'<ix:nonFraction\s+([^>]*?)name="([^"]+)"([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]*)</ix:nonFraction>',
+        re.IGNORECASE
+    )
 
-        for dim, member in ctx["dims"]:
-            end_str = ctx["end"]
-            year = int(end_str[:4]) if end_str else 0
-            results.append({
-                "tag": tag,
-                "dimension": dim,
-                "member": member,
-                "end_date": end_str,
-                "year": year,
-                "value": val,
-            })
+    for pattern, ctx_grp, name_grp, val_grp in [(ixbrl_re, 2, 4, 6), (ixbrl_re2, 4, 2, 6)]:
+        for m in pattern.finditer(xml_text):
+            name_full = m.group(name_grp)
+            # name_full is like "us-gaap:Revenues"
+            tag = name_full.split(":")[-1] if ":" in name_full else name_full
+            if tag.lower() not in revenue_tags:
+                continue
+            ctx_ref = m.group(ctx_grp)
+            if ctx_ref not in contexts:
+                continue
+            val_str = m.group(val_grp).strip().replace(",", "").replace(" ", "")
+            if not val_str or val_str == "-":
+                continue
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+            if val == 0:
+                continue
+
+            # Handle iXBRL scale attribute
+            full_tag = m.group(0)
+            scale_m = re.search(r'scale="(-?\d+)"', full_tag)
+            if scale_m:
+                val = val * (10 ** int(scale_m.group(1)))
+            # Handle sign attribute
+            sign_m = re.search(r'sign="-"', full_tag)
+            if sign_m:
+                val = -abs(val)
+
+            _collect_segment_result(results, tag, ctx_ref, val, contexts)
 
     return results
+
+
+def _collect_segment_result(results: list, tag: str, ctx_ref: str, val: float, contexts: dict):
+    """Helper to add a segment fact to results list."""
+    ctx = contexts[ctx_ref]
+    if ctx["dur"] < 330:
+        return
+    if len(ctx["dims"]) > 1:
+        return
+
+    for dim, member in ctx["dims"]:
+        end_str = ctx["end"]
+        year = int(end_str[:4]) if end_str else 0
+        results.append({
+            "tag": tag,
+            "dimension": dim,
+            "member": member,
+            "end_date": end_str,
+            "year": year,
+            "value": val,
+        })
 
 
 def _classify_dimension(dim_str: str) -> str:
@@ -610,12 +654,13 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     fetched = 0
     fetch_debug = []
     for f in filings:
-        xml, dbg = _fetch_xbrl_instance(cik10, f["accession"])
+        xml, dbg = _fetch_xbrl_instance(cik10, f["accession"], f.get("primary_doc", ""))
         fetch_debug.append(dbg)
         if xml is None:
             continue
         fetched += 1
         facts = _parse_segment_facts_from_xbrl(xml)
+        meta[f"filing_{fetched}_facts"] = len(facts)
         all_facts.extend(facts)
 
     meta["filings_fetched"] = fetched
