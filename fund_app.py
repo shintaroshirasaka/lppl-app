@@ -1737,10 +1737,18 @@ def render(authed_email: str):
                     avg_per = per_vals.mean()
                     med_per = per_vals.median()
                     latest_per = per_vals.iloc[-1]
-                    col_g, col_h, col_i = st.columns(3)
+                    cagr_per = np.nan
+                    if len(per_vals) >= 2:
+                        first_per = per_vals.iloc[0]
+                        n_per = len(per_vals) - 1
+                        if first_per > 0 and latest_per > 0 and n_per > 0:
+                            cagr_per = ((latest_per / first_per) ** (1.0 / n_per) - 1.0) * 100.0
+                    col_g, col_h, col_i, col_j = st.columns(4)
                     col_g.metric("Average PER", f"{avg_per:.1f}x")
                     col_h.metric("Median PER", f"{med_per:.1f}x")
                     col_i.metric("Latest PER", f"{latest_per:.1f}x")
+                    if np.isfinite(cagr_per):
+                        col_j.metric("CAGR (PER)", f"{cagr_per:+.1f}% / yr")
 
                 st.dataframe(
                     per_disp[["FY", "Price", "EPS", "PER"]].style.format(
