@@ -885,8 +885,8 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         if len(nonshort_vals) == 0:
             nonshort_vals = np.zeros(len(short_vals))
 
-        short_label = "Margin Sell (売り残)" if is_jp else "Short Volume"
-        nonshort_label = "Margin Buy (買い残)" if is_jp else "Non-Short Volume"
+        short_label = "Margin Sell" if is_jp else "Short Volume"
+        nonshort_label = "Margin Buy" if is_jp else "Non-Short Volume"
         ax1.bar(x_pos, short_vals, width=bar_width, color=SHORT_BAR_COLOR, alpha=0.85, label=short_label, zorder=3)
         ax1.bar(x_pos, nonshort_vals, width=bar_width, bottom=short_vals, color=NONSHORT_BAR_COLOR, alpha=0.5, label=nonshort_label, zorder=2)
 
@@ -935,7 +935,7 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         ax2.spines['right'].set_color('#333333')
         ax2.spines['bottom'].set_color('#333333')
 
-    title_prefix = "Margin Sell Ratio (信用売り比率)" if is_jp else "FINRA Short Volume & Ratio"
+    title_prefix = "Margin Sell Ratio" if is_jp else "FINRA Short Volume & Ratio"
     title_text = f"{title_prefix}: {ticker}"
     ax1.set_title(title_text, color=TEXT_COLOR, fontweight='normal', fontname='serif', pad=15)
 
@@ -1315,7 +1315,7 @@ def main():
             short_df = fetch_jp_short_selling_ratio(ticker_clean)
         if not short_df.empty and "ShortRatio" in short_df.columns:
             render_short_volume_chart(short_df, ticker_clean, is_jp=True)
-            st.caption("※Source: IRBank (東証 週次信用取引残高). 信用売り比率 = 売り残 / (売り残+買い残). FINRA Short Volumeとは異なる指標です。")
+            st.caption("Source: IRBank (TSE weekly margin balance). Sell Ratio = Margin Sell / (Sell + Buy). Different metric from FINRA Short Volume.")
             with st.expander("View Short Selling Raw Data"):
                 display_cols = [c for c in ["Date", "ShortVolume", "TotalVolume", "NonShortVolume", "ShortRatio"] if c in short_df.columns]
                 st.dataframe(short_df[display_cols].sort_values("Date", ascending=False), use_container_width=True)
