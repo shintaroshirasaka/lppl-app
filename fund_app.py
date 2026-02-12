@@ -443,6 +443,86 @@ def _fetch_xbrl_instance(cik10: str, accession: str, primary_doc: str = "") -> t
     return None, debug
 
 
+def _diagnose_xbrl(xml_text: str) -> dict:
+    """Diagnostic: analyze XBRL XML to understand its structure."""
+    info = {}
+    info["total_chars"] = len(xml_text)
+
+    # Check if it's standard XBRL or iXBRL
+    info["has_xbrli_context"] = "xbrli:context" in xml_text or "<context " in xml_text
+    info["has_ix_nonfraction"] = "ix:nonFraction" in xml_text or "ix:nonfraction" in xml_text
+
+    # Count contexts (all, not just dimensional)
+    ctx_all = re.findall(r'<(?:\w+:)?context\s+id="([^"]+)"', xml_text)
+    info["total_contexts"] = len(ctx_all)
+    info["sample_ctx_ids"] = ctx_all[:5]
+
+    # Count dimensional contexts
+    dim_ctx = re.findall(r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"', xml_text)
+    info["dimensional_contexts"] = len(dim_ctx)
+    info["unique_dimensions"] = list(set(dim_ctx))[:10]
+
+    # Find revenue-related tags
+    rev_patterns = [
+        r'<(?:\w+:)?(Revenues?)\s',
+        r'<(?:\w+:)?(RevenueFromContractWithCustomerExcludingAssessedTax)\s',
+        r'<(?:\w+:)?(SalesRevenueNet)\s',
+        r'name="[^"]*:(Revenues?)"',
+        r'name="[^"]*:(RevenueFromContractWithCustomerExcludingAssessedTax)"',
+    ]
+    found_tags = {}
+    for pat in rev_patterns:
+        matches = re.findall(pat, xml_text)
+        if matches:
+            found_tags[matches[0]] = len(matches)
+    info["revenue_tags_found"] = found_tags
+
+    # Sample: find any fact with contextRef in a dimensional context
+    # First get dimensional context IDs
+    ctx_re = re.compile(
+        r'<(?:\w+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:\w+:)?context>', re.DOTALL
+    )
+    dim_re = re.compile(
+        r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:\w+:)?explicitMember>'
+    )
+    dim_ctx_ids = set()
+    dim_ctx_samples = []
+    for m in ctx_re.finditer(xml_text):
+        cid, body = m.group(1), m.group(2)
+        dims = dim_re.findall(body)
+        if dims:
+            dim_ctx_ids.add(cid)
+            if len(dim_ctx_samples) < 3:
+                dim_ctx_samples.append({"id": cid, "dims": dims, "body_snippet": body[:200]})
+    info["dim_ctx_count"] = len(dim_ctx_ids)
+    info["dim_ctx_samples"] = dim_ctx_samples
+
+    # Check: do revenue facts reference dimensional contexts?
+    rev_kw = ["revenue", "sales"]
+    rev_with_dim = []
+    fact_re = re.compile(
+        r'<(?:(\w+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:\w+:)?\2>'
+    )
+    for m in fact_re.finditer(xml_text):
+        tag = m.group(2)
+        if any(kw in tag.lower() for kw in rev_kw):
+            ctx_ref = m.group(4)
+            if ctx_ref in dim_ctx_ids and len(rev_with_dim) < 5:
+                rev_with_dim.append({"tag": tag, "ctx": ctx_ref, "val": m.group(6).strip()[:30]})
+    info["revenue_facts_in_dim_ctx"] = rev_with_dim
+
+    # Also check iXBRL pattern
+    ix_rev = []
+    ix_re = re.compile(r'<ix:nonFraction[^>]*name="([^"]*(?:[Rr]evenue|[Ss]ales)[^"]*)"[^>]*contextRef="([^"]+)"[^>]*>([^<]*)</ix:nonFraction>', re.IGNORECASE)
+    for m in ix_re.finditer(xml_text):
+        name, ctx, val = m.group(1), m.group(2), m.group(3)
+        if ctx in dim_ctx_ids and len(ix_rev) < 5:
+            ix_rev.append({"name": name, "ctx": ctx, "val": val.strip()[:30]})
+    info["ix_revenue_in_dim_ctx"] = ix_rev
+
+    return info
+
+
 def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
     """Extract dimensioned revenue facts from XBRL/iXBRL via regex."""
 
@@ -629,6 +709,9 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         facts = _parse_segment_facts_from_xbrl(xml)
         meta[f"filing_{fetched}_facts"] = len(facts)
         all_facts.extend(facts)
+        # Run diagnostic on first filing
+        if fetched == 1:
+            meta["diag"] = _diagnose_xbrl(xml)
 
     meta["filings_fetched"] = fetched
     meta["total_facts"] = len(all_facts)
@@ -2642,6 +2725,20 @@ def render(authed_email: str):
                 st.write(f"**Business segments:** {seg_meta['business_members']}")
             if "geo_members" in seg_meta:
                 st.write(f"**Geography segments:** {seg_meta['geo_members']}")
+            if "diag" in seg_meta:
+                st.write("---")
+                st.write("**XBRL Diagnostic (Filing 1):**")
+                diag = seg_meta["diag"]
+                st.write(f"- Total contexts: {diag.get('total_contexts', 0)}")
+                st.write(f"- Dimensional contexts: {diag.get('dim_ctx_count', 0)}")
+                st.write(f"- Unique dimensions: {diag.get('unique_dimensions', [])}")
+                st.write(f"- Revenue tags found: {diag.get('revenue_tags_found', {})}")
+                st.write(f"- Revenue facts in dim ctx (XBRL): {diag.get('revenue_facts_in_dim_ctx', [])}")
+                st.write(f"- Revenue facts in dim ctx (iXBRL): {diag.get('ix_revenue_in_dim_ctx', [])}")
+                if diag.get("dim_ctx_samples"):
+                    st.write("- Dim context samples:")
+                    for s in diag["dim_ctx_samples"]:
+                        st.code(f"id={s['id']}\ndims={s['dims']}")
             if "fetch_debug" in seg_meta:
                 st.write("---")
                 st.write("**Fetch log (per filing):**")
