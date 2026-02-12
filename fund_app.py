@@ -91,6 +91,7 @@ except ImportError:
 # =========================
 SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "").strip() or "YourName your.email@example.com"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate", "Host": "data.sec.gov"}
+SEC_HEADERS_GENERIC = {"User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 TICKER_CIK_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -385,92 +386,58 @@ def _get_10k_filings_list(cik10: str, max_filings: int = 8) -> list[dict]:
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def _fetch_xbrl_instance(cik10: str, accession: str, primary_doc: str = "") -> tuple[str | None, str]:
-    """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg).
-    
-    Strategy: Construct _htm.xml URL directly from primaryDocument name
-    (avoids directory listing which may be blocked).
-    """
+    """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg)."""
     cik_int = str(int(cik10))
     acc_nd = accession.replace("-", "")
-    debug = f"acc={accession} primary_doc={primary_doc}\n"
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
+    debug = f"acc={accession} primary_doc={primary_doc}\nbase={base}\n"
 
-    # Build candidate URLs (try multiple domains and patterns)
-    candidates = []
-
-    # Pattern 1: _htm.xml derived from primaryDocument (most reliable for recent filings)
+    # Build file candidates from primaryDocument
+    file_candidates = []
     if primary_doc:
         stem = primary_doc
         for ext in [".htm", ".html"]:
             if stem.lower().endswith(ext):
                 stem = stem[:-len(ext)]
                 break
-        htm_xml_name = stem + "_htm.xml"
-        for domain in ["www.sec.gov", "data.sec.gov"]:
-            candidates.append(
-                (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/{htm_xml_name}",
-                 f"{domain} _htm.xml")
-            )
+        file_candidates.append((stem + "_htm.xml", "_htm.xml"))
+        file_candidates.append((primary_doc, "primaryDoc(iXBRL)"))
 
-    # Pattern 2: Try common XBRL instance naming with accession
-    for domain in ["www.sec.gov", "data.sec.gov"]:
-        # Some filings use {acc}-xbrl.zip or just the primaryDocument directly
-        if primary_doc:
-            candidates.append(
-                (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/{primary_doc}",
-                 f"{domain} primaryDoc (HTML/iXBRL)")
-            )
-
-    # Pattern 3: Try directory index.json (works for some filings)
-    for domain in ["www.sec.gov", "data.sec.gov"]:
-        candidates.append(
-            (f"https://{domain}/Archives/edgar/data/{cik_int}/{acc_nd}/index.json",
-             f"{domain} index.json")
-        )
-
-    # --- Try each candidate ---
-    for url, label in candidates:
+    # Try direct file URLs (use SEC_HEADERS_GENERIC to avoid wrong Host header)
+    for fname, label in file_candidates:
+        url = base + fname
         try:
             time.sleep(0.12)
-            r = requests.get(url, headers=SEC_HEADERS, timeout=60)
-            if r.status_code == 200:
-                debug += f"✓ {label}: {r.status_code} ({len(r.text)} chars)\n"
-
-                # If it's index.json, parse it to find _htm.xml
-                if url.endswith("index.json"):
-                    try:
-                        idx_json = r.json()
-                        items = idx_json.get("directory", {}).get("item", [])
-                        file_list = [item.get("name", "") for item in items if isinstance(item, dict)]
-                        htm_files = [f for f in file_list if f.endswith("_htm.xml")]
-                        if htm_files:
-                            base_url = url.replace("index.json", "")
-                            target_url = base_url + htm_files[0]
-                            time.sleep(0.12)
-                            r2 = requests.get(target_url, headers=SEC_HEADERS, timeout=90)
-                            if r2.status_code == 200:
-                                debug += f"✓ Downloaded {htm_files[0]}: {len(r2.text)} chars\n"
-                                return r2.text, debug
-                    except Exception:
-                        pass
-                    continue
-
-                # If it's an HTML file (iXBRL), return it directly for parsing
-                content = r.text
-                if len(content) > 1000:
-                    # Check if it's XML (XBRL instance) or HTML (iXBRL)
-                    if content.strip()[:100].lower().startswith("<?xml") or "<xbrl" in content[:500].lower():
-                        return content, debug
-                    elif "ix:nonfraction" in content.lower() or "ix:nonnumeric" in content.lower():
-                        # It's inline XBRL (iXBRL) HTML — also usable
-                        debug += f"  → iXBRL HTML detected\n"
-                        return content, debug
-                    else:
-                        debug += f"  → Content doesn't look like XBRL, skipping\n"
-                        continue
+            r = requests.get(url, headers=SEC_HEADERS_GENERIC, timeout=60)
+            if r.status_code == 200 and len(r.text) > 1000:
+                debug += f"✓ {label}: {len(r.text)} chars\n"
+                return r.text, debug
             else:
                 debug += f"✗ {label}: {r.status_code}\n"
         except Exception as e:
             debug += f"✗ {label}: {e}\n"
+
+    # Fallback: try index.json
+    idx_url = base + "index.json"
+    try:
+        time.sleep(0.12)
+        r = requests.get(idx_url, headers=SEC_HEADERS_GENERIC, timeout=30)
+        if r.status_code == 200:
+            items = r.json().get("directory", {}).get("item", [])
+            file_list = [item.get("name", "") for item in items if isinstance(item, dict)]
+            htm_files = [f for f in file_list if f.endswith("_htm.xml")]
+            debug += f"index.json OK: {len(file_list)} files, htm_xml={htm_files[:3]}\n"
+            if htm_files:
+                target_url = base + htm_files[0]
+                time.sleep(0.12)
+                r2 = requests.get(target_url, headers=SEC_HEADERS_GENERIC, timeout=90)
+                if r2.status_code == 200:
+                    debug += f"✓ via index.json: {htm_files[0]} ({len(r2.text)} chars)\n"
+                    return r2.text, debug
+        else:
+            debug += f"✗ index.json: {r.status_code}\n"
+    except Exception as e:
+        debug += f"✗ index.json: {e}\n"
 
     debug += "All candidates failed\n"
     return None, debug
