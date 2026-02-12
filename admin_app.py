@@ -1147,9 +1147,9 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
 
     ax1.legend(all_lines, all_labels, loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False, fontsize=8)
 
-    ax1.text(0.95, 0.03, "OUT-STANDER", transform=ax1.transAxes,
+    ax1.text(0.98, 0.95, "OUT-STANDER", transform=ax1.transAxes,
              fontsize=24, color='#3d3320', fontweight='bold',
-             fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
+             fontname='serif', ha='right', va='top', zorder=0, alpha=0.9)
 
     fig.tight_layout()
     st.pyplot(fig)
@@ -1197,9 +1197,9 @@ def draw_score_overlay(ax, score: int, label: str):
 
 
 def draw_logo_overlay(ax):
-    ax.text(0.95, 0.03, "OUT-STANDER", transform=ax.transAxes,
+    ax.text(0.98, 0.95, "OUT-STANDER", transform=ax.transAxes,
             fontsize=24, color='#3d3320', fontweight='bold',
-            fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
+            fontname='serif', ha='right', va='top', zorder=0, alpha=0.9)
 
 
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
