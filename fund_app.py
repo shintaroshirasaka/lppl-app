@@ -886,7 +886,7 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
 
 
 # =========================
-# CF (annual) - MODIFIED: 2-chart layout
+# CF (annual) - FIXED: Use composite for Capex to handle tag changes across years
 # =========================
 def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
@@ -901,10 +901,12 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta["cfi_tag"] = tag
     tag, df_cff = _pick_best_tag_latest_first_usd(facts_json, cff_tags, min_duration=350)
     meta["cff_tag"] = tag
-    tag, df_capex = _pick_best_tag_latest_first_usd(facts_json, capex_tags, min_duration=350)
-    meta["capex_tag"] = tag
 
-    years = sorted(set(df_cfo["year"].tolist()) | set(df_cfi["year"].tolist()) | set(df_cff["year"].tolist()) | set(df_capex["year"].tolist()))
+    capex_df, capex_meta = _build_composite_by_year_usd(facts_json, capex_tags, min_duration=350)
+    meta["capex_composite"] = capex_meta
+    capex_map = dict(zip(capex_df["year"].astype(int), capex_df["value"].astype(float))) if not capex_df.empty else {}
+
+    years = sorted(set(df_cfo["year"].tolist()) | set(df_cfi["year"].tolist()) | set(df_cff["year"].tolist()) | set(capex_map.keys()))
     years = [int(y) for y in years]
     if not years:
         return pd.DataFrame(), meta
@@ -922,11 +924,11 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         cfo = val_at(df_cfo, y)
         cfi = val_at(df_cfi, y)
         cff = val_at(df_cff, y)
-        capex = val_at(df_capex, y)
+        capex_raw = capex_map.get(y, np.nan)
 
         capex_out = np.nan
-        if np.isfinite(capex):
-            capex_out = capex if capex < 0 else -abs(capex)
+        if np.isfinite(capex_raw):
+            capex_out = capex_raw if capex_raw < 0 else -abs(capex_raw)
 
         fcf = np.nan
         if np.isfinite(cfo) and np.isfinite(capex_out):
