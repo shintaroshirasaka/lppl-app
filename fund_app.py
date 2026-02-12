@@ -2043,8 +2043,8 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     Derived from historical data (3-year averages):
         Revenue CAGR, CFO margin, Capex/Revenue ratio
     """
-    WACC = 0.10
-    TERMINAL_G = 0.025
+    WACC = 0.085
+    TERMINAL_G = 0.035
     PROJECTION_YEARS = 10
     meta = {"wacc": WACC * 100, "terminal_g": TERMINAL_G * 100}
 
@@ -2581,7 +2581,7 @@ def render(authed_email: str):
 
     with tab_dcf:
         st.markdown("### Auto DCF Valuation")
-        st.caption("⚠️ Simplified estimate — WACC 10%, Terminal Growth 2.5%, historical averages projected. Not investment advice.")
+        st.caption("⚠️ Simplified estimate — WACC 8.5%, Terminal Growth 3.5%, historical averages projected. Not investment advice.")
 
         dcf_result, dcf_meta = build_auto_dcf(facts, ticker_symbol=t)
 
