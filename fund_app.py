@@ -11,6 +11,7 @@ from matplotlib.colors import ListedColormap
 import streamlit as st
 import yfinance as yf
 import re
+import time
 
 # =======================================================
 # FONT & STYLE SETUP (Luxury / HNWI Design)
@@ -346,114 +347,272 @@ def _build_composite_by_year_usd(facts_json: dict, tag_priority: list[str], min_
 
 
 # =========================
-# Segment Analysis Helpers
+# Segment Analysis (XBRL Filing-based)
 # =========================
-def _parse_segment_info(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for _, r in df.iterrows():
-        seg = r["segment"]
-        if not seg:
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _get_10k_filings_list(cik10: str, max_filings: int = 8) -> list[dict]:
+    """Get recent 10-K filing metadata from SEC submissions API."""
+    url = f"https://data.sec.gov/submissions/CIK{cik10}.json"
+    try:
+        r = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    recent = data.get("filings", {}).get("recent", {})
+    forms = recent.get("form", [])
+    accessions = recent.get("accessionNumber", [])
+    dates = recent.get("filingDate", [])
+    primary_docs = recent.get("primaryDocument", [])
+    report_dates = recent.get("reportDate", [])
+
+    results = []
+    for i, form in enumerate(forms):
+        if form.upper() in ("10-K", "10-K/A", "20-F", "20-F/A", "40-F"):
+            results.append({
+                "accession": accessions[i] if i < len(accessions) else "",
+                "filing_date": dates[i] if i < len(dates) else "",
+                "report_date": report_dates[i] if i < len(report_dates) else "",
+                "form": form,
+                "primary_doc": primary_docs[i] if i < len(primary_docs) else "",
+            })
+            if len(results) >= max_filings:
+                break
+    return results
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _fetch_xbrl_instance(cik10: str, accession: str) -> str | None:
+    """Download XBRL instance XML for a filing."""
+    cik_int = str(int(cik10))
+    acc_nd = accession.replace("-", "")
+    base = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
+
+    try:
+        r = requests.get(base, headers=SEC_HEADERS, timeout=30)
+        r.raise_for_status()
+        idx = r.text
+    except Exception:
+        return None
+
+    # Find _htm.xml (Inline XBRL converted to standard XBRL)
+    htm_xml = re.findall(r'href="([^"]*_htm\.xml)"', idx)
+    if htm_xml:
+        target = htm_xml[0]
+    else:
+        # Fallback: look for any .xml that looks like an instance
+        all_xml = re.findall(r'href="([^"]+\.xml)"', idx)
+        candidates = [f for f in all_xml if not any(
+            x in f.lower() for x in ['_cal.', '_def.', '_lab.', '_pre.', 'filingsummary', 'r9999']
+        )]
+        if not candidates:
+            return None
+        target = candidates[0]
+
+    url = base + target
+    try:
+        time.sleep(0.15)  # SEC rate limit courtesy
+        r = requests.get(url, headers=SEC_HEADERS, timeout=60)
+        r.raise_for_status()
+        return r.text
+    except Exception:
+        return None
+
+
+def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
+    """Extract dimensioned revenue facts from XBRL instance XML via regex."""
+
+    # --- Step 1: Parse contexts with dimensional segment info ---
+    ctx_re = re.compile(
+        r'<(?:\w+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:\w+:)?context>', re.DOTALL
+    )
+    dim_re = re.compile(
+        r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:\w+:)?explicitMember>'
+    )
+    start_re = re.compile(r'<(?:\w+:)?startDate>(\d{4}-\d{2}-\d{2})</(?:\w+:)?startDate>')
+    end_re = re.compile(r'<(?:\w+:)?endDate>(\d{4}-\d{2}-\d{2})</(?:\w+:)?endDate>')
+    instant_re = re.compile(r'<(?:\w+:)?instant>(\d{4}-\d{2}-\d{2})</(?:\w+:)?instant>')
+
+    contexts = {}
+    for m in ctx_re.finditer(xml_text):
+        cid, body = m.group(1), m.group(2)
+        dims = dim_re.findall(body)
+        if not dims:
             continue
-        
-        dims = []
-        if isinstance(seg, list):
-            dims = seg
-        elif isinstance(seg, dict):
-            dims = [seg]
-        
-        for d in dims:
-            dim_name = d.get("dimension")
-            mem_name = d.get("value")
-            if dim_name and mem_name:
-                rows.append({
-                    "year": r["year"],
-                    "filed": r["filed"],
-                    "val": r["val"],
-                    "dimension": dim_name,
-                    "member": mem_name
-                })
-    
-    if not rows:
-        return pd.DataFrame(columns=["year", "val", "dimension", "member"])
-    
-    out = pd.DataFrame(rows)
-    out = out.sort_values(["year", "dimension", "member", "filed"]).drop_duplicates(subset=["year", "dimension", "member"], keep="last")
-    return out
+
+        s = start_re.search(body)
+        e = end_re.search(body)
+        ins = instant_re.search(body)
+        start_date = s.group(1) if s else None
+        end_date = e.group(1) if e else (ins.group(1) if ins else None)
+
+        dur = 0
+        if start_date and end_date:
+            try:
+                dur = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
+            except Exception:
+                pass
+
+        contexts[cid] = {"dims": dims, "start": start_date, "end": end_date, "dur": dur}
+
+    if not contexts:
+        return []
+
+    # --- Step 2: Find revenue facts referencing dimensional contexts ---
+    revenue_tags = {
+        "revenues", "revenuesfromcontractwithcustomerexcludingassessedtax",
+        "revenuesfromcontractwithcustomerincludingassessedtax",
+        "salesrevenuenet", "salestoexternalcustomers",
+        "netoperatingrevenues", "salesrevenueservicesnet", "salesrevenue",
+        "revenuesnetofinterestexpense",
+        "revenuesfromexternalcustomer", "revenuesfromexternalcustomers",
+        "segmentreportinginformationrevenue",
+    }
+
+    # Match XBRL facts: <ns:Tag contextRef="..." ...>value</ns:Tag>
+    fact_re = re.compile(
+        r'<(?:(\w+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:\w+:)?\2>'
+    )
+
+    results = []
+    for m in fact_re.finditer(xml_text):
+        tag = m.group(2)
+        if tag.lower() not in revenue_tags:
+            continue
+
+        ctx_ref = m.group(4)
+        if ctx_ref not in contexts:
+            continue
+
+        ctx = contexts[ctx_ref]
+        # Only annual periods (> 330 days)
+        if ctx["dur"] < 330:
+            continue
+
+        val_str = m.group(6).strip().replace(",", "")
+        try:
+            val = float(val_str)
+        except ValueError:
+            continue
+
+        if val == 0:
+            continue
+
+        # Only single-dimension contexts (avoid cross-dimensional intersections)
+        if len(ctx["dims"]) > 1:
+            continue
+
+        for dim, member in ctx["dims"]:
+            end_str = ctx["end"]
+            year = int(end_str[:4]) if end_str else 0
+            results.append({
+                "tag": tag,
+                "dimension": dim,
+                "member": member,
+                "end_date": end_str,
+                "year": year,
+                "value": val,
+            })
+
+    return results
 
 
-def build_segment_table(facts_json: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    revenue_tags = [
-        "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerExcludingAssessedTax", 
-        "SalesToExternalCustomers", "RevenuesNetOfInterestExpense", 
-        "SalesRevenueGoodsNet", "SalesRevenueServicesNet", 
-        "SegmentReportingInformationRevenue", "NetOperatingRevenues"
+def _classify_dimension(dim_str: str) -> str:
+    """Classify XBRL dimension axis as Business or Geography."""
+    d = dim_str.lower()
+    geo_kw = [
+        "geographical", "geoaxis", "statementgeographicalaxis", "geographicarea",
+        "entitywideinformation", "reportablegeographical", "country", "region",
     ]
-    
-    all_seg_rows = []
-    
-    for tag in revenue_tags:
-        df = _extract_annual_series_usd(facts_json, tag, include_segments=True, min_duration=350)
-        if df.empty:
+    if any(k in d for k in geo_kw):
+        return "Geography"
+    return "Business"
+
+
+def _clean_xbrl_member(m: str) -> str:
+    """Clean XBRL member name to human-readable form."""
+    if ":" in m:
+        m = m.split(":")[-1]
+    if m.endswith("Member"):
+        m = m[:-6]
+    # CamelCase → spaces
+    m = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', m)
+    m = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', m)
+    return m.strip()
+
+
+def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Build revenue segment tables from individual 10-K XBRL filings."""
+    meta = {}
+
+    filings = _get_10k_filings_list(cik10)
+    meta["filings_found"] = len(filings)
+    if not filings:
+        return pd.DataFrame(), pd.DataFrame(), meta
+
+    all_facts = []
+    fetched = 0
+    for f in filings:
+        xml = _fetch_xbrl_instance(cik10, f["accession"])
+        if xml is None:
             continue
-        parsed = _parse_segment_info(df)
-        if not parsed.empty:
-            parsed["src_tag"] = tag
-            all_seg_rows.append(parsed)
-            
-    if not all_seg_rows:
-        return pd.DataFrame(), pd.DataFrame()
-    
-    merged = pd.concat(all_seg_rows, ignore_index=True)
-    merged = merged.sort_values("val", ascending=False).drop_duplicates(subset=["year", "dimension", "member"], keep="first")
-    
-    def classify_axis(dim_name: str) -> str:
-        d = dim_name.lower()
-        business_keywords = [
-            "businesssegment", "segmentreporting", "productor", "statementbusinesssegmentsaxis", 
-            "statementoperatingactivitiessegmentaxis", "consolidationitems", "segmentdomain", 
-            "operatingsegments", "concentrationrisk"
-        ]
-        geo_keywords = [
-            "geographical", "geoaxis", "statementgeographicalaxis", "entitywideinfo", "reportablegeographical"
-        ]
+        fetched += 1
+        facts = _parse_segment_facts_from_xbrl(xml)
+        all_facts.extend(facts)
+        time.sleep(0.15)  # Rate limit
 
-        if any(x in d for x in business_keywords):
-            return "Business"
-        if any(x in d for x in geo_keywords):
-            return "Geography"
-        return "Other"
+    meta["filings_fetched"] = fetched
+    meta["total_facts"] = len(all_facts)
 
-    merged["axis_type"] = merged["dimension"].apply(classify_axis)
-    
-    def clean_member(m: str) -> str:
-        if ":" in m:
-            m = m.split(":")[-1]
-        if m.endswith("Member"):
-            m = m[:-6]
-        return m
+    if not all_facts:
+        return pd.DataFrame(), pd.DataFrame(), meta
 
-    merged["member_clean"] = merged["member"].apply(clean_member)
-    
-    exclude_keywords = ["total", "elimination", "adjust", "consolidation", "allother", "intersegment"]
-    
-    def is_excluded(m_clean):
-        m_lower = m_clean.lower()
-        if any(ek in m_lower for ek in exclude_keywords):
-            return True
-        return False
+    df = pd.DataFrame(all_facts)
+    df["axis_type"] = df["dimension"].apply(_classify_dimension)
+    df["member_clean"] = df["member"].apply(_clean_xbrl_member)
 
-    merged = merged[~merged["member_clean"].apply(is_excluded)]
+    # Exclude totals / eliminations / corporate
+    exclude_kw = [
+        "total", "elimination", "adjust", "consolidation", "allother",
+        "intersegment", "corporate", "reconciling", "unallocated",
+    ]
+    mask = ~df["member_clean"].str.lower().apply(
+        lambda x: any(k in x.lower() for k in exclude_kw)
+    )
+    df = df[mask]
 
-    def pivot_data(axis_type):
-        subset = merged[merged["axis_type"] == axis_type]
-        if subset.empty:
-            return pd.DataFrame()
-        
-        pivoted = subset.pivot(index="year", columns="member_clean", values="val")
-        pivoted = pivoted.sort_index()
-        return pivoted
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), meta
 
-    return pivot_data("Business"), pivot_data("Geography")
+    # Deduplicate: for each year/axis_type/member, keep largest value
+    df = df.sort_values("value", ascending=False).drop_duplicates(
+        subset=["year", "axis_type", "member_clean"], keep="first"
+    )
+
+    # Convert to M$
+    df["value_m"] = df["value"].apply(_to_musd)
+
+    meta["unique_dimensions"] = df["dimension"].unique().tolist()
+    meta["business_members"] = sorted(df[df["axis_type"] == "Business"]["member_clean"].unique().tolist())
+    meta["geo_members"] = sorted(df[df["axis_type"] == "Geography"]["member_clean"].unique().tolist())
+
+    # Pivot: Business segments
+    biz = df[df["axis_type"] == "Business"]
+    biz_pivot = pd.DataFrame()
+    if not biz.empty:
+        biz_pivot = biz.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
+        biz_pivot = biz_pivot.sort_index()
+
+    # Pivot: Geography segments
+    geo = df[df["axis_type"] == "Geography"]
+    geo_pivot = pd.DataFrame()
+    if not geo.empty:
+        geo_pivot = geo.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
+        geo_pivot = geo_pivot.sort_index()
+
+    return biz_pivot, geo_pivot, meta
 
 
 def plot_stacked_bar(df: pd.DataFrame, title: str):
@@ -461,15 +620,12 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
         st.info(f"{title}: Data not found.")
         return
 
-    df_m = df / 1_000_000.0
-    
     fig, ax = plt.subplots(figsize=(12, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
-    
-    # Use Luxury Colormap instead of default
-    df_m.plot(kind="bar", stacked=True, ax=ax, colormap=LUXURY_CMAP, width=0.7)
-    
+
+    df.plot(kind="bar", stacked=True, ax=ax, colormap=LUXURY_CMAP, width=0.7)
+
     ax.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
     ax.tick_params(colors=TICK_COLOR, axis='x', rotation=0)
     ax.tick_params(colors=TICK_COLOR, axis='y')
@@ -2386,64 +2542,38 @@ def render(authed_email: str):
             st.write(cf_meta)
 
     with tab_seg:
-        st.caption("Revenue Segments")
-        biz_df, geo_df = build_segment_table(facts)
-        
+        st.caption("Revenue Segments (from XBRL filings)")
+        with st.spinner("Fetching & parsing XBRL filings for segment data..."):
+            biz_df, geo_df, seg_meta = build_segment_table(cik10)
+
         col1, col2 = st.columns(2)
         with col1:
             if not biz_df.empty:
                 biz_disp = biz_df[biz_df.index >= int(biz_df.index.max()) - n_years + 1]
-                plot_stacked_bar(biz_disp, f"Revenue by Business")
+                plot_stacked_bar(biz_disp, "Revenue by Business")
                 st.dataframe(biz_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
                 st.info("No Business Segment info found.")
-        
+
         with col2:
             if not geo_df.empty:
                 geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
-                plot_stacked_bar(geo_disp, f"Revenue by Geography")
+                plot_stacked_bar(geo_disp, "Revenue by Geography")
                 st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
             else:
                 st.info("No Geography Segment info found.")
 
-        # Debug: raw segment data inspection
+        # Debug info
         with st.expander("🔍 Segment Debug Info"):
-            rev_tags_dbg = [
-                "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
-                "SalesRevenueNet", "SalesToExternalCustomers",
-            ]
-            found_any = False
-            for tag in rev_tags_dbg:
-                df_dbg = _extract_annual_series_usd(facts, tag, include_segments=True, min_duration=350)
-                if df_dbg.empty:
-                    continue
-                seg_rows = df_dbg[df_dbg["segment"].apply(lambda x: x is not None)]
-                st.write(f"**{tag}**: {len(df_dbg)} total rows, {len(seg_rows)} with segment data")
-                if not seg_rows.empty:
-                    found_any = True
-                    samples = seg_rows.head(5)
-                    for _, sr in samples.iterrows():
-                        st.code(f"year={sr['year']} val={sr['val']}\nsegment={sr['segment']}\ntype={type(sr['segment']).__name__}")
-
-            # Also show raw SEC JSON entries with segment field
-            st.write("---")
-            st.write("**Raw SEC JSON sample (entries with 'segment' key):**")
-            facts_root = facts.get("facts", {})
-            raw_found = False
-            for prefix in ["us-gaap", "srt"]:
-                for tag in rev_tags_dbg:
-                    node = facts_root.get(prefix, {}).get(tag, {}).get("units", {}).get("USD", [])
-                    seg_entries = [x for x in node if "segment" in x and x.get("form", "").upper().startswith("10-K")]
-                    if seg_entries:
-                        raw_found = True
-                        st.write(f"**{prefix}:{tag}** — {len(seg_entries)} entries with segment")
-                        for entry in seg_entries[:3]:
-                            st.json(entry)
-                        break
-                if raw_found:
-                    break
-            if not raw_found:
-                st.warning("No entries with 'segment' key found in raw SEC JSON for revenue tags.")
+            st.write(f"**10-K filings found:** {seg_meta.get('filings_found', 0)}")
+            st.write(f"**XBRL instances fetched:** {seg_meta.get('filings_fetched', 0)}")
+            st.write(f"**Segment revenue facts extracted:** {seg_meta.get('total_facts', 0)}")
+            if "unique_dimensions" in seg_meta:
+                st.write(f"**Dimensions:** {seg_meta['unique_dimensions']}")
+            if "business_members" in seg_meta:
+                st.write(f"**Business segments:** {seg_meta['business_members']}")
+            if "geo_members" in seg_meta:
+                st.write(f"**Geography segments:** {seg_meta['geo_members']}")
 
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
