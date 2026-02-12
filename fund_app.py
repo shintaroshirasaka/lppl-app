@@ -886,7 +886,7 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
 
 
 # =========================
-# CF (annual)
+# CF (annual) - MODIFIED: 2-chart layout
 # =========================
 def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
@@ -932,26 +932,52 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
         if np.isfinite(cfo) and np.isfinite(capex_out):
             fcf = cfo + capex_out
 
-        rows.append([y, _to_musd(cfo), _to_musd(cfi), _to_musd(cff), _to_musd(fcf)])
+        rows.append([y, _to_musd(cfo), _to_musd(cfi), _to_musd(cff), _to_musd(capex_out), _to_musd(fcf)])
 
-    out = pd.DataFrame(rows, columns=["FY", "CFO(M$)", "CFI(M$)", "CFF(M$)", "FCF(M$)"])
+    out = pd.DataFrame(rows, columns=["FY", "CFO(M$)", "CFI(M$)", "CFF(M$)", "Capex(M$)", "FCF(M$)"])
     meta["years"] = years
     return out, meta
 
 
-def plot_cf_annual(table: pd.DataFrame, title: str):
+def plot_cf_cfo_capex(table: pd.DataFrame, title: str):
+    """Chart 1: CFO (positive) and Capex (negative) trend lines."""
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     cfo = df["CFO(M$)"].astype(float).to_numpy()
-    fcf = df["FCF(M$)"].astype(float).to_numpy()
+    capex = df["Capex(M$)"].astype(float).to_numpy()
 
     fig, ax = plt.subplots(figsize=(12, 5))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
     ax.plot(x, cfo, label="CFO (Operating)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
-    ax.plot(x, fcf, label="FCF (Free)", color=C_SILVER, linewidth=2.5, marker="o", markersize=6)
+    ax.plot(x, capex, label="Capex (Negative)", color=C_BLUE, linewidth=2.5, marker="o", markersize=6)
 
+    ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
+    ax.set_ylabel("Million USD", color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+    st.pyplot(fig)
+
+
+def plot_cf_fcf(table: pd.DataFrame, title: str):
+    """Chart 2: FCF trend with zero line."""
+    df = table.copy()
+    x = df["FY"].astype(str).tolist()
+    fcf = df["FCF(M$)"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    ax.plot(x, fcf, label="FCF (Free Cash Flow)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+
+    # Fill positive/negative regions
+    fcf_series = pd.Series(fcf, index=range(len(fcf)))
+    x_idx = np.arange(len(x))
+    ax.fill_between(x_idx, fcf, 0, where=(fcf >= 0), color=C_GOLD, alpha=0.10, interpolate=True)
+    ax.fill_between(x_idx, fcf, 0, where=(fcf < 0), color=C_BRONZE, alpha=0.15, interpolate=True)
+
+    ax.axhline(y=0, color=C_SILVER, linewidth=1.0, linestyle="-", alpha=0.7)
     ax.set_ylabel("Million USD", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
@@ -1439,10 +1465,13 @@ def render(authed_email: str):
             st.stop()
         cf_disp = _slice_latest_n_years(cf_table, int(n_years))
         st.caption(f"Showing {len(cf_disp)} years")
-        plot_cf_annual(cf_disp, f"Cash Flow Statement")
+        st.markdown("### CFO & Capex Trend")
+        plot_cf_cfo_capex(cf_disp, f"CFO and Capex (Negative)")
+        st.markdown("### Free Cash Flow Trend")
+        plot_cf_fcf(cf_disp, f"FCF with Zero Line")
         st.markdown("### Annual CF (Million USD)")
         st.dataframe(
-            cf_disp.style.format({"CFO(M$)": "{:,.0f}", "CFI(M$)": "{:,.0f}", "CFF(M$)": "{:,.0f}", "FCF(M$)": "{:,.0f}"}),
+            cf_disp.style.format({"CFO(M$)": "{:,.0f}", "CFI(M$)": "{:,.0f}", "CFF(M$)": "{:,.0f}", "Capex(M$)": "{:,.0f}", "FCF(M$)": "{:,.0f}"}),
             use_container_width=True,
             hide_index=True,
         )
