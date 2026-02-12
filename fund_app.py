@@ -453,37 +453,41 @@ def _diagnose_xbrl(xml_text: str) -> dict:
     info["has_ix_nonfraction"] = "ix:nonFraction" in xml_text or "ix:nonfraction" in xml_text
 
     # Count contexts (all, not just dimensional)
-    ctx_all = re.findall(r'<(?:\w+:)?context\s+id="([^"]+)"', xml_text)
+    ctx_all = re.findall(r'<(?:[\w-]+:)?context\s+id="([^"]+)"', xml_text)
     info["total_contexts"] = len(ctx_all)
     info["sample_ctx_ids"] = ctx_all[:5]
 
     # Count dimensional contexts
-    dim_ctx = re.findall(r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"', xml_text)
+    dim_ctx = re.findall(r'<(?:[\w-]+:)?explicitMember\s+dimension="([^"]+)"', xml_text)
     info["dimensional_contexts"] = len(dim_ctx)
     info["unique_dimensions"] = list(set(dim_ctx))[:10]
 
-    # Find revenue-related tags
-    rev_patterns = [
-        r'<(?:\w+:)?(Revenues?)\s',
-        r'<(?:\w+:)?(RevenueFromContractWithCustomerExcludingAssessedTax)\s',
-        r'<(?:\w+:)?(SalesRevenueNet)\s',
-        r'name="[^"]*:(Revenues?)"',
-        r'name="[^"]*:(RevenueFromContractWithCustomerExcludingAssessedTax)"',
-    ]
-    found_tags = {}
-    for pat in rev_patterns:
-        matches = re.findall(pat, xml_text)
-        if matches:
-            found_tags[matches[0]] = len(matches)
-    info["revenue_tags_found"] = found_tags
+    # Find revenue-related tags (broad search)
+    # First: case-insensitive search for ANY occurrence of "revenue" near a tag
+    rev_raw = re.findall(r'[<"\s](\w*[Rr]evenue\w*)', xml_text[:500000])
+    rev_unique = list(set(rev_raw))[:20]
+    info["revenue_strings_in_xml"] = rev_unique
+
+    # Look for tags containing "Revenue" with contextRef (handle hyphenated namespaces)
+    rev_ctx = re.findall(r'<([\w-]+:\w*[Rr]evenue\w*)\s[^>]*contextRef', xml_text[:500000])
+    info["revenue_tags_with_contextref"] = list(set(rev_ctx))[:10]
+
+    # Show first 300 chars around first "Revenue" occurrence
+    idx = xml_text.lower().find("revenue")
+    if idx >= 0:
+        start = max(0, idx - 50)
+        end = min(len(xml_text), idx + 250)
+        info["revenue_context_snippet"] = xml_text[start:end]
+    else:
+        info["revenue_context_snippet"] = "NO 'revenue' found in XML"
 
     # Sample: find any fact with contextRef in a dimensional context
     # First get dimensional context IDs
     ctx_re = re.compile(
-        r'<(?:\w+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:\w+:)?context>', re.DOTALL
+        r'<(?:[\w-]+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:[\w-]+:)?context>', re.DOTALL
     )
     dim_re = re.compile(
-        r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:\w+:)?explicitMember>'
+        r'<(?:[\w-]+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:[\w-]+:)?explicitMember>'
     )
     dim_ctx_ids = set()
     dim_ctx_samples = []
@@ -501,7 +505,7 @@ def _diagnose_xbrl(xml_text: str) -> dict:
     rev_kw = ["revenue", "sales"]
     rev_with_dim = []
     fact_re = re.compile(
-        r'<(?:(\w+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:\w+:)?\2>'
+        r'<(?:([\w-]+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:[\w-]+:)?\2>'
     )
     for m in fact_re.finditer(xml_text):
         tag = m.group(2)
@@ -520,6 +524,14 @@ def _diagnose_xbrl(xml_text: str) -> dict:
             ix_rev.append({"name": name, "ctx": ctx, "val": val.strip()[:30]})
     info["ix_revenue_in_dim_ctx"] = ix_rev
 
+    # Broader: find ANY tags in dimensional contexts (sample 5)
+    any_dim_facts = []
+    for m in fact_re.finditer(xml_text):
+        ctx_ref = m.group(4)
+        if ctx_ref in dim_ctx_ids and len(any_dim_facts) < 5:
+            any_dim_facts.append({"tag": m.group(2), "ctx": ctx_ref, "val": m.group(6).strip()[:20]})
+    info["any_facts_in_dim_ctx"] = any_dim_facts
+
     return info
 
 
@@ -528,14 +540,14 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
 
     # --- Step 1: Parse contexts with dimensional segment info ---
     ctx_re = re.compile(
-        r'<(?:\w+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:\w+:)?context>', re.DOTALL
+        r'<(?:[\w-]+:)?context\s+id="([^"]+)"[^>]*>(.*?)</(?:[\w-]+:)?context>', re.DOTALL
     )
     dim_re = re.compile(
-        r'<(?:\w+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:\w+:)?explicitMember>'
+        r'<(?:[\w-]+:)?explicitMember\s+dimension="([^"]+)"[^>]*>([^<]+)</(?:[\w-]+:)?explicitMember>'
     )
-    start_re = re.compile(r'<(?:\w+:)?startDate>(\d{4}-\d{2}-\d{2})</(?:\w+:)?startDate>')
-    end_re = re.compile(r'<(?:\w+:)?endDate>(\d{4}-\d{2}-\d{2})</(?:\w+:)?endDate>')
-    instant_re = re.compile(r'<(?:\w+:)?instant>(\d{4}-\d{2}-\d{2})</(?:\w+:)?instant>')
+    start_re = re.compile(r'<(?:[\w-]+:)?startDate>(\d{4}-\d{2}-\d{2})</(?:[\w-]+:)?startDate>')
+    end_re = re.compile(r'<(?:[\w-]+:)?endDate>(\d{4}-\d{2}-\d{2})</(?:[\w-]+:)?endDate>')
+    instant_re = re.compile(r'<(?:[\w-]+:)?instant>(\d{4}-\d{2}-\d{2})</(?:[\w-]+:)?instant>')
 
     contexts = {}
     for m in ctx_re.finditer(xml_text):
@@ -577,8 +589,9 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
 
     # --- Pattern A: Standard XBRL ---
     # <ns:Tag contextRef="..." ...>value</ns:Tag>
+    # NOTE: namespace prefix can contain hyphens (e.g. us-gaap:), so use [\w-]+ not \w+
     fact_re = re.compile(
-        r'<(?:(\w+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:\w+:)?\2>'
+        r'<(?:([\w-]+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:[\w-]+:)?\2>'
     )
     for m in fact_re.finditer(xml_text):
         tag = m.group(2)
@@ -2732,9 +2745,14 @@ def render(authed_email: str):
                 st.write(f"- Total contexts: {diag.get('total_contexts', 0)}")
                 st.write(f"- Dimensional contexts: {diag.get('dim_ctx_count', 0)}")
                 st.write(f"- Unique dimensions: {diag.get('unique_dimensions', [])}")
-                st.write(f"- Revenue tags found: {diag.get('revenue_tags_found', {})}")
+                st.write(f"- Revenue strings in XML: {diag.get('revenue_strings_in_xml', [])}")
+                st.write(f"- Revenue tags with contextRef: {diag.get('revenue_tags_with_contextref', [])}")
+                snippet = diag.get("revenue_context_snippet", "")
+                if snippet:
+                    st.code(snippet, language=None)
                 st.write(f"- Revenue facts in dim ctx (XBRL): {diag.get('revenue_facts_in_dim_ctx', [])}")
                 st.write(f"- Revenue facts in dim ctx (iXBRL): {diag.get('ix_revenue_in_dim_ctx', [])}")
+                st.write(f"- ANY facts in dim ctx (sample): {diag.get('any_facts_in_dim_ctx', [])}")
                 if diag.get("dim_ctx_samples"):
                     st.write("- Dim context samples:")
                     for s in diag["dim_ctx_samples"]:
