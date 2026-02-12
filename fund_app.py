@@ -1892,6 +1892,47 @@ def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=N
     st.pyplot(fig)
 
 
+def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenue_col: str, title: str, margin_label: str = "Margin (%)"):
+    """Bar chart (left axis: income) + Line chart (right axis: margin %)."""
+    df = table.copy()
+    x = df["Quarter"].tolist()
+    income = df[income_col].astype(float).to_numpy()
+    revenue = df[revenue_col].astype(float).to_numpy()
+
+    margin = np.full_like(income, np.nan, dtype=float)
+    for i in range(len(income)):
+        if np.isfinite(income[i]) and np.isfinite(revenue[i]) and revenue[i] != 0:
+            margin[i] = income[i] / revenue[i] * 100.0
+
+    fig, ax_left = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax_left, title=title, dual_y=True)
+
+    # Bars: income (left axis)
+    bar_colors = [C_GOLD if v >= 0 else C_BRONZE for v in income]
+    ax_left.bar(x, income, color=bar_colors, alpha=0.85, width=0.6, label=income_col.replace("(M$)", ""))
+    ax_left.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
+    ax_left.set_ylabel("Million USD", color=TEXT_COLOR)
+    ax_left.tick_params(axis='x', rotation=45)
+
+    # Line: margin (right axis)
+    ax_right = ax_left.twinx()
+    ax_right.plot(x, margin, color=C_SILVER, linewidth=2.0, marker="o", markersize=5, label=margin_label)
+    ax_right.set_ylabel("%", color=TEXT_COLOR)
+    ax_right.tick_params(colors=TICK_COLOR, which='both')
+    ax_right.spines['top'].set_visible(False)
+    ax_right.spines['left'].set_visible(False)
+    ax_right.spines['right'].set_color(GRID_COLOR)
+    ax_right.spines['bottom'].set_visible(False)
+
+    # Combined legend
+    lines1, labels1 = ax_left.get_legend_handles_labels()
+    lines2, labels2 = ax_right.get_legend_handles_labels()
+    ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+
+    st.pyplot(fig)
+
+
 def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
     df = table.copy()
     x = df["Quarter"].tolist()
@@ -2183,10 +2224,10 @@ def render(authed_email: str):
             plot_quarterly_bars(q_pl, "Revenue(M$)", "Quarterly Revenue")
 
             if q_pl["OpIncome(M$)"].notna().any():
-                plot_quarterly_bars(q_pl, "OpIncome(M$)", "Quarterly Operating Income")
+                plot_quarterly_bars_with_margin(q_pl, "OpIncome(M$)", "Revenue(M$)", "Quarterly Operating Income & Margin", "Op Margin (%)")
 
             if q_pl["PreTaxIncome(M$)"].notna().any():
-                plot_quarterly_bars(q_pl, "PreTaxIncome(M$)", "Quarterly Pre-Tax Income")
+                plot_quarterly_bars_with_margin(q_pl, "PreTaxIncome(M$)", "Revenue(M$)", "Quarterly Pre-Tax Income & Margin", "Pre-Tax Margin (%)")
 
             st.dataframe(
                 q_pl.style.format({
