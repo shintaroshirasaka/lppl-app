@@ -587,10 +587,16 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 
 
 # =======================================================
-# (FIXED) ROBUST SCRAPING FUNCTION: Multi-Source + IRBank + Yahoo
+# (FIXED) ROBUST SCRAPING FUNCTION: IRBank /code/margin
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
+    """
+    Fetches weekly margin balance data for JP stocks.
+    Primary: IRBank /code/margin (東証 weekly 信用取引残高)
+    Fallback: karauri.net /code/ (日証金 daily data - summary level)
+    Returns: DataFrame[Date, MarginBuy, MarginSell, Hibush]
+    """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
         return pd.DataFrame()
@@ -602,208 +608,139 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
         "Referer": "https://www.google.com/"
     }
 
-    def clean_num(x):
-        if isinstance(x, str):
-            x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
-            if not x: return 0
-            try: return float(x)
-            except: return 0
-        return x
-
-    def parse_date_col(df, col_name="Date"):
-        dates = pd.to_datetime(df[col_name], errors='coerce')
-        if dates.isna().any():
-            today = date.today()
-            current_year = today.year
-            def try_parse(x):
-                if pd.isna(x) or str(x).strip() == "": return pd.NaT
-                x_clean = str(x).split(' ')[0]
-                x_clean = x_clean.replace("年", "/").replace("月", "/").replace("日", "")
-                try: return pd.to_datetime(x_clean)
-                except: pass
-                try:
-                    dt = pd.to_datetime(f"{current_year}/{x_clean}")
-                    if dt.date() > today + timedelta(days=2):
-                        dt = dt.replace(year=current_year - 1)
-                    return dt
-                except: return pd.NaT
-            dates = df[col_name].apply(try_parse)
-        return dates
-
-    def _scrape_irbank():
-        urls = [f"https://irbank.net/{code}/fee", f"https://irbank.net/{code}/karauri"]
-        for url in urls:
+    def _scrape_irbank_margin():
+        """
+        IRBank /code/margin table structure:
+        | 日付 | 買い残高 ... | 売り残高 ... | 倍率 | 逆日歩 |
+        Date is MM/DD with year separator rows like "2026"
+        Values contain appended +/- changes like "8,446,200 +1,331,000"
+        """
+        url = f"https://irbank.net/{code}/margin"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return pd.DataFrame()
             try:
-                res = requests.get(url, headers=headers, timeout=5)
-                if res.status_code != 200: continue
-                try: dfs = pd.read_html(io.BytesIO(res.content))
-                except: continue
-                target = pd.DataFrame()
-                for df in dfs:
-                    col_str = " ".join([str(c) for c in df.columns])
-                    if "日付" in col_str and ("逆日歩" in col_str or "融資" in col_str or "貸株" in col_str or "残" in col_str):
-                        target = df
-                        if isinstance(target.columns, pd.MultiIndex):
-                            target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
-                        else:
-                            target.columns = [str(c).strip() for c in target.columns]
-                        break
-                if target.empty: continue
-                rename_map = {}
-                for c in target.columns:
-                    if "日付" in c: rename_map[c] = "Date"
-                    elif "逆日歩" in c: rename_map[c] = "Hibush"
-                    elif "融資" in c and "残" in c: rename_map[c] = "MarginBuy"
-                    elif "貸株" in c and "残" in c: rename_map[c] = "MarginSell"
-                    elif "売残" in c and "信用" not in c: rename_map[c] = "MarginSell"
-                    elif "買残" in c and "信用" not in c: rename_map[c] = "MarginBuy"
-                target = target.rename(columns=rename_map)
-                if "Date" not in target.columns: continue
-                target["Date"] = parse_date_col(target, "Date")
-                for col in ["MarginBuy", "MarginSell", "Hibush"]:
-                    if col in target.columns: target[col] = target[col].apply(clean_num)
-                df_clean = target.dropna(subset=["Date"]).sort_values("Date")
-                if not df_clean.empty and ("MarginBuy" in df_clean.columns or "MarginSell" in df_clean.columns):
-                    return df_clean
-            except: continue
+                dfs = pd.read_html(io.BytesIO(res.content))
+            except Exception:
+                return pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                if ("日付" in col_str or "Date" in col_str.lower()) and ("買い残" in col_str or "売り残" in col_str or "残高" in col_str):
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
+                    else:
+                        df.columns = [str(c).strip() for c in df.columns]
+                    rename_map = {}
+                    for c in df.columns:
+                        if "日付" in c or c.lower() == "date":
+                            rename_map[c] = "Date"
+                        elif "買い残" in c and "制度" not in c and "一般" not in c:
+                            rename_map[c] = "MarginBuy"
+                        elif "売り残" in c and "制度" not in c and "一般" not in c:
+                            rename_map[c] = "MarginSell"
+                        elif "逆日歩" in c:
+                            rename_map[c] = "Hibush"
+                        elif "倍率" in c:
+                            rename_map[c] = "Ratio"
+                    df = df.rename(columns=rename_map)
+                    if "Date" not in df.columns:
+                        continue
+                    if "MarginBuy" not in df.columns and "MarginSell" not in df.columns:
+                        continue
+                    current_year = date.today().year
+                    rows = []
+                    for _, row in df.iterrows():
+                        d = str(row.get("Date", "")).strip()
+                        if not d or d in ["株", "倍", "円", ""]:
+                            continue
+                        if d.isdigit() and len(d) == 4:
+                            current_year = int(d)
+                            continue
+                        if d.lower() == "more" or "more" in d.lower():
+                            continue
+                        try:
+                            if "/" in d:
+                                parts = d.split("/")
+                                month, day = int(parts[0]), int(parts[1])
+                                parsed_date = pd.Timestamp(year=current_year, month=month, day=day)
+                            else:
+                                parsed_date = pd.to_datetime(d, errors="coerce")
+                                if pd.isna(parsed_date):
+                                    continue
+                        except Exception:
+                            continue
+                        def extract_first_num(val):
+                            if pd.isna(val):
+                                return 0
+                            s = str(val).strip()
+                            parts = s.split()
+                            if parts:
+                                return _clean_num_global(parts[0])
+                            return _clean_num_global(s)
+                        buy = extract_first_num(row.get("MarginBuy", 0))
+                        sell = extract_first_num(row.get("MarginSell", 0))
+                        hibu = extract_first_num(row.get("Hibush", 0))
+                        rows.append({"Date": parsed_date, "MarginBuy": buy, "MarginSell": sell, "Hibush": hibu})
+                    if rows:
+                        result = pd.DataFrame(rows).sort_values("Date")
+                        result = result[(result["MarginBuy"] > 0) | (result["MarginSell"] > 0)]
+                        if not result.empty:
+                            return result.reset_index(drop=True)
+        except Exception:
+            pass
         return pd.DataFrame()
 
-    def _scrape_minkabu():
-        url = f"https://minkabu.jp/stock/{code}/margin"
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code != 200: return pd.DataFrame()
-            try: dfs = pd.read_html(io.BytesIO(res.content))
-            except: return pd.DataFrame()
-            target = pd.DataFrame()
-            for df in dfs:
-                col_str = " ".join([str(c) for c in df.columns])
-                if "日付" in col_str and ("融資" in col_str or "貸株" in col_str or "残" in col_str):
-                    target = df
-                    if isinstance(target.columns, pd.MultiIndex):
-                        target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
-                    else:
-                        target.columns = [str(c).strip() for c in target.columns]
-                    if "逆日歩" in col_str or "品貸料" in col_str: break
-            if target.empty: return pd.DataFrame()
-            rename_map = {}
-            for c in target.columns:
-                if "日付" in c: rename_map[c] = "Date"
-                elif "逆日歩" in c or "品貸料" in c: rename_map[c] = "Hibush"
-                elif ("融資" in c and "残" in c) or ("買残" in c) or ("買い" in c and "残" in c):
-                    if "増減" not in c and "回転" not in c: rename_map[c] = "MarginBuy"
-                elif ("貸株" in c and "残" in c) or ("売残" in c) or ("売り" in c and "残" in c):
-                    if "増減" not in c and "回転" not in c: rename_map[c] = "MarginSell"
-            target = target.rename(columns=rename_map)
-            if "Date" not in target.columns: return pd.DataFrame()
-            target["Date"] = parse_date_col(target, "Date")
-            for col in ["MarginBuy", "MarginSell", "Hibush"]:
-                if col in target.columns: target[col] = target[col].apply(clean_num)
-            return target.dropna(subset=["Date"]).sort_values("Date")
-        except: return pd.DataFrame()
-
-    def _scrape_karauri():
+    def _scrape_karauri_margin():
+        """
+        karauri.net /code/ has 日証金 section with daily margin data.
+        Structure is definition list, not a table - we parse the summary values.
+        Also has 東証 weekly data and 逆日歩 section.
+        """
         url = f"https://karauri.net/{code}/"
         try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code != 200: return pd.DataFrame()
-            try: dfs = pd.read_html(io.BytesIO(res.content))
-            except: return pd.DataFrame()
-            target = pd.DataFrame()
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return pd.DataFrame()
+            try:
+                dfs = pd.read_html(io.BytesIO(res.content))
+            except Exception:
+                return pd.DataFrame()
             for df in dfs:
                 col_str = " ".join([str(c) for c in df.columns])
-                if "日付" in col_str and ("売残" in col_str or "貸株" in col_str):
-                    target = df
-                    if isinstance(target.columns, pd.MultiIndex):
-                        target.columns = ['_'.join(map(str, c)).strip() for c in target.columns]
+                if "計算日" in col_str and ("残高割合" in col_str or "残高数量" in col_str):
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
                     else:
-                        target.columns = [str(c).strip() for c in target.columns]
-                    if "逆日歩" in col_str: break
-            if target.empty: return pd.DataFrame()
-            rename_map = {}
-            for c in target.columns:
-                if "日付" in c: rename_map[c] = "Date"
-                elif "逆日歩" in c: rename_map[c] = "Hibush"
-                elif ("融資" in c and "残" in c) or ("買残" in c):
-                    if "増減" not in c: rename_map[c] = "MarginBuy"
-                elif ("貸株" in c and "残" in c) or ("売残" in c):
-                    if "増減" not in c: rename_map[c] = "MarginSell"
-            target = target.rename(columns=rename_map)
-            if "Date" not in target.columns: return pd.DataFrame()
-            target["Date"] = parse_date_col(target, "Date")
-            for col in ["MarginBuy", "MarginSell", "Hibush"]:
-                if col in target.columns: target[col] = target[col].apply(clean_num)
-            return target.dropna(subset=["Date"]).sort_values("Date")
-        except: return pd.DataFrame()
+                        df.columns = [str(c).strip() for c in df.columns]
+                    rename_map = {}
+                    for c in df.columns:
+                        if "計算日" in c:
+                            rename_map[c] = "Date"
+                        elif "残高数量" in c:
+                            rename_map[c] = "MarginSell"
+                    df = df.rename(columns=rename_map)
+                    if "Date" not in df.columns:
+                        continue
+                    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+                    if "MarginSell" in df.columns:
+                        df["MarginSell"] = df["MarginSell"].apply(_clean_num_global)
+                    df["MarginBuy"] = 0
+                    df["Hibush"] = 0
+                    df = df.dropna(subset=["Date"]).sort_values("Date")
+                    if not df.empty:
+                        return df[["Date", "MarginBuy", "MarginSell", "Hibush"]].reset_index(drop=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
 
-    def _scrape_yahoo():
-        url = f"https://finance.yahoo.co.jp/quote/{code}.T/margin"
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code != 200: return pd.DataFrame()
-            try: dfs = pd.read_html(io.BytesIO(res.content))
-            except: return pd.DataFrame()
-            target = pd.DataFrame()
-            for df in dfs:
-                col_str = " ".join([str(c) for c in df.columns])
-                if "日付" in col_str and "売り残" in col_str and "買い残" in col_str:
-                    target = df
-                    target.columns = [str(c).strip() for c in target.columns]
-                    break
-            if target.empty: return pd.DataFrame()
-            rename_map = {}
-            for c in target.columns:
-                if "日付" in c: rename_map[c] = "Date"
-                elif "売り残" in c and "増減" not in c: rename_map[c] = "MarginSell"
-                elif "買い残" in c and "増減" not in c: rename_map[c] = "MarginBuy"
-            target = target.rename(columns=rename_map)
-            if "Date" not in target.columns: return pd.DataFrame()
-            target["Date"] = parse_date_col(target, "Date")
-            for col in ["MarginBuy", "MarginSell"]:
-                if col in target.columns: target[col] = target[col].apply(clean_num)
-            target["Hibush"] = 0
-            return target.dropna(subset=["Date"]).sort_values("Date")
-        except: return pd.DataFrame()
-
-    def _scrape_kabutan():
-        url = f"https://kabutan.jp/stock/finance?code={code}&mode=m"
-        try:
-            res = requests.get(url, headers=headers, timeout=5)
-            if res.status_code != 200: return pd.DataFrame()
-            try: dfs = pd.read_html(io.BytesIO(res.content))
-            except: return pd.DataFrame()
-            target = pd.DataFrame()
-            for df in dfs:
-                col_str = " ".join([str(c) for c in df.columns])
-                if "日付" in col_str and "売残" in col_str and "買残" in col_str:
-                    target = df
-                    target.columns = [str(c).strip() for c in target.columns]
-                    break
-            if target.empty: return pd.DataFrame()
-            rename_map = {}
-            for c in target.columns:
-                if "日付" in c: rename_map[c] = "Date"
-                elif "売残" in c and "増減" not in c: rename_map[c] = "MarginSell"
-                elif "買残" in c and "増減" not in c: rename_map[c] = "MarginBuy"
-            target = target.rename(columns=rename_map)
-            if "Date" not in target.columns: return pd.DataFrame()
-            target["Date"] = parse_date_col(target, "Date")
-            for col in ["MarginBuy", "MarginSell"]:
-                if col in target.columns: target[col] = target[col].apply(clean_num)
-            target["Hibush"] = 0
-            return target.dropna(subset=["Date"]).sort_values("Date")
-        except: return pd.DataFrame()
-
-    df = _scrape_irbank()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    df = _scrape_minkabu()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    df = _scrape_karauri()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    df = _scrape_yahoo()
-    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    df = _scrape_kabutan()
-    return df
+    df = _scrape_irbank_margin()
+    if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns):
+        return df
+    df = _scrape_karauri_margin()
+    if not df.empty:
+        return df
+    return pd.DataFrame()
 
 
 # =======================================================
@@ -879,170 +816,31 @@ def fetch_us_short_volume(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
 
 
 # =======================================================
-# NEW: JP Short Selling Ratio Scraper (karauri.net daily data)
+# NEW: JP Short Selling Ratio (from IRBank margin data)
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_short_selling_ratio(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
     """
-    Scrapes daily short selling ratio data for JP stocks.
-    Source: karauri.net (空売り比率ページ)
-    Returns: DataFrame[Date, ShortVolume, TotalVolume, NonShortVolume, ShortRatio]
+    For JP stocks, there is no FINRA-equivalent daily short volume per stock.
+    Instead, we compute a 'Margin Sell Ratio' from 東証 weekly margin balance data.
+    ShortRatio = MarginSell / (MarginSell + MarginBuy) * 100
+    Source: IRBank /code/margin
+    Returns: DataFrame[Date, ShortVolume(=MarginSell), TotalVolume(=total), NonShortVolume(=MarginBuy), ShortRatio]
     """
-    code = ticker.replace(".T", "").strip()
-    if not code.isdigit():
+    margin_df = fetch_jp_margin_data_robust(ticker)
+    if margin_df.empty:
         return pd.DataFrame()
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
-        "Referer": "https://www.google.com/"
-    }
-
-    def _try_karauri_ratio():
-        url = f"https://karauri.net/{code}/"
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code != 200:
-                return pd.DataFrame()
-            try:
-                dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception:
-                return pd.DataFrame()
-            for df in dfs:
-                col_str = " ".join([str(c) for c in df.columns])
-                has_ratio = "空売り" in col_str and ("比率" in col_str or "%" in col_str)
-                has_volume = "出来高" in col_str or "数量" in col_str
-                has_date = "日付" in col_str or "日" in col_str
-                if has_date and (has_ratio or has_volume):
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
-                    else:
-                        df.columns = [str(c).strip() for c in df.columns]
-                    rename_map = {}
-                    for c in df.columns:
-                        if "日付" in c or c == "日":
-                            rename_map[c] = "Date"
-                        elif "空売り" in c and ("比率" in c or "%" in c):
-                            rename_map[c] = "ShortRatio"
-                        elif "空売り" in c and ("数量" in c or "出来高" in c or "残高" in c):
-                            rename_map[c] = "ShortVolume"
-                        elif "出来高" in c and "空売り" not in c:
-                            rename_map[c] = "TotalVolume"
-                        elif "売残" in c:
-                            rename_map[c] = "ShortVolume"
-                        elif "返済" in c:
-                            pass
-                    df = df.rename(columns=rename_map)
-                    if "Date" not in df.columns:
-                        continue
-                    today = date.today()
-                    current_year = today.year
-                    def try_parse_jp(x):
-                        if pd.isna(x) or str(x).strip() == "":
-                            return pd.NaT
-                        x_clean = str(x).split(' ')[0]
-                        x_clean = x_clean.replace("年", "/").replace("月", "/").replace("日", "")
-                        try:
-                            return pd.to_datetime(x_clean)
-                        except Exception:
-                            pass
-                        try:
-                            dt = pd.to_datetime(f"{current_year}/{x_clean}")
-                            if dt.date() > today + timedelta(days=2):
-                                dt = dt.replace(year=current_year - 1)
-                            return dt
-                        except Exception:
-                            return pd.NaT
-                    df["Date"] = df["Date"].apply(try_parse_jp)
-                    for col in ["ShortVolume", "TotalVolume", "ShortRatio"]:
-                        if col in df.columns:
-                            df[col] = df[col].apply(_clean_num_global)
-                    df = df.dropna(subset=["Date"]).sort_values("Date")
-                    if "TotalVolume" in df.columns and "ShortVolume" in df.columns:
-                        df["NonShortVolume"] = (df["TotalVolume"] - df["ShortVolume"]).clip(lower=0)
-                        if "ShortRatio" not in df.columns:
-                            df["ShortRatio"] = np.where(
-                                df["TotalVolume"] > 0,
-                                (df["ShortVolume"] / df["TotalVolume"] * 100).round(2),
-                                0
-                            )
-                    elif "ShortRatio" in df.columns and "ShortVolume" not in df.columns:
-                        df["ShortVolume"] = 0
-                        df["TotalVolume"] = 0
-                        df["NonShortVolume"] = 0
-                    if len(df) > 0:
-                        return df.tail(lookback_days).reset_index(drop=True)
-        except Exception:
-            pass
+    if "MarginBuy" not in margin_df.columns or "MarginSell" not in margin_df.columns:
         return pd.DataFrame()
-
-    def _try_jpx_short_ratio():
-        url = f"https://karauri.net/{code}/ratio/"
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code != 200:
-                return pd.DataFrame()
-            try:
-                dfs = pd.read_html(io.BytesIO(res.content))
-            except Exception:
-                return pd.DataFrame()
-            for df in dfs:
-                col_str = " ".join([str(c) for c in df.columns])
-                if ("日付" in col_str or "日" in col_str) and ("比率" in col_str or "%" in col_str):
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
-                    else:
-                        df.columns = [str(c).strip() for c in df.columns]
-                    rename_map = {}
-                    for c in df.columns:
-                        if "日付" in c or c == "日":
-                            rename_map[c] = "Date"
-                        elif "比率" in c or "%" in c:
-                            rename_map[c] = "ShortRatio"
-                        elif "空売り" in c and ("数量" in c or "出来高" in c):
-                            rename_map[c] = "ShortVolume"
-                        elif "出来高" in c:
-                            rename_map[c] = "TotalVolume"
-                    df = df.rename(columns=rename_map)
-                    if "Date" not in df.columns:
-                        continue
-                    today_dt = date.today()
-                    current_yr = today_dt.year
-                    def try_parse_jp2(x):
-                        if pd.isna(x) or str(x).strip() == "":
-                            return pd.NaT
-                        x_clean = str(x).split(' ')[0].replace("年", "/").replace("月", "/").replace("日", "")
-                        try:
-                            return pd.to_datetime(x_clean)
-                        except Exception:
-                            pass
-                        try:
-                            dt = pd.to_datetime(f"{current_yr}/{x_clean}")
-                            if dt.date() > today_dt + timedelta(days=2):
-                                dt = dt.replace(year=current_yr - 1)
-                            return dt
-                        except Exception:
-                            return pd.NaT
-                    df["Date"] = df["Date"].apply(try_parse_jp2)
-                    for col in ["ShortVolume", "TotalVolume", "ShortRatio"]:
-                        if col in df.columns:
-                            df[col] = df[col].apply(_clean_num_global)
-                    df = df.dropna(subset=["Date"]).sort_values("Date")
-                    if "TotalVolume" in df.columns and "ShortVolume" in df.columns:
-                        df["NonShortVolume"] = (df["TotalVolume"] - df["ShortVolume"]).clip(lower=0)
-                    if len(df) > 0:
-                        return df.tail(lookback_days).reset_index(drop=True)
-        except Exception:
-            pass
-        return pd.DataFrame()
-
-    df = _try_karauri_ratio()
-    if not df.empty and "ShortRatio" in df.columns:
-        return df
-    df = _try_jpx_short_ratio()
-    if not df.empty and "ShortRatio" in df.columns:
-        return df
+    df = margin_df.copy()
+    df["ShortVolume"] = df["MarginSell"]
+    df["NonShortVolume"] = df["MarginBuy"]
+    df["TotalVolume"] = df["MarginSell"] + df["MarginBuy"]
+    df["TotalVolume"] = df["TotalVolume"].replace(0, np.nan)
+    df["ShortRatio"] = (df["ShortVolume"] / df["TotalVolume"] * 100).round(2)
+    df = df.dropna(subset=["ShortRatio"])
+    if len(df) > 0:
+        return df.tail(lookback_days).reset_index(drop=True)
     return pd.DataFrame()
 
 
@@ -1087,10 +885,13 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         if len(nonshort_vals) == 0:
             nonshort_vals = np.zeros(len(short_vals))
 
-        ax1.bar(x_pos, short_vals, width=bar_width, color=SHORT_BAR_COLOR, alpha=0.85, label="Short Volume", zorder=3)
-        ax1.bar(x_pos, nonshort_vals, width=bar_width, bottom=short_vals, color=NONSHORT_BAR_COLOR, alpha=0.5, label="Non-Short Volume", zorder=2)
+        short_label = "Margin Sell (売り残)" if is_jp else "Short Volume"
+        nonshort_label = "Margin Buy (買い残)" if is_jp else "Non-Short Volume"
+        ax1.bar(x_pos, short_vals, width=bar_width, color=SHORT_BAR_COLOR, alpha=0.85, label=short_label, zorder=3)
+        ax1.bar(x_pos, nonshort_vals, width=bar_width, bottom=short_vals, color=NONSHORT_BAR_COLOR, alpha=0.5, label=nonshort_label, zorder=2)
 
-        ax1.set_ylabel("Volume (shares)", color=TEXT_COLOR, fontname='serif')
+        y_label = "Margin Balance (shares)" if is_jp else "Volume (shares)"
+        ax1.set_ylabel(y_label, color=TEXT_COLOR, fontname='serif')
         max_vol = max(short_vals.max() + nonshort_vals.max(), 1)
         if max_vol >= 1_000_000:
             ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x/1_000_000:.1f}M"))
@@ -1112,7 +913,8 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         ax2.set_facecolor(HNWI_AX_BG)
         ratio_vals = df["ShortRatio"].fillna(0).values
 
-        ax2.plot(x_pos, ratio_vals, color=RATIO_LINE_COLOR, linewidth=2.0, marker='o', markersize=4, zorder=10, label="Short Vol Ratio (%)")
+        ratio_line_label = "Sell Ratio (%)" if is_jp else "Short Vol Ratio (%)"
+        ax2.plot(x_pos, ratio_vals, color=RATIO_LINE_COLOR, linewidth=2.0, marker='o', markersize=4, zorder=10, label=ratio_line_label)
 
         for i, (xp, rv) in enumerate(zip(x_pos, ratio_vals)):
             if rv > 0:
@@ -1125,15 +927,16 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         y_min = max(min(ratio_vals) - 10, 0)
         y_max = min(max(ratio_vals) + 15, 100)
         ax2.set_ylim(y_min, y_max)
-        ax2.set_ylabel("Short Volume Ratio (%)", color=RATIO_LINE_COLOR, fontname='serif')
+        ratio_y_label = "Sell Ratio (%)" if is_jp else "Short Volume Ratio (%)"
+        ax2.set_ylabel(ratio_y_label, color=RATIO_LINE_COLOR, fontname='serif')
         ax2.tick_params(axis='y', colors=RATIO_LINE_COLOR)
         ax2.spines['top'].set_visible(False)
         ax2.spines['left'].set_visible(False)
         ax2.spines['right'].set_color('#333333')
         ax2.spines['bottom'].set_color('#333333')
 
-    title_prefix = "JPX" if is_jp else "FINRA"
-    title_text = f"{title_prefix} Short Volume & Ratio: {ticker}"
+    title_prefix = "Margin Sell Ratio (信用売り比率)" if is_jp else "FINRA Short Volume & Ratio"
+    title_text = f"{title_prefix}: {ticker}"
     ax1.set_title(title_text, color=TEXT_COLOR, fontweight='normal', fontname='serif', pad=15)
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -1512,14 +1315,14 @@ def main():
             short_df = fetch_jp_short_selling_ratio(ticker_clean)
         if not short_df.empty and "ShortRatio" in short_df.columns:
             render_short_volume_chart(short_df, ticker_clean, is_jp=True)
-            st.caption("※Source: karauri.net (JPX空売り報告). Scraping-based — may break if site structure changes.")
+            st.caption("※Source: IRBank (東証 週次信用取引残高). 信用売り比率 = 売り残 / (売り残+買い残). FINRA Short Volumeとは異なる指標です。")
             with st.expander("View Short Selling Raw Data"):
                 display_cols = [c for c in ["Date", "ShortVolume", "TotalVolume", "NonShortVolume", "ShortRatio"] if c in short_df.columns]
                 st.dataframe(short_df[display_cols].sort_values("Date", ascending=False), use_container_width=True)
             avg_ratio = short_df["ShortRatio"].mean()
             st.markdown(f"**Avg Short Ratio (period): {avg_ratio:.1f}%**")
         else:
-            st.info("JP short selling ratio data not available from karauri.net for this ticker. Margin balance data is available in the Graphs section below.")
+            st.info("JP margin data not available from IRBank for this ticker. Check if the stock code is correct.")
     else:
         st.info(f"Short volume analysis is currently supported for US stocks (FINRA) and JP stocks (.T). Ticker '{ticker_clean}' is not in a supported market.")
 
