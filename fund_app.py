@@ -384,41 +384,95 @@ def _get_10k_filings_list(cik10: str, max_filings: int = 8) -> list[dict]:
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
-def _fetch_xbrl_instance(cik10: str, accession: str) -> str | None:
-    """Download XBRL instance XML for a filing."""
+def _fetch_xbrl_instance(cik10: str, accession: str) -> tuple[str | None, str]:
+    """Download XBRL instance XML for a filing. Returns (xml_text, debug_msg)."""
     cik_int = str(int(cik10))
     acc_nd = accession.replace("-", "")
     base = f"https://data.sec.gov/Archives/edgar/data/{cik_int}/{acc_nd}/"
+    debug = f"acc={accession}\n"
 
+    # --- Try JSON index first (more reliable) ---
+    index_url = base + "index.json"
+    file_list = []
     try:
-        r = requests.get(base, headers=SEC_HEADERS, timeout=30)
+        time.sleep(0.12)
+        r = requests.get(index_url, headers=SEC_HEADERS, timeout=30)
         r.raise_for_status()
-        idx = r.text
-    except Exception:
-        return None
+        idx_json = r.json()
+        items = idx_json.get("directory", {}).get("item", [])
+        file_list = [item.get("name", "") for item in items if isinstance(item, dict)]
+        debug += f"index.json: {len(file_list)} files\n"
+    except Exception as e:
+        debug += f"index.json failed: {e}\n"
+        # Fallback: HTML directory listing
+        try:
+            r = requests.get(base, headers=SEC_HEADERS, timeout=30)
+            r.raise_for_status()
+            file_list = re.findall(r'href="([^"]+)"', r.text)
+            debug += f"HTML index: {len(file_list)} links\n"
+        except Exception as e2:
+            debug += f"HTML index also failed: {e2}\n"
+            return None, debug
 
-    # Find _htm.xml (Inline XBRL converted to standard XBRL)
-    htm_xml = re.findall(r'href="([^"]*_htm\.xml)"', idx)
+    if not file_list:
+        debug += "No files found in index\n"
+        return None, debug
+
+    # --- Priority order for XBRL instance ---
+    target = None
+
+    # Priority 1: _htm.xml (SEC's IXBRL-to-XBRL conversion)
+    htm_xml = [f for f in file_list if f.endswith("_htm.xml")]
     if htm_xml:
         target = htm_xml[0]
-    else:
-        # Fallback: look for any .xml that looks like an instance
-        all_xml = re.findall(r'href="([^"]+\.xml)"', idx)
-        candidates = [f for f in all_xml if not any(
-            x in f.lower() for x in ['_cal.', '_def.', '_lab.', '_pre.', 'filingsummary', 'r9999']
-        )]
-        if not candidates:
-            return None
-        target = candidates[0]
+        debug += f"Found _htm.xml: {target}\n"
 
+    # Priority 2: FilingSummary.xml to find instance doc name
+    if not target and "FilingSummary.xml" in file_list:
+        try:
+            time.sleep(0.12)
+            fs_r = requests.get(base + "FilingSummary.xml", headers=SEC_HEADERS, timeout=30)
+            fs_r.raise_for_status()
+            inst_match = re.search(r'<InputFiles>.*?<File>(.*?\.xml)</File>', fs_r.text, re.DOTALL)
+            if inst_match:
+                candidate = inst_match.group(1)
+                if candidate in file_list:
+                    target = candidate
+                    debug += f"Found via FilingSummary: {target}\n"
+        except Exception:
+            pass
+
+    # Priority 3: Any .xml that's not a taxonomy file
+    if not target:
+        exclude_suffixes = ['_cal.xml', '_def.xml', '_lab.xml', '_pre.xml']
+        exclude_names = ['filingsummary.xml']
+        xml_files = [
+            f for f in file_list
+            if f.lower().endswith('.xml')
+            and not any(f.lower().endswith(s) for s in exclude_suffixes)
+            and f.lower() not in exclude_names
+            and not re.match(r'^[Rr]\d+', f)
+        ]
+        debug += f"XML candidates: {xml_files[:8]}\n"
+        if xml_files:
+            target = xml_files[0]
+            debug += f"Using first XML candidate: {target}\n"
+
+    if not target:
+        debug += "No suitable XBRL file found\n"
+        return None, debug
+
+    # --- Download ---
     url = base + target
     try:
-        time.sleep(0.15)  # SEC rate limit courtesy
-        r = requests.get(url, headers=SEC_HEADERS, timeout=60)
+        time.sleep(0.12)
+        r = requests.get(url, headers=SEC_HEADERS, timeout=90)
         r.raise_for_status()
-        return r.text
-    except Exception:
-        return None
+        debug += f"OK: {len(r.text)} chars\n"
+        return r.text, debug
+    except Exception as e:
+        debug += f"Download failed: {e}\n"
+        return None, debug
 
 
 def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
@@ -554,17 +608,19 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
 
     all_facts = []
     fetched = 0
+    fetch_debug = []
     for f in filings:
-        xml = _fetch_xbrl_instance(cik10, f["accession"])
+        xml, dbg = _fetch_xbrl_instance(cik10, f["accession"])
+        fetch_debug.append(dbg)
         if xml is None:
             continue
         fetched += 1
         facts = _parse_segment_facts_from_xbrl(xml)
         all_facts.extend(facts)
-        time.sleep(0.15)  # Rate limit
 
     meta["filings_fetched"] = fetched
     meta["total_facts"] = len(all_facts)
+    meta["fetch_debug"] = fetch_debug
 
     if not all_facts:
         return pd.DataFrame(), pd.DataFrame(), meta
@@ -2574,6 +2630,11 @@ def render(authed_email: str):
                 st.write(f"**Business segments:** {seg_meta['business_members']}")
             if "geo_members" in seg_meta:
                 st.write(f"**Geography segments:** {seg_meta['geo_members']}")
+            if "fetch_debug" in seg_meta:
+                st.write("---")
+                st.write("**Fetch log (per filing):**")
+                for i, dbg in enumerate(seg_meta["fetch_debug"]):
+                    st.code(f"[Filing {i+1}]\n{dbg}")
 
     with tab_rpo:
         rpo_table, rpo_meta = build_rpo_annual_table(facts)
