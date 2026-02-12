@@ -1376,7 +1376,11 @@ def build_eps_table(facts_json: dict, ticker_symbol: str = "") -> tuple[pd.DataF
         meta["split_adjusted"] = False
 
     meta["eps_unit"] = best_df["unit_best"].iloc[-1]
-    out = pd.DataFrame({"FY": best_df["year"].astype(int), "EPS": best_df["val_adjusted"].astype(float)})
+    out = pd.DataFrame({
+        "FY": best_df["year"].astype(int),
+        "End": best_df["end"].values,
+        "EPS": best_df["val_adjusted"].astype(float),
+    })
     meta["years"] = out["FY"].tolist()
     return out, meta
 
@@ -1392,6 +1396,109 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
 
     ax.plot(x, eps, label="EPS (Adjusted, Diluted)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
     ax.set_ylabel(unit_label, color=TEXT_COLOR)
+    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
+    st.pyplot(fig)
+
+
+# =========================
+# PER (Price-to-Earnings Ratio) - Split-Adjusted
+# =========================
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _fetch_adj_close_at_dates(ticker_symbol: str, dates: list[str]) -> dict:
+    """Fetch split-adjusted close prices at given dates using yfinance.
+    
+    For each target date, searches a window of +/- 5 business days
+    to handle weekends and holidays.
+    Returns {date_str: price} dict.
+    """
+    if not ticker_symbol or not dates:
+        return {}
+
+    try:
+        tk = yf.Ticker(ticker_symbol.upper())
+        price_map = {}
+
+        all_dates = [pd.to_datetime(d) for d in dates]
+        global_start = min(all_dates) - pd.Timedelta(days=10)
+        global_end = max(all_dates) + pd.Timedelta(days=10)
+
+        hist = tk.history(start=global_start.strftime("%Y-%m-%d"),
+                          end=global_end.strftime("%Y-%m-%d"),
+                          auto_adjust=True)
+
+        if hist.empty:
+            return {}
+
+        hist.index = hist.index.tz_localize(None)
+
+        for d_str in dates:
+            target = pd.to_datetime(d_str)
+            mask = (hist.index >= target - pd.Timedelta(days=7)) & (hist.index <= target + pd.Timedelta(days=7))
+            candidates = hist.loc[mask]
+            if candidates.empty:
+                continue
+            idx = (candidates.index - target).map(abs)
+            closest_idx = idx.argmin()
+            price_map[d_str] = float(candidates["Close"].iloc[closest_idx])
+
+        return price_map
+    except Exception as e:
+        return {}
+
+
+def build_per_table(eps_table: pd.DataFrame, ticker_symbol: str) -> tuple[pd.DataFrame, dict]:
+    """Build PER table from EPS table with End dates."""
+    meta = {}
+
+    if eps_table.empty or "End" not in eps_table.columns:
+        return pd.DataFrame(), meta
+
+    df = eps_table.copy()
+    df["End"] = pd.to_datetime(df["End"])
+    date_strs = [d.strftime("%Y-%m-%d") for d in df["End"]]
+
+    price_map = _fetch_adj_close_at_dates(ticker_symbol, date_strs)
+    meta["prices_fetched"] = len(price_map)
+    meta["prices_requested"] = len(date_strs)
+
+    rows = []
+    for _, r in df.iterrows():
+        fy = int(r["FY"])
+        eps = float(r["EPS"])
+        d_str = r["End"].strftime("%Y-%m-%d")
+        price = price_map.get(d_str, np.nan)
+
+        per = np.nan
+        if np.isfinite(price) and np.isfinite(eps) and eps > 0:
+            per = price / eps
+
+        rows.append([fy, price, eps, per])
+
+    out = pd.DataFrame(rows, columns=["FY", "Price", "EPS", "PER"])
+    meta["years_with_per"] = int(out["PER"].dropna().shape[0])
+    return out, meta
+
+
+def plot_per(table: pd.DataFrame, title: str):
+    df = table.dropna(subset=["PER"]).copy()
+    if df.empty:
+        st.info("PER data not available.")
+        return
+
+    x = df["FY"].astype(str).tolist()
+    per = df["PER"].astype(float).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    fig.patch.set_facecolor(HNWI_BG)
+    style_hnwi_ax(ax, title=title)
+
+    ax.plot(x, per, label="PER (Trailing)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
+
+    # Reference lines
+    ax.axhline(y=15, color=C_SILVER, linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.axhline(y=25, color=C_SILVER, linewidth=0.8, linestyle="--", alpha=0.5)
+
+    ax.set_ylabel("x", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
 
@@ -1597,6 +1704,8 @@ def render(authed_email: str):
             eps_disp = _slice_latest_n_years(eps_table, int(n_years))
             unit_label = eps_meta.get("eps_unit", "USD/share")
             st.caption(f"Showing {len(eps_disp)} years")
+
+            st.markdown("### EPS")
             plot_eps(eps_disp, f"EPS (Diluted)", unit_label=unit_label)
 
             eps_vals = eps_disp["EPS"].dropna()
@@ -1614,7 +1723,37 @@ def render(authed_email: str):
                 if np.isfinite(cagr_eps):
                     col_f.metric("CAGR (EPS)", f"{cagr_eps:+.2f}% / yr")
 
-            st.dataframe(eps_disp.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
+            # --- PER ---
+            st.markdown("### PER (Trailing)")
+            per_table, per_meta = build_per_table(eps_disp, ticker_symbol=t)
+            if per_table.empty or per_table["PER"].dropna().empty:
+                st.info("PER data not available (stock price could not be retrieved).")
+            else:
+                per_disp = per_table.dropna(subset=["PER"])
+                plot_per(per_disp, f"PER Trend (FY-End Price / EPS)")
+
+                per_vals = per_disp["PER"].dropna()
+                if len(per_vals) >= 1:
+                    avg_per = per_vals.mean()
+                    med_per = per_vals.median()
+                    latest_per = per_vals.iloc[-1]
+                    col_g, col_h, col_i = st.columns(3)
+                    col_g.metric("Average PER", f"{avg_per:.1f}x")
+                    col_h.metric("Median PER", f"{med_per:.1f}x")
+                    col_i.metric("Latest PER", f"{latest_per:.1f}x")
+
+                st.dataframe(
+                    per_disp[["FY", "Price", "EPS", "PER"]].style.format(
+                        {"Price": "{:,.2f}", "EPS": "{:.2f}", "PER": "{:.1f}"}
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            # --- EPS Data Table ---
+            st.markdown("### EPS Data")
+            eps_display_cols = eps_disp[["FY", "EPS"]].copy()
+            st.dataframe(eps_display_cols.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
 
 
 def main():
