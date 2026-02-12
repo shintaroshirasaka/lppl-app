@@ -21,11 +21,9 @@ import platform
 # =======================================================
 # FONT SETUP (Luxury / Serif Style)
 # =======================================================
-# Changed to Serif fonts for a "High Net Worth" / Editorial look
 plt.rcParams['font.family'] = 'serif'
 plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif', 'Georgia', 'serif']
 plt.rcParams['axes.unicode_minus'] = False
-# Ensure titles and labels also use the luxury font
 plt.rcParams['axes.titlesize'] = 14
 plt.rcParams['axes.labelsize'] = 10
 plt.rcParams['xtick.labelsize'] = 9
@@ -58,7 +56,6 @@ def verify_token(token: str, secret: str) -> tuple[bool, str]:
     except Exception:
         return (False, "")
 
-# ---- REQUIRE TOKEN (no warnings: use st.query_params only) ----
 OS_TOKEN_SECRET = os.environ.get("OS_TOKEN_SECRET_ADMIN", "").strip()
 token = st.query_params.get("t", "")
 
@@ -69,7 +66,6 @@ ok, authed_email = verify_token(token, OS_TOKEN_SECRET)
 if not ok:
     st.stop()
 
-# ---- OPTIONAL ADMIN EMAIL ALLOWLIST ----
 ADMIN_EMAILS = set(
     e.strip().lower()
     for e in os.environ.get("ADMIN_EMAILS", "").split(",")
@@ -83,9 +79,9 @@ if ADMIN_EMAILS:
 # =======================================================
 # Cache settings
 # =======================================================
-PRICE_TTL_SECONDS = 15 * 60         # yfinance cache
-FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
-SCRAPE_TTL_SECONDS = 60 * 60        # scraping cache (1 hour)
+PRICE_TTL_SECONDS = 15 * 60
+FIT_TTL_SECONDS = 24 * 60 * 60
+SCRAPE_TTL_SECONDS = 60 * 60
 
 
 # =======================================================
@@ -122,6 +118,18 @@ def _clamp_p0_into_bounds(p0, lb, ub, eps=1e-6):
     lb = np.asarray(lb, dtype=float)
     ub = np.asarray(ub, dtype=float)
     return np.minimum(np.maximum(p0, lb + eps), ub - eps)
+
+def _clean_num_global(x):
+    """Shared numeric cleaning helper for all scrapers."""
+    if isinstance(x, str):
+        x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
+        if not x:
+            return 0
+        try:
+            return float(x)
+        except Exception:
+            return 0
+    return x
 
 
 # =======================================================
@@ -424,10 +432,7 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
     end_norm = pd.Timestamp(end_date).normalize()
     days_to_tc = int((tc_date - end_norm).days)
     bullets: list[str] = []
-    
-    # 14 days warning rule
     WARNING_DAYS = 14
-    
     if days_to_tc < 0:
         bullets.append(f"t_c has already passed {abs(days_to_tc)} days ago (Potential structural peak).")
         bullets.append("New trend following is risky. Consider partial profit taking or hedging.")
@@ -436,7 +441,6 @@ def admin_interpretation_text(bubble_res: dict, end_date: date) -> tuple[str, li
         bullets.append("Early warning period. Be cautious with new longs (reduce size). Prepare to exit.")
     else:
         bullets.append(f"Days to t_c: {days_to_tc} (Safe Zone).")
-        
     verdict, _ = bubble_judgement(r2, m, omega)
     bullets.append(f"Bubble Verdict (R²->m->ω): {verdict}")
     if np.isfinite(r2) and r2 < 0.65:
@@ -470,115 +474,89 @@ def lppl(t, A, B, C, m, tc, omega, phi):
     return A + B * (dt ** m) + C * (dt ** m) * np.cos(omega * np.log(dt) + phi)
 
 def fit_lppl_bubble(price_series: pd.Series):
-    """Uptrend fit (robust bounds) - FIXED DATE CALCULATION"""
     price = price_series.values.astype(float)
     t = np.arange(len(price), dtype=float)
     log_price = np.log(price)
     N = len(t)
-    
-    # Initial guess
     A_init = float(np.mean(log_price))
     p0 = [A_init, -1.0, 0.1, 0.5, N + 20, 8.0, 0.0]
-    
-    # Bounds
     A_low = float(np.min(log_price) - 2.0)
     A_high = float(np.max(log_price) + 2.0)
     lower_bounds = [A_low, -20, -20, 0.01, N + 1, 2.0, -np.pi]
     upper_bounds = [A_high, 20, 20, 0.99, N + 250, 25.0, np.pi]
-    
     p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
-    
     params, _ = curve_fit(lppl, t, log_price, p0=p0, bounds=(lower_bounds, upper_bounds), maxfev=20000)
-    
     log_fit = lppl(t, *params)
     price_fit = np.exp(log_fit)
-    
     ss_res = float(np.sum((log_price - log_fit) ** 2))
     ss_tot = float(np.sum((log_price - log_price.mean()) ** 2))
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rmse = float(np.sqrt(np.mean((log_price - log_fit) ** 2)))
-    
-    # --- FIX: Correct date conversion ---
     tc_days = float(params[4])
     last_idx = N - 1
     future_units = tc_days - last_idx
     last_date = price_series.index[-1]
     tc_date = last_date + timedelta(days=future_units)
-    
     A, B, C, m, tc, omega, phi = [float(x) for x in params]
     abs_c_over_b = float(abs(C / B)) if abs(B) > 1e-12 else float("inf")
     log_period = float(2.0 * np.pi / omega) if omega != 0 else float("inf")
-    
     bounds_info = {"A_low": A_low, "A_high": A_high, "B_low": -20.0, "B_high": 20.0, "C_low": -20.0, "C_high": 20.0,
                    "m_low": 0.01, "m_high": 0.99, "tc_low": float(N + 1), "tc_high": float(N + 250),
                    "omega_low": 2.0, "omega_high": 25.0, "phi_low": float(-np.pi), "phi_high": float(np.pi)}
-                    
     return {
-        "params": np.asarray(params, dtype=float), 
-        "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period}, 
-        "price_fit": price_fit, 
-        "log_fit": log_fit, 
-        "r2": float(r2), 
-        "rmse": rmse, 
-        "tc_date": tc_date, 
-        "tc_days": tc_days, 
-        "bounds_info": bounds_info, 
+        "params": np.asarray(params, dtype=float),
+        "param_dict": {"A": A, "B": B, "C": C, "m": m, "tc": tc, "omega": omega, "phi": phi, "abs_C_over_B": abs_c_over_b, "log_period_2pi_over_omega": log_period},
+        "price_fit": price_fit,
+        "log_fit": log_fit,
+        "r2": float(r2),
+        "rmse": rmse,
+        "tc_date": tc_date,
+        "tc_days": tc_days,
+        "bounds_info": bounds_info,
         "N": int(N)
     }
 
 def fit_lppl_negative_bubble(price_series: pd.Series, peak_date, min_points: int = 10, min_drop_ratio: float = 0.03):
-    """Downtrend fit (negative bubble) - FIXED DATE CALCULATION"""
     down_series = price_series[price_series.index >= peak_date].copy()
     if len(down_series) < min_points: return {"ok": False}
-    
     peak_price = float(price_series.loc[peak_date])
     last_price = float(down_series.iloc[-1])
     drop_ratio = (peak_price - last_price) / peak_price
     if drop_ratio < min_drop_ratio: return {"ok": False}
-    
     price_down = down_series.values.astype(float)
     t_down = np.arange(len(price_down), dtype=float)
     log_down = np.log(price_down)
     neg_log_down = -log_down
     N_down = len(t_down)
-    
     A_init = float(np.mean(neg_log_down))
     p0 = [A_init, -1.0, 0.1, 0.5, N_down + 15, 8.0, 0.0]
-    
     A_low = float(np.min(neg_log_down) - 2.0)
     A_high = float(np.max(neg_log_down) + 2.0)
     lower_bounds = [A_low, -20, -20, 0.01, N_down + 1, 2.0, -np.pi]
     upper_bounds = [A_high, 20, 20, 0.99, N_down + 200, 25.0, np.pi]
-    
     p0 = _clamp_p0_into_bounds(p0, lower_bounds, upper_bounds)
-    
     try:
         params_down, _ = curve_fit(lppl, t_down, neg_log_down, p0=p0, bounds=(lower_bounds, upper_bounds), maxfev=20000)
     except Exception:
         return {"ok": False}
-        
     neg_log_fit = lppl(t_down, *params_down)
     log_fit = -neg_log_fit
     price_fit_down = np.exp(log_fit)
-    
     ss_res = np.sum((neg_log_down - neg_log_fit) ** 2)
     ss_tot = np.sum((neg_log_down - neg_log_down.mean()) ** 2)
     r2_down = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    
-    # --- FIX: Correct date conversion for negative bubble ---
     tc_days = float(params_down[4])
     last_idx = N_down - 1
     future_units = tc_days - last_idx
     last_date = down_series.index[-1]
     tc_bottom_date = last_date + timedelta(days=future_units)
-    
     return {
-        "ok": True, 
-        "down_series": down_series, 
-        "price_fit_down": price_fit_down, 
-        "r2": float(r2_down), 
-        "tc_date": tc_bottom_date, 
-        "tc_days": tc_days, 
+        "ok": True,
+        "down_series": down_series,
+        "price_fit_down": price_fit_down,
+        "r2": float(r2_down),
+        "tc_date": tc_bottom_date,
+        "tc_days": tc_days,
         "params": np.asarray(params_down, dtype=float)
     }
 
@@ -613,15 +591,10 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
-    """
-    Scrapes margin data from Japanese sources (IRBank -> Minkabu -> Karauri -> Yahoo -> Kabutan).
-    Uses Japanese keywords for search but outputs standard English columns.
-    """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
         return pd.DataFrame()
 
-    # User Agent to bypass basic blocks
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -629,7 +602,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
         "Referer": "https://www.google.com/"
     }
 
-    # ----- Common: Numeric Cleaning -----
     def clean_num(x):
         if isinstance(x, str):
             x = x.replace(',', '').replace('株', '').replace('円', '').replace('倍', '').replace('%', '').replace('-', '0').strip()
@@ -638,7 +610,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             except: return 0
         return x
 
-    # ----- Common: Date Parsing (Handles Japanese date formats) -----
     def parse_date_col(df, col_name="Date"):
         dates = pd.to_datetime(df[col_name], errors='coerce')
         if dates.isna().any():
@@ -659,7 +630,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             dates = df[col_name].apply(try_parse)
         return dates
 
-    # ----- 1. IRBank Scraper (Priority) -----
     def _scrape_irbank():
         urls = [f"https://irbank.net/{code}/fee", f"https://irbank.net/{code}/karauri"]
         for url in urls:
@@ -698,7 +668,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             except: continue
         return pd.DataFrame()
 
-    # ----- 2. Minkabu Scraper -----
     def _scrape_minkabu():
         url = f"https://minkabu.jp/stock/{code}/margin"
         try:
@@ -733,7 +702,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             return target.dropna(subset=["Date"]).sort_values("Date")
         except: return pd.DataFrame()
 
-    # ----- 3. Karauri.net Scraper -----
     def _scrape_karauri():
         url = f"https://karauri.net/{code}/"
         try:
@@ -768,7 +736,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             return target.dropna(subset=["Date"]).sort_values("Date")
         except: return pd.DataFrame()
 
-    # ----- 4. Yahoo Finance JP Scraper (Backup) -----
     def _scrape_yahoo():
         url = f"https://finance.yahoo.co.jp/quote/{code}.T/margin"
         try:
@@ -798,7 +765,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             return target.dropna(subset=["Date"]).sort_values("Date")
         except: return pd.DataFrame()
 
-    # ----- 5. Kabutan Scraper (Final Fallback) -----
     def _scrape_kabutan():
         url = f"https://kabutan.jp/stock/finance?code={code}&mode=m"
         try:
@@ -828,21 +794,427 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
             return target.dropna(subset=["Date"]).sort_values("Date")
         except: return pd.DataFrame()
 
-    # --- EXECUTION FLOW ---
     df = _scrape_irbank()
     if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    
     df = _scrape_minkabu()
     if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-    
     df = _scrape_karauri()
     if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-
     df = _scrape_yahoo()
     if not df.empty and ("MarginBuy" in df.columns or "MarginSell" in df.columns): return df
-        
     df = _scrape_kabutan()
     return df
+
+
+# =======================================================
+# NEW: FINRA Short Volume Scraper (US Stocks)
+# =======================================================
+@st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
+def fetch_us_short_volume(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
+    """
+    Scrapes daily FINRA Short Volume data for US-listed stocks.
+    Primary source: chartexchange.com
+    Fallback: stocksera.pythonanywhere.com
+    Returns: DataFrame[Date, ShortVolume, TotalVolume, NonShortVolume, ShortRatio]
+    """
+    symbol = ticker.strip().upper()
+    if symbol.endswith(".T") or symbol.endswith(".HK") or symbol.endswith(".L") or symbol.endswith(".DE"):
+        return pd.DataFrame()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
+    }
+
+    def _try_chartexchange():
+        for exch in ["nasdaq", "nyse", "amex"]:
+            url = f"https://chartexchange.com/symbol/{exch}-{symbol.lower()}/short-volume/"
+            try:
+                res = requests.get(url, headers=headers, timeout=10)
+                if res.status_code != 200:
+                    continue
+                try:
+                    dfs = pd.read_html(io.BytesIO(res.content))
+                except Exception:
+                    continue
+                for df in dfs:
+                    col_lower = [str(c).lower().strip() for c in df.columns]
+                    has_short = any('short' in c and 'volume' in c for c in col_lower)
+                    has_total = any('total' in c and ('vol' in c or 'volume' in c) for c in col_lower)
+                    has_date = any('date' in c for c in col_lower)
+                    if has_short and has_date:
+                        rename_map = {}
+                        for c in df.columns:
+                            cl = str(c).lower().strip()
+                            if 'date' in cl:
+                                rename_map[c] = 'Date'
+                            elif 'short' in cl and 'exempt' not in cl and ('vol' in cl or 'volume' in cl) and 'ratio' not in cl and '%' not in cl:
+                                rename_map[c] = 'ShortVolume'
+                            elif 'total' in cl and ('vol' in cl or 'volume' in cl):
+                                rename_map[c] = 'TotalVolume'
+                            elif '%' in cl or 'ratio' in cl or 'percent' in cl:
+                                rename_map[c] = 'ShortRatio'
+                        df = df.rename(columns=rename_map)
+                        if 'Date' not in df.columns or 'ShortVolume' not in df.columns:
+                            continue
+                        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                        for col in ['ShortVolume', 'TotalVolume', 'ShortRatio']:
+                            if col in df.columns:
+                                df[col] = df[col].apply(_clean_num_global)
+                        df = df.dropna(subset=['Date']).sort_values('Date')
+                        if 'TotalVolume' in df.columns:
+                            df['TotalVolume'] = df['TotalVolume'].replace(0, np.nan)
+                            if 'ShortRatio' not in df.columns:
+                                df['ShortRatio'] = (df['ShortVolume'] / df['TotalVolume'] * 100).round(2)
+                            df['NonShortVolume'] = df['TotalVolume'] - df['ShortVolume']
+                            df['NonShortVolume'] = df['NonShortVolume'].clip(lower=0)
+                        elif 'ShortRatio' in df.columns:
+                            df['TotalVolume'] = np.where(
+                                df['ShortRatio'] > 0,
+                                df['ShortVolume'] / (df['ShortRatio'] / 100),
+                                np.nan
+                            )
+                            df['NonShortVolume'] = df['TotalVolume'] - df['ShortVolume']
+                            df['NonShortVolume'] = df['NonShortVolume'].clip(lower=0)
+                        df = df.dropna(subset=['ShortVolume'])
+                        if len(df) > 0:
+                            return df.tail(lookback_days).reset_index(drop=True)
+            except Exception:
+                continue
+        return pd.DataFrame()
+
+    def _try_stocksera():
+        url = f"https://stocksera.pythonanywhere.com/ticker/short_volume/?quote={symbol}"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return pd.DataFrame()
+            try:
+                dfs = pd.read_html(io.BytesIO(res.content))
+            except Exception:
+                return pd.DataFrame()
+            for df in dfs:
+                col_lower = [str(c).lower().strip() for c in df.columns]
+                has_short = any('short' in c for c in col_lower)
+                has_date = any('date' in c for c in col_lower)
+                if has_short and has_date:
+                    rename_map = {}
+                    for c in df.columns:
+                        cl = str(c).lower().strip()
+                        if 'date' in cl:
+                            rename_map[c] = 'Date'
+                        elif 'short' in cl and 'vol' in cl and 'total' not in cl and '%' not in cl and 'ratio' not in cl and 'exempt' not in cl:
+                            rename_map[c] = 'ShortVolume'
+                        elif 'total' in cl and ('vol' in cl or 'volume' in cl):
+                            rename_map[c] = 'TotalVolume'
+                        elif '%' in cl or 'short' in cl and ('ratio' in cl or 'percent' in cl):
+                            rename_map[c] = 'ShortRatio'
+                    df = df.rename(columns=rename_map)
+                    if 'Date' not in df.columns or 'ShortVolume' not in df.columns:
+                        continue
+                    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                    for col in ['ShortVolume', 'TotalVolume', 'ShortRatio']:
+                        if col in df.columns:
+                            df[col] = df[col].apply(_clean_num_global)
+                    df = df.dropna(subset=['Date']).sort_values('Date')
+                    if 'TotalVolume' in df.columns:
+                        df['TotalVolume'] = df['TotalVolume'].replace(0, np.nan)
+                        if 'ShortRatio' not in df.columns:
+                            df['ShortRatio'] = (df['ShortVolume'] / df['TotalVolume'] * 100).round(2)
+                        df['NonShortVolume'] = (df['TotalVolume'] - df['ShortVolume']).clip(lower=0)
+                    df = df.dropna(subset=['ShortVolume'])
+                    if len(df) > 0:
+                        return df.tail(lookback_days).reset_index(drop=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    df = _try_chartexchange()
+    if not df.empty and 'ShortVolume' in df.columns:
+        return df
+    df = _try_stocksera()
+    if not df.empty and 'ShortVolume' in df.columns:
+        return df
+    return pd.DataFrame()
+
+
+# =======================================================
+# NEW: JP Short Selling Ratio Scraper (karauri.net daily data)
+# =======================================================
+@st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
+def fetch_jp_short_selling_ratio(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
+    """
+    Scrapes daily short selling ratio data for JP stocks.
+    Source: karauri.net (空売り比率ページ)
+    Returns: DataFrame[Date, ShortVolume, TotalVolume, NonShortVolume, ShortRatio]
+    """
+    code = ticker.replace(".T", "").strip()
+    if not code.isdigit():
+        return pd.DataFrame()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
+        "Referer": "https://www.google.com/"
+    }
+
+    def _try_karauri_ratio():
+        url = f"https://karauri.net/{code}/"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return pd.DataFrame()
+            try:
+                dfs = pd.read_html(io.BytesIO(res.content))
+            except Exception:
+                return pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                has_ratio = "空売り" in col_str and ("比率" in col_str or "%" in col_str)
+                has_volume = "出来高" in col_str or "数量" in col_str
+                has_date = "日付" in col_str or "日" in col_str
+                if has_date and (has_ratio or has_volume):
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
+                    else:
+                        df.columns = [str(c).strip() for c in df.columns]
+                    rename_map = {}
+                    for c in df.columns:
+                        if "日付" in c or c == "日":
+                            rename_map[c] = "Date"
+                        elif "空売り" in c and ("比率" in c or "%" in c):
+                            rename_map[c] = "ShortRatio"
+                        elif "空売り" in c and ("数量" in c or "出来高" in c or "残高" in c):
+                            rename_map[c] = "ShortVolume"
+                        elif "出来高" in c and "空売り" not in c:
+                            rename_map[c] = "TotalVolume"
+                        elif "売残" in c:
+                            rename_map[c] = "ShortVolume"
+                        elif "返済" in c:
+                            pass
+                    df = df.rename(columns=rename_map)
+                    if "Date" not in df.columns:
+                        continue
+                    today = date.today()
+                    current_year = today.year
+                    def try_parse_jp(x):
+                        if pd.isna(x) or str(x).strip() == "":
+                            return pd.NaT
+                        x_clean = str(x).split(' ')[0]
+                        x_clean = x_clean.replace("年", "/").replace("月", "/").replace("日", "")
+                        try:
+                            return pd.to_datetime(x_clean)
+                        except Exception:
+                            pass
+                        try:
+                            dt = pd.to_datetime(f"{current_year}/{x_clean}")
+                            if dt.date() > today + timedelta(days=2):
+                                dt = dt.replace(year=current_year - 1)
+                            return dt
+                        except Exception:
+                            return pd.NaT
+                    df["Date"] = df["Date"].apply(try_parse_jp)
+                    for col in ["ShortVolume", "TotalVolume", "ShortRatio"]:
+                        if col in df.columns:
+                            df[col] = df[col].apply(_clean_num_global)
+                    df = df.dropna(subset=["Date"]).sort_values("Date")
+                    if "TotalVolume" in df.columns and "ShortVolume" in df.columns:
+                        df["NonShortVolume"] = (df["TotalVolume"] - df["ShortVolume"]).clip(lower=0)
+                        if "ShortRatio" not in df.columns:
+                            df["ShortRatio"] = np.where(
+                                df["TotalVolume"] > 0,
+                                (df["ShortVolume"] / df["TotalVolume"] * 100).round(2),
+                                0
+                            )
+                    elif "ShortRatio" in df.columns and "ShortVolume" not in df.columns:
+                        df["ShortVolume"] = 0
+                        df["TotalVolume"] = 0
+                        df["NonShortVolume"] = 0
+                    if len(df) > 0:
+                        return df.tail(lookback_days).reset_index(drop=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    def _try_jpx_short_ratio():
+        url = f"https://karauri.net/{code}/ratio/"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code != 200:
+                return pd.DataFrame()
+            try:
+                dfs = pd.read_html(io.BytesIO(res.content))
+            except Exception:
+                return pd.DataFrame()
+            for df in dfs:
+                col_str = " ".join([str(c) for c in df.columns])
+                if ("日付" in col_str or "日" in col_str) and ("比率" in col_str or "%" in col_str):
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = ['_'.join(map(str, c)).strip() for c in df.columns]
+                    else:
+                        df.columns = [str(c).strip() for c in df.columns]
+                    rename_map = {}
+                    for c in df.columns:
+                        if "日付" in c or c == "日":
+                            rename_map[c] = "Date"
+                        elif "比率" in c or "%" in c:
+                            rename_map[c] = "ShortRatio"
+                        elif "空売り" in c and ("数量" in c or "出来高" in c):
+                            rename_map[c] = "ShortVolume"
+                        elif "出来高" in c:
+                            rename_map[c] = "TotalVolume"
+                    df = df.rename(columns=rename_map)
+                    if "Date" not in df.columns:
+                        continue
+                    today_dt = date.today()
+                    current_yr = today_dt.year
+                    def try_parse_jp2(x):
+                        if pd.isna(x) or str(x).strip() == "":
+                            return pd.NaT
+                        x_clean = str(x).split(' ')[0].replace("年", "/").replace("月", "/").replace("日", "")
+                        try:
+                            return pd.to_datetime(x_clean)
+                        except Exception:
+                            pass
+                        try:
+                            dt = pd.to_datetime(f"{current_yr}/{x_clean}")
+                            if dt.date() > today_dt + timedelta(days=2):
+                                dt = dt.replace(year=current_yr - 1)
+                            return dt
+                        except Exception:
+                            return pd.NaT
+                    df["Date"] = df["Date"].apply(try_parse_jp2)
+                    for col in ["ShortVolume", "TotalVolume", "ShortRatio"]:
+                        if col in df.columns:
+                            df[col] = df[col].apply(_clean_num_global)
+                    df = df.dropna(subset=["Date"]).sort_values("Date")
+                    if "TotalVolume" in df.columns and "ShortVolume" in df.columns:
+                        df["NonShortVolume"] = (df["TotalVolume"] - df["ShortVolume"]).clip(lower=0)
+                    if len(df) > 0:
+                        return df.tail(lookback_days).reset_index(drop=True)
+        except Exception:
+            pass
+        return pd.DataFrame()
+
+    df = _try_karauri_ratio()
+    if not df.empty and "ShortRatio" in df.columns:
+        return df
+    df = _try_jpx_short_ratio()
+    if not df.empty and "ShortRatio" in df.columns:
+        return df
+    return pd.DataFrame()
+
+
+# =======================================================
+# NEW: Short Volume Chart Renderer (HNWI Dark Theme)
+# =======================================================
+def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False):
+    """
+    Renders FINRA-style short volume chart:
+    - Stacked bars: ShortVolume (red/gold) + NonShortVolume (grey)
+    - Line: ShortRatio (%) on right axis with data labels
+    - Dashed line at 50% baseline
+    - HNWI dark theme
+    """
+    HNWI_BG = "#050505"
+    HNWI_AX_BG = "#0b0c0e"
+    TEXT_COLOR = "#F0F0F0"
+    TICK_COLOR = "#888888"
+    SHORT_BAR_COLOR = "#C5504F"
+    NONSHORT_BAR_COLOR = "#555555"
+    RATIO_LINE_COLOR = "#5B9BD5"
+    BASELINE_COLOR = "#C5A059"
+
+    dates = df["Date"]
+    has_volumes = "TotalVolume" in df.columns and df["TotalVolume"].sum() > 0
+    has_ratio = "ShortRatio" in df.columns and df["ShortRatio"].sum() > 0
+
+    if not has_ratio and not has_volumes:
+        st.warning("Short volume data has no usable values.")
+        return
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    fig.patch.set_facecolor(HNWI_BG)
+    ax1.set_facecolor(HNWI_AX_BG)
+
+    bar_width = 0.7
+    x_pos = np.arange(len(dates))
+
+    if has_volumes:
+        short_vals = df["ShortVolume"].fillna(0).values
+        nonshort_vals = df.get("NonShortVolume", pd.Series(dtype=float)).fillna(0).values
+        if len(nonshort_vals) == 0:
+            nonshort_vals = np.zeros(len(short_vals))
+
+        ax1.bar(x_pos, short_vals, width=bar_width, color=SHORT_BAR_COLOR, alpha=0.85, label="Short Volume", zorder=3)
+        ax1.bar(x_pos, nonshort_vals, width=bar_width, bottom=short_vals, color=NONSHORT_BAR_COLOR, alpha=0.5, label="Non-Short Volume", zorder=2)
+
+        ax1.set_ylabel("Volume (shares)", color=TEXT_COLOR, fontname='serif')
+        max_vol = max(short_vals.max() + nonshort_vals.max(), 1)
+        if max_vol >= 1_000_000:
+            ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x/1_000_000:.1f}M"))
+        else:
+            ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
+
+    ax1.set_xticks(x_pos)
+    date_labels = [d.strftime('%m-%d') for d in dates]
+    ax1.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=7)
+    ax1.tick_params(colors=TICK_COLOR)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.spines['left'].set_color('#333333')
+    ax1.spines['bottom'].set_color('#333333')
+    ax1.grid(color="#333333", linestyle=":", linewidth=0.5, alpha=0.3, axis='y')
+
+    if has_ratio:
+        ax2 = ax1.twinx()
+        ax2.set_facecolor(HNWI_AX_BG)
+        ratio_vals = df["ShortRatio"].fillna(0).values
+
+        ax2.plot(x_pos, ratio_vals, color=RATIO_LINE_COLOR, linewidth=2.0, marker='o', markersize=4, zorder=10, label="Short Vol Ratio (%)")
+
+        for i, (xp, rv) in enumerate(zip(x_pos, ratio_vals)):
+            if rv > 0:
+                ax2.annotate(f"{rv:.1f}%", (xp, rv), textcoords="offset points", xytext=(0, 10),
+                             ha='center', va='bottom', fontsize=7, color=RATIO_LINE_COLOR, fontweight='bold', zorder=11)
+
+        ax2.axhline(y=50.0, color=BASELINE_COLOR, linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
+        ax2.text(len(x_pos) - 0.5, 50.5, "50%", color=BASELINE_COLOR, fontsize=9, fontweight='bold', va='bottom', ha='right', fontname='serif')
+
+        y_min = max(min(ratio_vals) - 10, 0)
+        y_max = min(max(ratio_vals) + 15, 100)
+        ax2.set_ylim(y_min, y_max)
+        ax2.set_ylabel("Short Volume Ratio (%)", color=RATIO_LINE_COLOR, fontname='serif')
+        ax2.tick_params(axis='y', colors=RATIO_LINE_COLOR)
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['left'].set_visible(False)
+        ax2.spines['right'].set_color('#333333')
+        ax2.spines['bottom'].set_color('#333333')
+
+    title_prefix = "JPX" if is_jp else "FINRA"
+    title_text = f"{title_prefix} Short Volume & Ratio: {ticker}"
+    ax1.set_title(title_text, color=TEXT_COLOR, fontweight='normal', fontname='serif', pad=15)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    if has_ratio:
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        all_lines = lines1 + lines2
+        all_labels = labels1 + labels2
+    else:
+        all_lines = lines1
+        all_labels = labels1
+
+    ax1.legend(all_lines, all_labels, loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False, fontsize=8)
+
+    ax1.text(0.95, 0.03, "OUT-STANDER", transform=ax1.transAxes,
+             fontsize=24, color='#3d3320', fontweight='bold',
+             fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
+
+    fig.tight_layout()
+    st.pyplot(fig)
 
 
 # =======================================================
@@ -851,8 +1223,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
 def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
-    
-    # Priority 1: Downtrend (High Risk)
     if down_tc_date is not None:
         down_tc = pd.Timestamp(down_tc_date).normalize()
         delta = (down_tc - now).days
@@ -862,20 +1232,12 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
         past = abs(delta)
         s = _lin_map(past, DOWN_PAST_NEAR_DAYS, DOWN_PAST_FAR_DAYS, 90, 100)
         return ("HIGH", int(round(_clamp(s, 90, 100))))
-    
-    # Priority 2: Uptrend (Safe/Caution)
-    # [Logic] CAUTION (Yellow) if within 14 days of tc
     gap = (tc_up - now).days
-    WARNING_BUFFER = 14  # Early warning line
-
-    # SAFE: More than 14 days away
+    WARNING_BUFFER = 14
     if gap > WARNING_BUFFER:
         s = _lin_map(gap, UP_FUTURE_NEAR_DAYS, UP_FUTURE_FAR_DAYS, 59, 0)
         return ("SAFE", int(round(_clamp(s, 0, 59))))
-
-    # CAUTION: Within 14 days, today, or past
     past_warning = WARNING_BUFFER - gap
-    
     s = _lin_map(past_warning, 0, UP_PAST_FAR_DAYS, 60, 79)
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
@@ -883,51 +1245,20 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 # =======================================================
 # Render Graph Pack
 # =======================================================
-
-# REDESIGNED: Minimalist "High-End" Text Overlay
 def draw_score_overlay(ax, score: int, label: str):
-    """
-    Draw Minimalist Score Info in Top LEFT (moved from Right)
-    Color coded by score value.
-    """
-    # Colors
-    # 0-59: Green (Safe) - Updated from Blue to Muted Green
-    # 60-79: Yellow (Caution)
-    # 80+: Red (High)
     if score < 60:
-        score_color = "#3CB371" # Medium Sea Green (Calm/Muted Safe)
+        score_color = "#3CB371"
     elif score < 80:
-        score_color = "#ffc53d" # Gold/Yellow
+        score_color = "#ffc53d"
     else:
-        score_color = "#ff4d4f" # Red
-
-    TEXT_DIM = "#808080"
-    
-    # Position: Top LEFT (Below Ticker)
-    # Ticker is at y=0.92. Subtitle was at 0.88.
-    # Let's place score around y=0.82
+        score_color = "#ff4d4f"
     x_pos = 0.02
     y_pos = 0.86
-    
-    # 1. Label "RISK SCORE" - DELETED as requested
-    # ax.text(x_pos, y_pos, "RISK SCORE", transform=ax.transAxes,
-    #         fontsize=9, color=TEXT_DIM, fontweight='normal', ha='left', va='bottom', fontname='serif', zorder=20)
-    
-    # 2. Score Value (Large, Color Coded)
-    # Slightly adjusted y_pos since label is gone
     ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes,
             fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
-    
-    # 3. Dot Indicator next to score
-    # ax.scatter([x_pos + 0.12], [y_pos - 0.05], s=40, color=score_color, transform=ax.transAxes, zorder=20)
 
 
 def draw_logo_overlay(ax):
-    """
-    Minimalist Watermark Logo (Bottom Right)
-    Dark Gold, Serif, Large but subtle.
-    """
-    # Logo text
     ax.text(0.95, 0.03, "OUT-STANDER", transform=ax.transAxes,
             fontsize=24, color='#3d3320', fontweight='bold',
             fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
@@ -939,17 +1270,14 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     dev = index100 - 100.0
     ret = np.log(prices / prices.shift(1)).dropna()
 
-    # --- Common HNWI Style Settings for Subplots ---
     HNWI_BG = "#050505"
     HNWI_AX_BG = "#0b0c0e"
     TEXT_COLOR = "#F0F0F0"
     TICK_COLOR = "#888888"
-    # NEW LUXURY PALETTE: Gold for main ticker, Muted Silver for benchmark
-    HNWI_TICKER_COLOR = "#C5A059" # Muted Gold
-    HNWI_BENCH_COLOR = "#A0A0A0"  # Muted Silver/Grey
-    
+    HNWI_TICKER_COLOR = "#C5A059"
+    HNWI_BENCH_COLOR = "#A0A0A0"
     grid_kwargs = {"color": "#333333", "linestyle": ":", "linewidth": 0.5, "alpha": 0.5}
-    
+
     def style_hnwi_ax(ax, title=None):
         ax.set_facecolor(HNWI_AX_BG)
         if title:
@@ -958,20 +1286,15 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
         ax.xaxis.label.set_color(TEXT_COLOR)
         ax.yaxis.label.set_color(TEXT_COLOR)
         ax.grid(**grid_kwargs)
-        # Remove top and right spines for cleaner look
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.spines['left'].set_color('#333333')
         ax.spines['bottom'].set_color('#333333')
-        # Add Logo to every graph
         draw_logo_overlay(ax)
 
-
-    # 1. Cumulative Performance
     fig, ax = plt.subplots(figsize=(11, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Cumulative Return (Indexed)")
-    # Use new Gold/Silver palette
     ax.plot(index100.index, index100[ticker], label=f"{ticker}", color=HNWI_TICKER_COLOR, linewidth=1.5)
     ax.plot(index100.index, index100[bench],  label=f"{bench}",  color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
     ax.set_xlabel("Date")
@@ -979,30 +1302,25 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
     st.pyplot(fig)
 
-    # Pre-calculate regression for charts 2 & 5
     X = dev[bench].dropna(); Y = dev[ticker].dropna()
     common = X.index.intersection(Y.index); X = X.loc[common]; Y = Y.loc[common]
     slope_dev, intercept_dev = np.polyfit(X.values, Y.values, 1)
     x_sorted = X.sort_values(); y_line = slope_dev * x_sorted + intercept_dev
 
-    # 2. Price Deviation Scatter
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Deviation Scatter & Trend")
-    # Points are Gold, Trendline is Gold
     ax.scatter(X, Y, alpha=0.6, color=HNWI_TICKER_COLOR, edgecolor='none', s=40)
     ax.plot(x_sorted, y_line, color=HNWI_TICKER_COLOR, linewidth=2.0, alpha=0.8)
     ax.set_xlabel(f"{bench} Deviation (pp)")
     ax.set_ylabel(f"{ticker} Deviation (pp)")
     st.pyplot(fig)
 
-    # 3. Rolling Volatility of Price Deviation
     vol_dev_t = dev[ticker].rolling(int(window)).std(ddof=1)
     vol_dev_b = dev[bench].rolling(int(window)).std(ddof=1)
     fig, ax = plt.subplots(figsize=(11, 5))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Deviation Volatility (Rolling)")
-    # Ticker is Gold, Benchmark is Silver
     ax.plot(vol_dev_t.index, vol_dev_t, label=f"{ticker}", color=HNWI_TICKER_COLOR, linewidth=1.5)
     ax.plot(vol_dev_b.index, vol_dev_b, label=f"{bench}", color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
     ax.set_xlabel("Date")
@@ -1010,12 +1328,10 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
     st.pyplot(fig)
 
-    # 4. Drawdown
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
     fig, ax = plt.subplots(figsize=(11, 4))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Drawdown Profile")
-    # Use Gold fill for a rich, less alarming look
     ax.fill_between(dd.index, dd * 100.0, 0, color=HNWI_TICKER_COLOR, alpha=0.3)
     ax.plot(dd.index, dd * 100.0, color=HNWI_TICKER_COLOR, linewidth=1.0)
     ax.set_xlabel("Date")
@@ -1023,75 +1339,50 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylim(top=0.5)
     st.pyplot(fig)
 
-    # Pre-calculate regression for chart 5
     Xr = ret[bench].dropna(); Yr = ret[ticker].dropna()
     common_r = Xr.index.intersection(Yr.index); Xr = Xr.loc[common_r]; Yr = Yr.loc[common_r]
     slope_ret, intercept_ret = np.polyfit(Xr.values, Yr.values, 1)
     xr_sorted = Xr.sort_values(); yr_line = slope_ret * xr_sorted + intercept_ret
-    
-    # 5. Daily Log Returns Scatter
+
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Daily Returns Scatter")
-    # Same Gold styling as chart 2
     ax.scatter(Xr, Yr, alpha=0.6, color=HNWI_TICKER_COLOR, edgecolor='none', s=40)
     ax.plot(xr_sorted, yr_line, color=HNWI_TICKER_COLOR, linewidth=2.0, alpha=0.8)
     ax.set_xlabel(f"{bench} Daily Log Return")
     ax.set_ylabel(f"{ticker} Daily Log Return")
     st.pyplot(fig)
-    
-    # 6. Annualized Rolling Volatility
+
     roll_vol = ret[ticker].rolling(int(window)).std(ddof=1) * np.sqrt(float(trading_days))
     fig, ax = plt.subplots(figsize=(11, 4))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Annualized Volatility (Rolling)")
-    # Use Gold for emphasis
     ax.plot(roll_vol.index, roll_vol * 100.0, color=HNWI_TICKER_COLOR, linewidth=1.5)
     ax.set_xlabel("Date")
     ax.set_ylabel("Annualized Vol (%)")
     st.pyplot(fig)
 
-    # =======================================================
-    # (ADD) JAPANESE MARGIN CHART (Dual Axis) - Also styled
-    # =======================================================
     if ticker.endswith(".T"):
         st.markdown("---")
         st.subheader(f"■ Margin Balance & Reverse Repo Fee (JP Data: {ticker})")
-        
         with st.spinner("Fetching JP Margin Data (IRBank/Minkabu/Karauri/Yahoo/Kabutan)..."):
             margin_df = fetch_jp_margin_data_robust(ticker)
-            
         if not margin_df.empty:
-            # Draw Graph
             fig, ax1 = plt.subplots(figsize=(11, 6))
             fig.patch.set_facecolor(HNWI_BG)
             style_hnwi_ax(ax1, title=None)
-
-            # X axis
             dates = margin_df["Date"]
-            
-            # Left Axis: Margin Balance (Fill Between)
-            # CHANGE: Longs = Gold, Shorts = Silver
             if "MarginBuy" in margin_df.columns and "MarginSell" in margin_df.columns:
-                # Buy (Long) -> Gold
                 ax1.fill_between(dates, margin_df["MarginBuy"], color=HNWI_TICKER_COLOR, alpha=0.3, label="Margin Buy (Longs)")
                 ax1.plot(dates, margin_df["MarginBuy"], color=HNWI_TICKER_COLOR, linewidth=1.5)
-                
-                # Sell (Short) -> Silver
                 ax1.fill_between(dates, margin_df["MarginSell"], color=HNWI_BENCH_COLOR, alpha=0.3, label="Margin Sell (Shorts)")
                 ax1.plot(dates, margin_df["MarginSell"], color=HNWI_BENCH_COLOR, linewidth=1.5)
-                
                 ax1.set_ylabel("Margin Balance (Shares)")
                 ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
-            
             ax1.set_xlabel("Date")
-
-            # Right Axis: Reverse Repo Fee (Hibush) - Bar Chart
             has_hibu = "Hibush" in margin_df.columns and margin_df["Hibush"].sum() > 0
-            
             if has_hibu:
                 ax2 = ax1.twinx()
-                # Style the twin axis to match
                 ax2.set_facecolor(HNWI_AX_BG)
                 ax2.tick_params(colors=TICK_COLOR)
                 ax2.yaxis.label.set_color(TEXT_COLOR)
@@ -1099,22 +1390,17 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
                 ax2.spines['left'].set_visible(False)
                 ax2.spines['right'].set_color('#333333')
                 ax2.spines['bottom'].set_color('#333333')
-
                 colors = ["#FFD700" if v > 0 else "#333333" for v in margin_df["Hibush"]]
                 ax2.bar(dates, margin_df["Hibush"], color=colors, alpha=0.6, width=0.6, label="Rev. Repo Fee (Hibush)")
                 ax2.set_ylabel("Fee (JPY)", color="#FFD700")
                 ax2.tick_params(axis='y', colors="#FFD700")
-                
                 lines1, labels1 = ax1.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
-                
                 ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
             else:
                 ax1.legend(loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
-
             st.pyplot(fig)
             st.caption("※Source: IRBank / Minkabu / Karauri / Yahoo / Kabutan (Auto-switch). Showing recent data only.")
-            
             with st.expander("View Margin Data Details"):
                 st.dataframe(margin_df.sort_values("Date", ascending=False), use_container_width=True)
         else:
@@ -1147,9 +1433,6 @@ def main():
 
     def show_error_black(msg: str):
         st.markdown(f"""<div class="custom-error">{msg}</div>""", unsafe_allow_html=True)
-
-    # st.markdown("## Out-stander (Admin)") # Removed header to let graph take focus
-    # st.caption(f"Auth User: {authed_email}")
 
     with st.form("input_form"):
         ticker = st.text_input("Ticker", value="", placeholder="Ex: NVDA / 0700.HK / 7203.T")
@@ -1201,100 +1484,110 @@ def main():
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     # -----------------------------------------------------------
-    # MAIN CHART RENDER with OVERLAY (REDESIGNED FOR LUXURY & NO OVERLAP)
+    # MAIN CHART RENDER
     # -----------------------------------------------------------
-    # Use a slightly wider aspect ratio for cinematic look
     fig, ax = plt.subplots(figsize=(12, 6.5))
-    
-    # Deep Black Background
     BG_COLOR = "#050505"
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
-    
-    # --- Data Plotting ---
-    # 1. Price (White, Thin, Crisp)
     ax.plot(price_series.index, price_series.values, color="#F0F0F0", linewidth=0.8, alpha=0.9, zorder=5)
-    
-    # 2. Model (Gold, Smooth, Prominent)
-    GOLD_COLOR = "#C5A059" 
+    GOLD_COLOR = "#C5A059"
     ax.plot(price_series.index, bubble_res["price_fit"], color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
-    
-    # 3. Vertical Lines (UPDATED COLORS)
-    # Up Trend t_c = Red Dashed
     ax.axvline(bubble_res["tc_date"], color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.8)
-    
-    # Peak line = White dotted
     ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
-    
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="cyan", linewidth=0.8, alpha=0.7)
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="#008b8b", linewidth=1.5, alpha=0.8)
-        
-        # Down Trend t_c = Green Dashed
         ax.axvline(neg_res["tc_date"], color="#00ff00", linestyle="--", linewidth=1.2, alpha=0.8)
-
-    # --- FIX: Ensure Right Margin for Labels to Avoid Overlap ---
-    # Extend X-axis to the right by about 15% to create a "margin" area for text
     last_date = price_series.index[-1]
     total_days = (last_date - price_series.index[0]).days
     margin_days = int(total_days * 0.15)
     margin_limit_date = last_date + timedelta(days=margin_days)
     ax.set_xlim(right=margin_limit_date)
-
-    # --- Direct Labeling (In the new margin area) ---
     last_price = price_series.values[-1]
     last_model_val = bubble_res["price_fit"][-1]
-    
-    # Offset dates into the margin
-    text_date_offset = last_date + timedelta(days=2) # Start of margin
-    
-    # Label: Ticker
-    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0", 
+    text_date_offset = last_date + timedelta(days=2)
+    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0",
             fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
-    
-    # Label: Model
-    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR, 
+    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR,
             fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
-    
-    # Label: Peak (Shifted slightly up to avoid collision with line)
     peak_val = price_series.max()
     peak_dt = price_series.idxmax()
-    ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", 
+    ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}",
             color="#888888", fontsize=7, ha='center', fontname='sans-serif')
-
-    # --- Header (Editorial Style - NO SUBTITLE) ---
-    # Top Left: Ticker Name Only
     ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes,
             fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
-    
-    # (Removed Subtitle Text as requested)
-
-    # --- Styling ---
-    # Remove top and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    # Dim left and bottom spines
     ax.spines['left'].set_color('#333333')
     ax.spines['bottom'].set_color('#333333')
-    
-    # Grid: Very subtle dots
     ax.grid(color="#333333", linestyle=":", linewidth=0.5, alpha=0.3)
-    
-    # Axis Text
     ax.tick_params(axis='x', colors='#888888', labelsize=8)
     ax.tick_params(axis='y', colors='#888888', labelsize=8)
-
-    # --- Overlays ---
-    # ★ ADD SCORE (Top LEFT, Color Coded)
     draw_score_overlay(ax, score, signal_label)
-    
-    # ★ ADD LOGO (Bottom Right, Watermark)
     draw_logo_overlay(ax)
-
     st.pyplot(fig)
-    # -----------------------------------------------------------
 
+    # -----------------------------------------------------------
+    # NEW: SHORT VOLUME ANALYSIS SECTION
+    # -----------------------------------------------------------
+    ticker_clean = ticker.strip()
+    is_jp = ticker_clean.endswith(".T")
+    is_non_us = any(ticker_clean.endswith(sfx) for sfx in [".T", ".HK", ".L", ".DE", ".PA", ".AS", ".MI", ".SW"])
+    is_us = not is_non_us
+
+    st.markdown("---")
+    st.markdown("### ■ Short Volume / 空売り比率 Analysis")
+
+    if is_us:
+        with st.spinner(f"Fetching FINRA Short Volume for {ticker_clean}..."):
+            short_df = fetch_us_short_volume(ticker_clean)
+        if not short_df.empty:
+            render_short_volume_chart(short_df, ticker_clean, is_jp=False)
+            st.caption("※Source: Chartexchange.com / Stocksera (FINRA TRF data). Scraping-based — may break if site structure changes.")
+            with st.expander("View Short Volume Raw Data"):
+                display_cols = [c for c in ["Date", "ShortVolume", "TotalVolume", "NonShortVolume", "ShortRatio"] if c in short_df.columns]
+                st.dataframe(short_df[display_cols].sort_values("Date", ascending=False), use_container_width=True)
+            avg_ratio = short_df["ShortRatio"].mean() if "ShortRatio" in short_df.columns else 0
+            max_ratio = short_df["ShortRatio"].max() if "ShortRatio" in short_df.columns else 0
+            max_ratio_date = short_df.loc[short_df["ShortRatio"].idxmax(), "Date"] if "ShortRatio" in short_df.columns and len(short_df) > 0 else "N/A"
+            min_ratio = short_df["ShortRatio"].min() if "ShortRatio" in short_df.columns else 0
+            min_ratio_date = short_df.loc[short_df["ShortRatio"].idxmin(), "Date"] if "ShortRatio" in short_df.columns and len(short_df) > 0 else "N/A"
+            st.markdown("**Quick Stats (FINRA Short Volume)**")
+            stat_cols = st.columns(4)
+            with stat_cols[0]:
+                st.metric("Avg Ratio", f"{avg_ratio:.1f}%")
+            with stat_cols[1]:
+                st.metric("Max Ratio", f"{max_ratio:.1f}%", delta=f"{max_ratio_date.strftime('%m/%d') if hasattr(max_ratio_date, 'strftime') else max_ratio_date}")
+            with stat_cols[2]:
+                st.metric("Min Ratio", f"{min_ratio:.1f}%", delta=f"{min_ratio_date.strftime('%m/%d') if hasattr(min_ratio_date, 'strftime') else min_ratio_date}")
+            with stat_cols[3]:
+                baseline_label = "Bullish (<40%)" if avg_ratio < 40 else ("Bearish (>50%)" if avg_ratio > 50 else "Neutral (40-50%)")
+                st.metric("Sentiment", baseline_label)
+        else:
+            st.warning("Could not fetch FINRA short volume data. Source may be unavailable or ticker not supported.")
+            st.info("Supported: US-listed stocks (NASDAQ/NYSE/AMEX). Data from chartexchange.com.")
+
+    elif is_jp:
+        with st.spinner(f"Fetching JP Short Selling Data for {ticker_clean}..."):
+            short_df = fetch_jp_short_selling_ratio(ticker_clean)
+        if not short_df.empty and "ShortRatio" in short_df.columns:
+            render_short_volume_chart(short_df, ticker_clean, is_jp=True)
+            st.caption("※Source: karauri.net (JPX空売り報告). Scraping-based — may break if site structure changes.")
+            with st.expander("View Short Selling Raw Data"):
+                display_cols = [c for c in ["Date", "ShortVolume", "TotalVolume", "NonShortVolume", "ShortRatio"] if c in short_df.columns]
+                st.dataframe(short_df[display_cols].sort_values("Date", ascending=False), use_container_width=True)
+            avg_ratio = short_df["ShortRatio"].mean()
+            st.markdown(f"**Avg Short Ratio (period): {avg_ratio:.1f}%**")
+        else:
+            st.info("JP short selling ratio data not available from karauri.net for this ticker. Margin balance data is available in the Graphs section below.")
+    else:
+        st.info(f"Short volume analysis is currently supported for US stocks (FINRA) and JP stocks (.T). Ticker '{ticker_clean}' is not in a supported market.")
+
+    # -----------------------------------------------------------
+    # EXISTING SECTIONS BELOW
+    # -----------------------------------------------------------
     if signal_label == "HIGH":
         risk_label = "High"; risk_color = "#ff4d4f"
     elif signal_label == "CAUTION":
@@ -1378,7 +1671,7 @@ def main():
             show_error_black(f"Failed to build table: {e}")
 
     st.markdown("---")
-    with st.expander("Graphs (Index/Deviation/Regression/Vol/Drawdown)", expanded=True): # Expanded for visibility
+    with st.expander("Graphs (Index/Deviation/Regression/Vol/Drawdown)", expanded=True):
         gcol1, gcol2, gcol3 = st.columns([2, 1, 1])
         with gcol1: graph_bench = st.text_input("Benchmark (For Graph)", value="ACWI")
         with gcol2: graph_window = st.number_input("WINDOW (For Graph)", min_value=5, max_value=120, value=20, step=1)
