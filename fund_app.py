@@ -37,6 +37,7 @@ C_SILVER = "#A0A0A0"      # Secondary Silver
 C_BRONZE = "#cd7f32"      # Tertiary Bronze
 C_BLUE = "#4682B4"        # Steel Blue (Muted)
 C_SLATE = "#708090"       # Slate Grey
+C_BAR   = "#686868"       # Default bar color (dark enough for logo visibility)
 
 # Custom Colormap for Stacked Bars
 LUXURY_CMAP = ListedColormap([C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE, "#8B4513", "#556B2F"])
@@ -2262,7 +2263,7 @@ def build_quarterly_eps_table(facts_json: dict, ticker_symbol: str = "", n_quart
 
 def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=None):
     if color is None:
-        color = C_SILVER
+        color = C_BAR
     df = table.copy()
     x = df["Quarter"].tolist()
     vals = df[value_col].astype(float).to_numpy()
@@ -2271,7 +2272,7 @@ def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=N
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    colors = [C_SILVER if v >= 0 else C_BRONZE for v in vals]
+    colors = [C_BAR if v >= 0 else C_BRONZE for v in vals]
     ax.bar(x, vals, color=colors, alpha=0.85, width=0.6)
 
     ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
@@ -2297,7 +2298,7 @@ def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenu
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
     # Bars: income (left axis)
-    bar_colors = [C_SILVER if v >= 0 else C_BRONZE for v in income]
+    bar_colors = [C_BAR if v >= 0 else C_BRONZE for v in income]
     ax_left.bar(x, income, color=bar_colors, alpha=0.85, width=0.6, label=income_col.replace("(M$)", ""))
     ax_left.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
     ax_left.set_ylabel("Million USD", color=TEXT_COLOR)
@@ -2330,7 +2331,7 @@ def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    colors = [C_SILVER if v >= 0 else C_BRONZE for v in eps]
+    colors = [C_BAR if v >= 0 else C_BRONZE for v in eps]
     ax.bar(x, eps, color=colors, alpha=0.85, width=0.6)
 
     ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
@@ -2621,7 +2622,7 @@ def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
-    bar_colors = [C_SILVER if v >= 0 else C_BRONZE for v in fcf]
+    bar_colors = [C_BAR if v >= 0 else C_BRONZE for v in fcf]
     ax_left.bar(x, fcf, color=bar_colors, alpha=0.85, width=0.6, label="FCF")
     ax_left.set_ylabel("FCF (Million USD)", color=TEXT_COLOR)
     ax_left.tick_params(axis='x', rotation=45)
