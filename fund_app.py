@@ -593,8 +593,6 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
     results = []
 
     # --- Pattern A: Standard XBRL ---
-    # <ns:Tag contextRef="..." ...>value</ns:Tag>
-    # NOTE: namespace prefix can contain hyphens (e.g. us-gaap:), so use [\w-]+ not \w+
     fact_re = re.compile(
         r'<(?:([\w-]+):)?(\w+)\s+([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]+)</(?:[\w-]+:)?\2>'
     )
@@ -615,12 +613,10 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
         _collect_segment_result(results, tag, ctx_ref, val, contexts)
 
     # --- Pattern B: Inline XBRL (iXBRL) ---
-    # <ix:nonFraction contextRef="..." name="us-gaap:Revenues" ...>value</ix:nonFraction>
     ixbrl_re = re.compile(
         r'<ix:nonFraction\s+([^>]*?)contextRef="([^"]+)"([^>]*?)name="([^"]+)"([^>]*?)>([^<]*)</ix:nonFraction>',
         re.IGNORECASE
     )
-    # Also match with name before contextRef
     ixbrl_re2 = re.compile(
         r'<ix:nonFraction\s+([^>]*?)name="([^"]+)"([^>]*?)contextRef="([^"]+)"([^>]*?)>([^<]*)</ix:nonFraction>',
         re.IGNORECASE
@@ -629,7 +625,6 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
     for pattern, ctx_grp, name_grp, val_grp in [(ixbrl_re, 2, 4, 6), (ixbrl_re2, 4, 2, 6)]:
         for m in pattern.finditer(xml_text):
             name_full = m.group(name_grp)
-            # name_full is like "us-gaap:Revenues"
             tag = name_full.split(":")[-1] if ":" in name_full else name_full
             if tag.lower() not in revenue_tags:
                 continue
@@ -687,25 +682,16 @@ def _collect_segment_result(results: list, tag: str, ctx_ref: str, val: float, c
 
 
 def _classify_dimension(dim_str: str) -> str:
-    """Classify XBRL dimension axis into Segment / Product / Geography / Skip.
-    
-    Returns:
-        "Segment"   - Official business segments (StatementBusinessSegmentsAxis)
-        "Product"   - Product/Service breakdown (ProductOrServiceAxis, etc.)
-        "Geography" - Geographic breakdown (StatementGeographicalAxis, etc.)
-        "Skip"      - Irrelevant axes (tax, hedging, debt, etc.)
-    """
+    """Classify XBRL dimension axis into Segment / Product / Geography / Skip."""
     d = dim_str.lower()
     
-    # --- Geography ---
     geo_kw = [
         "statementgeographicalaxis", "geographicalaxis",
-        "entitywideinformationrevenuefrommajorcustomer",  # sometimes used for geo
+        "entitywideinformationrevenuefrommajorcustomer",
     ]
     if any(k in d for k in geo_kw):
         return "Geography"
     
-    # --- Official Business Segments ---
     seg_kw = [
         "statementbusinesssegmentsaxis",
         "segmentreportingaxis",
@@ -713,7 +699,6 @@ def _classify_dimension(dim_str: str) -> str:
     if any(k in d for k in seg_kw):
         return "Segment"
     
-    # --- Product/Service breakdown ---
     prod_kw = [
         "productorserviceaxis",
         "productsorservices",
@@ -722,7 +707,6 @@ def _classify_dimension(dim_str: str) -> str:
     if any(k in d for k in prod_kw):
         return "Product"
     
-    # --- Skip everything else (tax, hedging, debt, legal entity, etc.) ---
     return "Skip"
 
 
@@ -732,17 +716,13 @@ def _clean_xbrl_member(m: str) -> str:
         m = m.split(":")[-1]
     if m.endswith("Member"):
         m = m[:-6]
-    # CamelCase → spaces
     m = re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', m)
     m = re.sub(r'(?<=[A-Z])(?=[A-Z][a-z])', ' ', m)
     return m.strip()
 
 
 def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
-    """Build revenue segment tables from individual 10-K XBRL filings.
-    
-    Returns: (segment_pivot, product_pivot, geo_pivot, meta)
-    """
+    """Build revenue segment tables from individual 10-K XBRL filings."""
     meta = {}
 
     filings = _get_10k_filings_list(cik10)
@@ -776,10 +756,8 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     df["axis_type"] = df["dimension"].apply(_classify_dimension)
     df["member_clean"] = df["member"].apply(_clean_xbrl_member)
 
-    # Drop irrelevant axes
     df = df[df["axis_type"] != "Skip"]
 
-    # Exclude totals / eliminations / corporate
     exclude_kw = [
         "total", "elimination", "adjust", "consolidation", "allother",
         "intersegment", "corporate", "reconciling", "unallocated",
@@ -792,12 +770,10 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), meta
 
-    # Deduplicate: for each year/axis_type/member, keep largest value
     df = df.sort_values("value", ascending=False).drop_duplicates(
         subset=["year", "axis_type", "member_clean"], keep="first"
     )
 
-    # Convert to M$
     df["value_m"] = df["value"].apply(_to_musd)
 
     meta["unique_dimensions"] = df["dimension"].unique().tolist()
@@ -809,10 +785,8 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         if sub_df.empty:
             return pd.DataFrame()
         pivot = sub_df.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
-        # Drop columns that are >70% NaN (sparse/discontinued segments)
         thresh = len(pivot) * 0.3
         pivot = pivot.dropna(axis=1, thresh=int(max(thresh, 1)))
-        # Drop columns where the latest year has no data (discontinued)
         if not pivot.empty:
             latest_year = pivot.index.max()
             pivot = pivot.loc[:, pivot.loc[latest_year].notna()]
@@ -831,11 +805,9 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
         return
 
     n_cols = len(df.columns)
-    # Extended luxury palette for more segments
     palette = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE,
                "#8B4513", "#556B2F", "#8B008B", "#2F4F4F", "#B8860B",
                "#4169E1", "#CD853F", "#6B8E23", "#9370DB", "#20B2AA"]
-    # Reverse so that the bottom bar (where the logo sits) is the last color, not gold
     colors_list = palette[:n_cols]
     colors_list = list(reversed(colors_list))
 
@@ -849,10 +821,8 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     ax.tick_params(colors=TICK_COLOR, axis='x', rotation=0)
     ax.tick_params(colors=TICK_COLOR, axis='y')
     
-    # Format y-axis with comma separator
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'))
 
-    # Legend: outside right, compact
     ax.legend(
         facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR,
         loc="upper left", bbox_to_anchor=(1.0, 1.0),
@@ -860,6 +830,7 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     )
     fig.tight_layout()
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
@@ -936,20 +907,16 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
 
     fig, ax_left = plt.subplots(figsize=(12, 6))
     fig.patch.set_facecolor(HNWI_BG)
-    # Apply styling to main axis
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
-    # Plot Income Lines (Gold & Bronze)
     ax_left.plot(x, op, label="Operating Income", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
     ax_left.plot(x, ni, label="Net Income", color=C_BRONZE, linewidth=2.5, marker="o", markersize=6)
 
     ax_left.set_ylabel("Profit (Million USD)", color=TEXT_COLOR)
 
-    # Secondary Axis for Revenue (Bars)
     ax_right = ax_left.twinx()
     ax_right.bar(x, revenue, color=C_SILVER, alpha=0.3, width=0.6, label="Revenue")
     
-    # Manually style the twin axis to match
     ax_right.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
     ax_right.tick_params(colors=TICK_COLOR, which='both')
     ax_right.spines['top'].set_visible(False)
@@ -957,12 +924,12 @@ def plot_pl_annual(table: pd.DataFrame, title: str):
     ax_right.spines['right'].set_color(GRID_COLOR)
     ax_right.spines['bottom'].set_visible(False)
 
-    # Legend handling
     lines1, labels1 = ax_left.get_legend_handles_labels()
     lines2, labels2 = ax_right.get_legend_handles_labels()
     ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_operating_margin(table: pd.DataFrame, title: str):
@@ -984,6 +951,7 @@ def plot_operating_margin(table: pd.DataFrame, title: str):
     ax.plot(x, margin, color=C_GOLD, linewidth=2.5, marker="o", markersize=6, label="Operating Margin (%)")
     ax.set_ylabel("%", color=TEXT_COLOR)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
@@ -1107,6 +1075,7 @@ def plot_bs_bar(snap: pd.DataFrame, title: str):
     
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def _top3_plus_other(items: list[tuple[str, float]], total: float) -> tuple[list[str], list[float]]:
@@ -1238,7 +1207,6 @@ def build_bs_pies_latest(facts_json: dict, year: int) -> tuple[dict, dict, dict]
 def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
     col1, col2 = st.columns(2)
     
-    # Luxury colors for Pie
     colors = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE]
 
     def _pie(ax, labels, sizes, title):
@@ -1248,18 +1216,18 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
             textprops={"color": TEXT_COLOR}
         )
         ax.set_title(title, color=TEXT_COLOR, fontname='serif')
-        # Style the percentage text
         for autotext in autotexts:
-            autotext.set_color('#000000') # Black text on colored slices
+            autotext.set_color('#000000')
             autotext.set_fontweight('bold')
 
     with col1:
         fig, ax = plt.subplots(figsize=(5.5, 5.0))
         fig.patch.set_facecolor(HNWI_BG)
         style_hnwi_ax(ax)
-        ax.axis('equal') # Remove axes for pie
+        ax.axis('equal')
         _pie(ax, assets_pie["labels"], assets_pie["sizes"], f"Asset Breakdown ({year})")
         st.pyplot(fig)
+        plt.close(fig)
 
     with col2:
         fig, ax = plt.subplots(figsize=(5.5, 5.0))
@@ -1268,10 +1236,11 @@ def plot_two_pies(assets_pie: dict, le_pie: dict, year: int):
         ax.axis('equal')
         _pie(ax, le_pie["labels"], le_pie["sizes"], f"Liab & Equity Breakdown ({year})")
         st.pyplot(fig)
+        plt.close(fig)
 
 
 # =========================
-# CF (annual) - FIXED: Use composite for Capex to handle tag changes across years
+# CF (annual)
 # =========================
 def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
     meta = {}
@@ -1337,7 +1306,6 @@ def build_cf_annual_table(facts_json: dict) -> tuple[pd.DataFrame, dict]:
 
 
 def plot_cf_cfo_capex(table: pd.DataFrame, title: str):
-    """Chart 1: CFO (positive) and Capex (negative) trend lines."""
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     cfo = df["CFO(M$)"].astype(float).to_numpy()
@@ -1354,10 +1322,10 @@ def plot_cf_cfo_capex(table: pd.DataFrame, title: str):
     ax.set_ylabel("Million USD", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_cf_fcf(table: pd.DataFrame, title: str):
-    """Chart 2: FCF trend with zero line."""
     df = table.copy()
     x = df["FY"].astype(str).tolist()
     fcf = df["FCF(M$)"].astype(float).to_numpy()
@@ -1368,7 +1336,6 @@ def plot_cf_fcf(table: pd.DataFrame, title: str):
 
     ax.plot(x, fcf, label="FCF (Free Cash Flow)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
 
-    # Fill positive/negative regions
     fcf_series = pd.Series(fcf, index=range(len(fcf)))
     x_idx = np.arange(len(x))
     ax.fill_between(x_idx, fcf, 0, where=(fcf >= 0), color=C_GOLD, alpha=0.10, interpolate=True)
@@ -1378,6 +1345,7 @@ def plot_cf_fcf(table: pd.DataFrame, title: str):
     ax.set_ylabel("Million USD", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
@@ -1504,10 +1472,11 @@ def plot_rpo_annual(table: pd.DataFrame, title: str):
     ax.set_ylabel("Million USD", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
-# Ratios tab: ROA / ROE / Inventory Turnover - FIXED (4)
+# Ratios tab
 # =========================
 def _annual_series_map_usd(facts_json: dict, tag_candidates: list[str], min_duration: int = 0) -> tuple[str | None, dict]:
     tag, df = _pick_best_tag_latest_first_usd(facts_json, tag_candidates, min_duration=min_duration)
@@ -1582,6 +1551,7 @@ def plot_roa(table: pd.DataFrame, title: str):
     ax.set_ylabel("%", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_roe(table: pd.DataFrame, title: str):
@@ -1597,6 +1567,7 @@ def plot_roe(table: pd.DataFrame, title: str):
     ax.set_ylabel("%", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_inventory_turnover(table: pd.DataFrame, title: str):
@@ -1612,10 +1583,11 @@ def plot_inventory_turnover(table: pd.DataFrame, title: str):
     ax.set_ylabel("x", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
-# EPS (unit-aware) + STOCK SPLIT ADJUSTMENT - FIXED (5)
+# EPS (unit-aware) + STOCK SPLIT ADJUSTMENT
 # =========================
 def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> tuple[pd.Series, dict]:
     factors = pd.Series(1.0, index=date_index)
@@ -1644,9 +1616,6 @@ def _get_split_adjustment_factor(ticker: str, date_index: pd.DatetimeIndex) -> t
 
 
 def _extract_eps_series_any_unit(facts_json: dict, xbrl_tag: str, min_duration: int = 0) -> pd.DataFrame:
-    """
-    Extract EPS (Supports min_duration)
-    """
     us = facts_json.get("facts", {}).get("us-gaap", {})
     tag_obj = us.get(xbrl_tag, {})
     units = tag_obj.get("units", {})
@@ -1783,19 +1752,14 @@ def plot_eps(table: pd.DataFrame, title: str, unit_label: str = "USD/share"):
     ax.set_ylabel(unit_label, color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
-# PER (Price-to-Earnings Ratio) - Split-Adjusted
+# PER (Price-to-Earnings Ratio)
 # =========================
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def _fetch_adj_close_at_dates(ticker_symbol: str, dates: list[str]) -> dict:
-    """Fetch split-adjusted close prices at given dates using yfinance.
-    
-    For each target date, searches a window of +/- 5 business days
-    to handle weekends and holidays.
-    Returns {date_str: price} dict.
-    """
     if not ticker_symbol or not dates:
         return {}
 
@@ -1832,7 +1796,6 @@ def _fetch_adj_close_at_dates(ticker_symbol: str, dates: list[str]) -> dict:
 
 
 def build_per_table(eps_table: pd.DataFrame, ticker_symbol: str) -> tuple[pd.DataFrame, dict]:
-    """Build PER table from EPS table with End dates."""
     meta = {}
 
     if eps_table.empty or "End" not in eps_table.columns:
@@ -1879,20 +1842,19 @@ def plot_per(table: pd.DataFrame, title: str):
 
     ax.plot(x, per, label="PER (Trailing)", color=C_GOLD, linewidth=2.5, marker="o", markersize=6)
 
-    # Reference lines
     ax.axhline(y=15, color=C_SILVER, linewidth=0.8, linestyle="--", alpha=0.5)
     ax.axhline(y=25, color=C_SILVER, linewidth=0.8, linestyle="--", alpha=0.5)
 
     ax.set_ylabel("x", color=TEXT_COLOR)
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
 # Quarterly PL & EPS
 # =========================
 def _extract_all_periods_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
-    """Extract all 10-Q and 10-K entries for a tag (USD unit), with duration info."""
     facts_root = facts_json.get("facts", {})
     if not facts_root:
         return pd.DataFrame()
@@ -1962,12 +1924,6 @@ def _extract_all_periods_usd(facts_json: dict, xbrl_tag: str) -> pd.DataFrame:
 
 
 def _build_individual_quarters(facts_json: dict, tag_priority: list[str]) -> pd.DataFrame:
-    """Build individual quarter values (Q1-Q4) from composite tags.
-    
-    Q1-Q3: extracted from 10-Q with duration 60-100 days.
-    Q4: derived as FY_annual - (Q1 + Q2 + Q3).
-    Returns DataFrame with columns: [fy, q, end, val, source]
-    """
     all_periods = pd.DataFrame()
     used_tag = None
 
@@ -1985,26 +1941,21 @@ def _build_individual_quarters(facts_json: dict, tag_priority: list[str]) -> pd.
     if all_periods.empty:
         return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
 
-    # Individual quarters from 10-Q (duration 60-100 days)
     q_mask = (all_periods["days"] >= 60) & (all_periods["days"] <= 100) & (all_periods["fp"].isin({"Q1", "Q2", "Q3"}))
     q_data = all_periods[q_mask].copy()
 
-    # Map fp to quarter number
     fp_to_q = {"Q1": 1, "Q2": 2, "Q3": 3}
     q_data["q"] = q_data["fp"].map(fp_to_q)
     q_data = q_data.sort_values(["fy", "q", "filed"]).drop_duplicates(subset=["fy", "q"], keep="last")
 
-    # Annual totals from 10-K (duration > 330 days)
     fy_mask = (all_periods["days"] >= 330) & (all_periods["fp"] == "FY")
     fy_data = all_periods[fy_mask].copy()
     fy_data = fy_data.sort_values(["fy", "filed"]).drop_duplicates(subset=["fy"], keep="last")
     fy_map = dict(zip(fy_data["fy"].astype(int), fy_data["val"].astype(float)))
     fy_end_map = dict(zip(fy_data["fy"].astype(int), fy_data["end"]))
 
-    # Build result
     result_rows = []
 
-    # Add Q1-Q3
     for _, r in q_data.iterrows():
         result_rows.append({
             "fy": int(r["fy"]),
@@ -2014,7 +1965,6 @@ def _build_individual_quarters(facts_json: dict, tag_priority: list[str]) -> pd.
             "source": "direct",
         })
 
-    # Derive Q4 = FY - (Q1 + Q2 + Q3)
     q_pivot = q_data.groupby("fy").apply(
         lambda g: {int(r["q"]): float(r["val"]) for _, r in g.iterrows()}
     )
@@ -2048,7 +1998,6 @@ def _build_individual_quarters(facts_json: dict, tag_priority: list[str]) -> pd.
 
 
 def _extract_quarterly_eps(facts_json: dict, tag_priority: list[str]) -> pd.DataFrame:
-    """Extract quarterly EPS from per-share units (10-Q + 10-K derived Q4)."""
     us = facts_json.get("facts", {}).get("us-gaap", {})
 
     all_periods = pd.DataFrame()
@@ -2119,14 +2068,12 @@ def _extract_quarterly_eps(facts_json: dict, tag_priority: list[str]) -> pd.Data
     if all_periods.empty:
         return pd.DataFrame(columns=["fy", "q", "end", "val", "source"])
 
-    # Individual quarters (60-100 days)
     q_mask = (all_periods["days"] >= 60) & (all_periods["days"] <= 100) & (all_periods["fp"].isin({"Q1", "Q2", "Q3"}))
     q_data = all_periods[q_mask].copy()
     fp_to_q = {"Q1": 1, "Q2": 2, "Q3": 3}
     q_data["q"] = q_data["fp"].map(fp_to_q)
     q_data = q_data.sort_values(["fy", "q", "filed"]).drop_duplicates(subset=["fy", "q"], keep="last")
 
-    # Annual EPS (FY, > 330 days)
     fy_mask = (all_periods["days"] >= 330) & (all_periods["fp"] == "FY")
     fy_data = all_periods[fy_mask].copy()
     fy_data = fy_data.sort_values(["fy", "filed"]).drop_duplicates(subset=["fy"], keep="last")
@@ -2140,7 +2087,6 @@ def _extract_quarterly_eps(facts_json: dict, tag_priority: list[str]) -> pd.Data
             "val": float(r["val"]), "source": "direct",
         })
 
-    # Q4 EPS = FY EPS - (Q1 + Q2 + Q3) EPS
     q_pivot = q_data.groupby("fy").apply(
         lambda g: {int(r["q"]): float(r["val"]) for _, r in g.iterrows()}
     )
@@ -2195,7 +2141,6 @@ def build_quarterly_pl_table(facts_json: dict, n_quarters: int = 8) -> tuple[pd.
     pt_q = _build_individual_quarters(facts_json, pretax_tags)
     meta["pretax_quarters"] = len(pt_q) if not pt_q.empty else 0
 
-    # Merge all on quarter_label
     if rev_q.empty:
         return pd.DataFrame(), meta
 
@@ -2216,7 +2161,6 @@ def build_quarterly_pl_table(facts_json: dict, n_quarters: int = 8) -> tuple[pd.
 
     base = base.sort_values(["fy", "q"]).reset_index(drop=True)
 
-    # Slice to latest n_quarters
     if len(base) > n_quarters:
         base = base.iloc[-n_quarters:].reset_index(drop=True)
 
@@ -2235,7 +2179,6 @@ def build_quarterly_eps_table(facts_json: dict, ticker_symbol: str = "", n_quart
     if eps_q.empty:
         return pd.DataFrame(), meta
 
-    # Split adjustment
     if ticker_symbol:
         eps_q["end"] = pd.to_datetime(eps_q["end"])
         factors, split_debug = _get_split_adjustment_factor(ticker_symbol, pd.DatetimeIndex(eps_q["end"]))
@@ -2275,10 +2218,10 @@ def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=N
     ax.set_ylabel("Million USD", color=TEXT_COLOR)
     ax.tick_params(axis='x', rotation=45)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenue_col: str, title: str, margin_label: str = "Margin (%)"):
-    """Bar chart (left axis: income) + Line chart (right axis: margin %)."""
     df = table.copy()
     x = df["Quarter"].tolist()
     income = df[income_col].astype(float).to_numpy()
@@ -2293,14 +2236,12 @@ def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenu
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
-    # Bars: income (left axis)
     bar_colors = [C_BAR if v >= 0 else C_BRONZE for v in income]
     ax_left.bar(x, income, color=bar_colors, alpha=0.85, width=0.6, label=income_col.replace("(M$)", ""))
     ax_left.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
     ax_left.set_ylabel("Million USD", color=TEXT_COLOR)
     ax_left.tick_params(axis='x', rotation=45)
 
-    # Line: margin (right axis)
     ax_right = ax_left.twinx()
     ax_right.plot(x, margin, color=C_GOLD, linewidth=2.0, marker="o", markersize=5, label=margin_label)
     ax_right.set_ylabel("%", color=TEXT_COLOR)
@@ -2310,12 +2251,12 @@ def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenu
     ax_right.spines['right'].set_color(GRID_COLOR)
     ax_right.spines['bottom'].set_visible(False)
 
-    # Combined legend
     lines1, labels1 = ax_left.get_legend_handles_labels()
     lines2, labels2 = ax_right.get_legend_handles_labels()
     ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
 
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
@@ -2334,13 +2275,13 @@ def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
     ax.set_ylabel("USD / share", color=TEXT_COLOR)
     ax.tick_params(axis='x', rotation=45)
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
 # Auto DCF Valuation
 # =========================
 def _get_shares_outstanding(facts_json: dict) -> tuple[float, str | None]:
-    """Get diluted shares outstanding from SEC EDGAR (dei or us-gaap)."""
     candidates = [
         ("dei", "EntityCommonStockSharesOutstanding"),
         ("dei", "CommonStockSharesOutstanding"),
@@ -2388,7 +2329,6 @@ def _get_shares_outstanding(facts_json: dict) -> tuple[float, str | None]:
 
 
 def _get_net_cash(facts_json: dict, year: int) -> tuple[float, dict]:
-    """Calculate net cash = cash - total debt for a given year."""
     meta = {}
 
     cash_tags = [
@@ -2421,20 +2361,11 @@ def _get_net_cash(facts_json: dict, year: int) -> tuple[float, dict]:
 
 
 def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
-    """Fully automated DCF valuation using historical data.
-
-    Fixed assumptions:
-        WACC = 10%, Terminal growth = 2.5%
-    Derived from historical data (3-year averages):
-        Revenue CAGR, CFO margin, Capex/Revenue ratio
-    """
     WACC = 0.085
     TERMINAL_G = 0.035
     PROJECTION_YEARS = 10
     meta = {"wacc": WACC * 100, "terminal_g": TERMINAL_G * 100}
 
-    # --- Gather historical data ---
-    # Revenue
     revenue_tags = [
         "RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
         "NetOperatingRevenues", "SalesRevenueNet", "SalesRevenue",
@@ -2444,7 +2375,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
         return {}, {"error": "Insufficient revenue data for DCF (need >= 3 years)"}
     rev_map = dict(zip(rev_df["year"].astype(int), rev_df["value"].astype(float)))
 
-    # CFO
     cfo_tags = [
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
@@ -2452,7 +2382,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     cfo_df, _ = _build_composite_by_year_usd(facts_json, cfo_tags, min_duration=350)
     cfo_map = dict(zip(cfo_df["year"].astype(int), cfo_df["value"].astype(float))) if not cfo_df.empty else {}
 
-    # Capex
     capex_tags = [
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "PaymentsToAcquireProductiveAssets",
@@ -2461,12 +2390,10 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     capex_df, _ = _build_composite_by_year_usd(facts_json, capex_tags, min_duration=350)
     capex_map = dict(zip(capex_df["year"].astype(int), capex_df["value"].astype(float))) if not capex_df.empty else {}
 
-    # --- Calculate 3-year averages ---
     sorted_years = sorted(rev_map.keys())
     latest_year = sorted_years[-1]
     last3 = [y for y in sorted_years if y >= latest_year - 2]
 
-    # Revenue CAGR (3yr)
     y_start = last3[0]
     y_end = last3[-1]
     rev_start = rev_map.get(y_start, np.nan)
@@ -2478,7 +2405,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
         rev_cagr = 0.05
     meta["revenue_cagr_3yr"] = rev_cagr * 100
 
-    # CFO margin (3yr avg)
     cfo_margins = []
     for y in last3:
         r = rev_map.get(y, np.nan)
@@ -2488,7 +2414,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     avg_cfo_margin = float(np.mean(cfo_margins)) if cfo_margins else 0.30
     meta["avg_cfo_margin"] = avg_cfo_margin * 100
 
-    # Capex/Revenue ratio (3yr avg)
     capex_ratios = []
     for y in last3:
         r = rev_map.get(y, np.nan)
@@ -2498,13 +2423,10 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     avg_capex_ratio = float(np.mean(capex_ratios)) if capex_ratios else 0.10
     meta["avg_capex_ratio"] = avg_capex_ratio * 100
 
-    # Base revenue (latest year)
     base_revenue = rev_end
     meta["base_revenue_m"] = _to_musd(base_revenue)
     meta["base_year"] = int(latest_year)
 
-    # --- 10-year FCF projection ---
-    # Revenue growth linearly decays from rev_cagr to terminal_g
     projection = []
     prev_revenue = base_revenue
     for i in range(1, PROJECTION_YEARS + 1):
@@ -2526,14 +2448,12 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
 
     proj_df = pd.DataFrame(projection)
 
-    # --- Discount FCFs ---
     pv_fcfs = 0.0
     for i, row in enumerate(projection):
         fcf_raw = row["FCF(M$)"] * 1_000_000
         pv = fcf_raw / ((1 + WACC) ** (i + 1))
         pv_fcfs += pv
 
-    # Terminal value
     last_fcf = projection[-1]["FCF(M$)"] * 1_000_000
     if WACC > TERMINAL_G and last_fcf > 0:
         terminal_value = last_fcf * (1 + TERMINAL_G) / (WACC - TERMINAL_G)
@@ -2543,7 +2463,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
 
     ev = pv_fcfs + pv_terminal
 
-    # --- Net cash & shares ---
     bs_year = _latest_year_from_assets(facts_json)
     if bs_year is None:
         bs_year = int(latest_year)
@@ -2564,7 +2483,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     fair_price = equity_value / shares_raw
     meta["fair_price"] = fair_price
 
-    # Current price and PER
     current_price = np.nan
     current_eps = np.nan
     fair_per = np.nan
@@ -2577,7 +2495,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
     except Exception:
         pass
 
-    # Get latest EPS
     eps_table, eps_meta = build_eps_table(facts_json, ticker_symbol=ticker_symbol)
     if not eps_table.empty:
         current_eps = float(eps_table["EPS"].iloc[-1])
@@ -2587,7 +2504,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
         if np.isfinite(current_price):
             current_per = current_price / current_eps
 
-    # --- Build result ---
     result = {
         "projection": proj_df,
         "pv_fcfs_m": _to_musd(pv_fcfs),
@@ -2608,7 +2524,6 @@ def build_auto_dcf(facts_json: dict, ticker_symbol: str) -> tuple[dict, dict]:
 
 
 def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
-    """Chart: projected FCF bars with revenue line."""
     df = proj_df.copy()
     x = df["Year"].tolist()
     fcf = df["FCF(M$)"].astype(float).to_numpy()
@@ -2637,10 +2552,10 @@ def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
     ax_left.legend(lines1 + lines2, labels1 + labels2, facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", frameon=False)
 
     st.pyplot(fig)
+    plt.close(fig)
 
 
 def plot_dcf_waterfall(result: dict, title: str):
-    """Horizontal bar showing EV breakdown: PV of FCFs + PV of Terminal + Net Cash."""
     pv_fcfs = result["pv_fcfs_m"]
     pv_term = result["pv_terminal_m"]
     net_cash = result["net_cash_m"]
@@ -2662,6 +2577,7 @@ def plot_dcf_waterfall(result: dict, title: str):
 
     ax.invert_yaxis()
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================
@@ -2669,7 +2585,6 @@ def plot_dcf_waterfall(result: dict, title: str):
 # =========================
 def render(authed_email: str):
     st.set_page_config(page_title="Fundamentals (Luxury Edition)", layout="wide")
-    # Apply Luxury CSS
     st.markdown(
         """
         <style>
@@ -2722,7 +2637,6 @@ def render(authed_email: str):
         pl_disp = _slice_latest_n_years(pl_table, int(n_years))
         st.caption(f"Showing {len(pl_disp)} years")
         
-        # Simplified Title
         plot_pl_annual(pl_disp, f"Income Statement")
         
         st.markdown("### Annual PL (Million USD)")
@@ -2775,7 +2689,6 @@ def render(authed_email: str):
         with st.spinner("Fetching & parsing XBRL filings for segment data..."):
             seg_df, prod_df, geo_df, seg_meta = build_segment_table(cik10)
 
-        # --- 1. Official Segments (StatementBusinessSegmentsAxis) ---
         st.markdown("### Reporting Segments")
         if not seg_df.empty:
             seg_disp = seg_df[seg_df.index >= int(seg_df.index.max()) - n_years + 1]
@@ -2784,7 +2697,6 @@ def render(authed_email: str):
         else:
             st.info("No official reporting segment data found (StatementBusinessSegmentsAxis).")
 
-        # --- 2. Product/Service Breakdown ---
         st.markdown("### Product / Service Breakdown")
         if not prod_df.empty:
             prod_disp = prod_df[prod_df.index >= int(prod_df.index.max()) - n_years + 1]
@@ -2793,7 +2705,6 @@ def render(authed_email: str):
         else:
             st.info("No product/service breakdown found (ProductOrServiceAxis).")
 
-        # --- 3. Geography ---
         st.markdown("### Geography")
         if not geo_df.empty:
             geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
@@ -2802,7 +2713,6 @@ def render(authed_email: str):
         else:
             st.info("No geography segment data found.")
 
-        # Debug info
         with st.expander("🔍 Segment Debug Info"):
             st.write(f"**10-K filings found:** {seg_meta.get('filings_found', 0)}")
             st.write(f"**XBRL instances fetched:** {seg_meta.get('filings_fetched', 0)}")
@@ -2853,7 +2763,6 @@ def render(authed_email: str):
         rat_disp = _slice_latest_n_years(rat_table, int(n_years))
         st.caption(f"Showing {len(rat_disp)} years")
 
-        # --- ROA Summary ---
         st.markdown("### ROA")
         plot_roa(rat_disp, f"ROA (Return on Assets)")
         roa_vals = rat_disp["ROA(%)"].dropna()
@@ -2871,7 +2780,6 @@ def render(authed_email: str):
             if np.isfinite(cagr_roa):
                 col_b.metric("CAGR (ROA)", f"{cagr_roa:+.2f}% / yr")
 
-        # --- ROE Summary ---
         st.markdown("### ROE")
         plot_roe(rat_disp, f"ROE (Return on Equity)")
         roe_vals = rat_disp["ROE(%)"].dropna()
@@ -2924,7 +2832,6 @@ def render(authed_email: str):
                 if np.isfinite(cagr_eps):
                     col_f.metric("CAGR (EPS)", f"{cagr_eps:+.2f}% / yr")
 
-            # --- PER ---
             st.markdown("### PER (Trailing)")
             per_table, per_meta = build_per_table(eps_disp, ticker_symbol=t)
             if per_table.empty or per_table["PER"].dropna().empty:
@@ -2959,7 +2866,6 @@ def render(authed_email: str):
                     hide_index=True,
                 )
 
-            # --- EPS Data Table ---
             st.markdown("### EPS Data")
             eps_display_cols = eps_disp[["FY", "EPS"]].copy()
             st.dataframe(eps_display_cols.style.format({"EPS": "{:.2f}"}), use_container_width=True, hide_index=True)
@@ -3013,7 +2919,6 @@ def render(authed_email: str):
         if not dcf_result:
             st.warning(f"DCF calculation failed: {dcf_meta.get('error', 'Unknown error')}")
         else:
-            # --- Assumptions ---
             st.markdown("#### Assumptions (Auto-derived)")
             c1, c2, c3 = st.columns(3)
             c1.metric("WACC", f"{dcf_meta.get('wacc', 0):.1f}%")
@@ -3027,7 +2932,6 @@ def render(authed_email: str):
 
             st.markdown("---")
 
-            # --- Key Results ---
             st.markdown("#### Valuation Results")
             r1, r2, r3 = st.columns(3)
             fair_p = dcf_result.get("fair_price", np.nan)
@@ -3052,7 +2956,6 @@ def render(authed_email: str):
 
             st.markdown("---")
 
-            # --- EV Breakdown ---
             st.markdown("#### Enterprise Value Breakdown")
             ev_c1, ev_c2, ev_c3, ev_c4 = st.columns(4)
             ev_c1.metric("PV of FCFs", f"{dcf_result['pv_fcfs_m']:,.0f} M$")
@@ -3060,7 +2963,6 @@ def render(authed_email: str):
             ev_c3.metric("Net Cash", f"{dcf_result['net_cash_m']:,.0f} M$")
             ev_c4.metric("Equity Value", f"{dcf_result['equity_value_m']:,.0f} M$")
 
-            # Terminal as % of EV
             ev_total = dcf_result.get("enterprise_value_m", 0)
             if ev_total > 0:
                 tv_pct = dcf_result["pv_terminal_m"] / ev_total * 100
@@ -3070,7 +2972,6 @@ def render(authed_email: str):
 
             st.markdown("---")
 
-            # --- FCF Projection Chart & Table ---
             st.markdown("#### 10-Year FCF Projection")
             proj_df = dcf_result["projection"]
             plot_dcf_fcf_projection(proj_df, "Projected FCF & Revenue")
