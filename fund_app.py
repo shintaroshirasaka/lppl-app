@@ -576,12 +576,16 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
 
     # --- Step 2: Find revenue facts referencing dimensional contexts ---
     revenue_tags = {
-        "revenues", "revenuesfromcontractwithcustomerexcludingassessedtax",
+        "revenues", "revenue",
+        "revenuefromcontractwithcustomerexcludingassessedtax",
+        "revenuesfromcontractwithcustomerexcludingassessedtax",
+        "revenuefromcontractwithcustomerincludingassessedtax",
         "revenuesfromcontractwithcustomerincludingassessedtax",
         "salesrevenuenet", "salestoexternalcustomers",
         "netoperatingrevenues", "salesrevenueservicesnet", "salesrevenue",
         "revenuesnetofinterestexpense",
         "revenuesfromexternalcustomer", "revenuesfromexternalcustomers",
+        "revenuefromexternalcustomers",
         "segmentreportinginformationrevenue",
     }
 
@@ -661,7 +665,8 @@ def _collect_segment_result(results: list, tag: str, ctx_ref: str, val: float, c
     ctx = contexts[ctx_ref]
     if ctx["dur"] < 330:
         return
-    if len(ctx["dims"]) > 1:
+    # Allow up to 2 dimensions (some companies use segment + sub-category)
+    if len(ctx["dims"]) > 2:
         return
 
     for dim, member in ctx["dims"]:
