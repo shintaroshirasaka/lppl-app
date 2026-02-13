@@ -811,6 +811,10 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Data
         # Drop columns that are >70% NaN (sparse/discontinued segments)
         thresh = len(pivot) * 0.3
         pivot = pivot.dropna(axis=1, thresh=int(max(thresh, 1)))
+        # Drop columns where the latest year has no data (discontinued)
+        if not pivot.empty:
+            latest_year = pivot.index.max()
+            pivot = pivot.loc[:, pivot.loc[latest_year].notna()]
         return pivot.sort_index()
 
     seg_pivot = _make_pivot(df[df["axis_type"] == "Segment"])
