@@ -48,10 +48,10 @@ def draw_logo_overlay(ax):
     """Adds the OUT-STANDER watermark logo with outline for visibility."""
     import matplotlib.patheffects as pe
     ax.text(0.98, 0.03, "OUT-STANDER", transform=ax.transAxes,
-            fontsize=20, color='#3d3320', fontweight='bold',
-            fontname='serif', ha='right', va='bottom', zorder=5, alpha=0.9,
+            fontsize=20, color='#a09080', fontweight='bold',
+            fontname='serif', ha='right', va='bottom', zorder=5, alpha=0.7,
             path_effects=[
-                pe.withStroke(linewidth=2, foreground=HNWI_AX_BG),
+                pe.withStroke(linewidth=3, foreground='#0a0a0a'),
             ])
 
 def style_hnwi_ax(ax, title=None, dual_y=False):
