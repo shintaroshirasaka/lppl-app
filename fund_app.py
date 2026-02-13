@@ -48,10 +48,10 @@ def draw_logo_overlay(ax):
     """Adds the OUT-STANDER watermark logo with outline for visibility."""
     import matplotlib.patheffects as pe
     ax.text(0.98, 0.03, "OUT-STANDER", transform=ax.transAxes,
-            fontsize=20, color='#a09080', fontweight='bold',
-            fontname='serif', ha='right', va='bottom', zorder=5, alpha=0.7,
+            fontsize=20, color='#3d3320', fontweight='bold',
+            fontname='serif', ha='right', va='bottom', zorder=5, alpha=0.9,
             path_effects=[
-                pe.withStroke(linewidth=3, foreground='#0a0a0a'),
+                pe.withStroke(linewidth=2, foreground=HNWI_AX_BG),
             ])
 
 def style_hnwi_ax(ax, title=None, dual_y=False):
@@ -838,13 +838,15 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
     palette = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE,
                "#8B4513", "#556B2F", "#8B008B", "#2F4F4F", "#B8860B",
                "#4169E1", "#CD853F", "#6B8E23", "#9370DB", "#20B2AA"]
-    colors = palette[:n_cols] if n_cols <= len(palette) else palette * (n_cols // len(palette) + 1)
+    # Reverse so that the bottom bar (where the logo sits) is the last color, not gold
+    colors_list = palette[:n_cols]
+    colors_list = list(reversed(colors_list))
 
     fig, ax = plt.subplots(figsize=(12, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    df.plot(kind="bar", stacked=True, ax=ax, color=colors[:n_cols], width=0.7, edgecolor='none')
+    df.plot(kind="bar", stacked=True, ax=ax, color=colors_list, width=0.7, edgecolor='none')
 
     ax.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
     ax.tick_params(colors=TICK_COLOR, axis='x', rotation=0)
@@ -2260,7 +2262,7 @@ def build_quarterly_eps_table(facts_json: dict, ticker_symbol: str = "", n_quart
 
 def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=None):
     if color is None:
-        color = C_GOLD
+        color = C_SILVER
     df = table.copy()
     x = df["Quarter"].tolist()
     vals = df[value_col].astype(float).to_numpy()
@@ -2269,7 +2271,7 @@ def plot_quarterly_bars(table: pd.DataFrame, value_col: str, title: str, color=N
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    colors = [C_GOLD if v >= 0 else C_BRONZE for v in vals]
+    colors = [C_SILVER if v >= 0 else C_BRONZE for v in vals]
     ax.bar(x, vals, color=colors, alpha=0.85, width=0.6)
 
     ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
@@ -2295,7 +2297,7 @@ def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenu
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
     # Bars: income (left axis)
-    bar_colors = [C_GOLD if v >= 0 else C_BRONZE for v in income]
+    bar_colors = [C_SILVER if v >= 0 else C_BRONZE for v in income]
     ax_left.bar(x, income, color=bar_colors, alpha=0.85, width=0.6, label=income_col.replace("(M$)", ""))
     ax_left.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
     ax_left.set_ylabel("Million USD", color=TEXT_COLOR)
@@ -2328,7 +2330,7 @@ def plot_quarterly_eps_chart(table: pd.DataFrame, title: str):
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    colors = [C_GOLD if v >= 0 else C_BRONZE for v in eps]
+    colors = [C_SILVER if v >= 0 else C_BRONZE for v in eps]
     ax.bar(x, eps, color=colors, alpha=0.85, width=0.6)
 
     ax.axhline(y=0, color=GRID_COLOR, linewidth=0.8, linestyle="-")
@@ -2619,7 +2621,7 @@ def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax_left, title=title, dual_y=True)
 
-    bar_colors = [C_GOLD if v >= 0 else C_BRONZE for v in fcf]
+    bar_colors = [C_SILVER if v >= 0 else C_BRONZE for v in fcf]
     ax_left.bar(x, fcf, color=bar_colors, alpha=0.85, width=0.6, label="FCF")
     ax_left.set_ylabel("FCF (Million USD)", color=TEXT_COLOR)
     ax_left.tick_params(axis='x', rotation=45)
