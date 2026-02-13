@@ -37,7 +37,7 @@ C_SILVER = "#A0A0A0"      # Secondary Silver
 C_BRONZE = "#cd7f32"      # Tertiary Bronze
 C_BLUE = "#4682B4"        # Steel Blue (Muted)
 C_SLATE = "#708090"       # Slate Grey
-C_BAR   = "#686868"       # Default bar color (dark enough for logo visibility)
+C_BAR   = "#A0A0A0"       # Default bar color – Silver (matches OK pattern)
 
 # Custom Colormap for Stacked Bars
 LUXURY_CMAP = ListedColormap([C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE, "#8B4513", "#556B2F"])
@@ -2306,7 +2306,7 @@ def plot_quarterly_bars_with_margin(table: pd.DataFrame, income_col: str, revenu
 
     # Line: margin (right axis)
     ax_right = ax_left.twinx()
-    ax_right.plot(x, margin, color=C_SILVER, linewidth=2.0, marker="o", markersize=5, label=margin_label)
+    ax_right.plot(x, margin, color=C_GOLD, linewidth=2.0, marker="o", markersize=5, label=margin_label)
     ax_right.set_ylabel("%", color=TEXT_COLOR)
     ax_right.tick_params(colors=TICK_COLOR, which='both')
     ax_right.spines['top'].set_visible(False)
@@ -2628,7 +2628,7 @@ def plot_dcf_fcf_projection(proj_df: pd.DataFrame, title: str):
     ax_left.tick_params(axis='x', rotation=45)
 
     ax_right = ax_left.twinx()
-    ax_right.plot(x, revenue, color=C_SILVER, linewidth=2.0, marker="o", markersize=5, label="Revenue")
+    ax_right.plot(x, revenue, color=C_GOLD, linewidth=2.0, marker="o", markersize=5, label="Revenue")
     ax_right.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
     ax_right.tick_params(colors=TICK_COLOR, which='both')
     ax_right.spines['top'].set_visible(False)
