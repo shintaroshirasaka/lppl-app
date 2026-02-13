@@ -591,12 +591,6 @@ def fit_lppl_negative_bubble_cached(price_key: str, price_values: np.ndarray, id
 # =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
-    """
-    Fetches weekly margin balance data for JP stocks.
-    Primary: IRBank /code/margin (東証 weekly 信用取引残高)
-    Fallback: karauri.net /code/ (日証金 daily data - summary level)
-    Returns: DataFrame[Date, MarginBuy, MarginSell, Hibush]
-    """
     code = ticker.replace(".T", "").strip()
     if not code.isdigit():
         return pd.DataFrame()
@@ -609,12 +603,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     }
 
     def _scrape_irbank_margin():
-        """
-        IRBank /code/margin table structure:
-        | 日付 | 買い残高 ... | 売り残高 ... | 倍率 | 逆日歩 |
-        Date is MM/DD with year separator rows like "2026"
-        Values contain appended +/- changes like "8,446,200 +1,331,000"
-        """
         url = f"https://irbank.net/{code}/margin"
         try:
             res = requests.get(url, headers=headers, timeout=10)
@@ -692,11 +680,6 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     def _scrape_karauri_margin():
-        """
-        karauri.net /code/ has 日証金 section with daily margin data.
-        Structure is definition list, not a table - we parse the summary values.
-        Also has 東証 weekly data and 逆日歩 section.
-        """
         url = f"https://karauri.net/{code}/"
         try:
             res = requests.get(url, headers=headers, timeout=10)
@@ -743,18 +726,8 @@ def fetch_jp_margin_data_robust(ticker: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-# =======================================================
-# NEW: FINRA Short Volume Scraper (US Stocks)
-# =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_us_short_volume(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
-    """
-    Fetches daily FINRA Reg SHO Short Volume data for US-listed stocks.
-    Primary source: FINRA public API (no auth required)
-      POST https://api.finra.org/data/group/otcmarket/name/regShoDaily
-    Returns: DataFrame[Date, ShortVolume, TotalVolume, NonShortVolume, ShortRatio]
-    Data is aggregated across all TRFs (NQTRF, NYTRF, NCTRF).
-    """
     symbol = ticker.strip().upper()
     non_us_suffixes = [".T", ".HK", ".L", ".DE", ".PA", ".AS", ".MI", ".SW", ".TO", ".AX"]
     if any(symbol.endswith(sfx) for sfx in non_us_suffixes):
@@ -762,76 +735,43 @@ def fetch_us_short_volume(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
 
     def _try_finra_api():
         url = "https://api.finra.org/data/group/otcmarket/name/regShoDaily"
-        api_headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        payload = {
-            "limit": 5000,
-            "compareFilters": [
-                {
-                    "compareType": "equal",
-                    "fieldName": "securitiesInformationProcessorSymbolIdentifier",
-                    "fieldValue": symbol
-                }
-            ]
-        }
+        api_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        payload = {"limit": 5000, "compareFilters": [{"compareType": "equal", "fieldName": "securitiesInformationProcessorSymbolIdentifier", "fieldValue": symbol}]}
         try:
             res = requests.post(url, headers=api_headers, json=payload, timeout=15)
-            if res.status_code != 200:
-                return pd.DataFrame()
+            if res.status_code != 200: return pd.DataFrame()
             data = res.json()
-            if not data or not isinstance(data, list) or len(data) == 0:
-                return pd.DataFrame()
+            if not data or not isinstance(data, list) or len(data) == 0: return pd.DataFrame()
             raw = pd.DataFrame(data)
             required_cols = ["tradeReportDate", "shortParQuantity", "totalParQuantity"]
             for col in required_cols:
-                if col not in raw.columns:
-                    return pd.DataFrame()
+                if col not in raw.columns: return pd.DataFrame()
             raw["tradeReportDate"] = pd.to_datetime(raw["tradeReportDate"], errors="coerce")
             raw["shortParQuantity"] = pd.to_numeric(raw["shortParQuantity"], errors="coerce").fillna(0)
             raw["totalParQuantity"] = pd.to_numeric(raw["totalParQuantity"], errors="coerce").fillna(0)
             if "shortExemptParQuantity" in raw.columns:
                 raw["shortExemptParQuantity"] = pd.to_numeric(raw["shortExemptParQuantity"], errors="coerce").fillna(0)
-            daily = raw.groupby("tradeReportDate").agg(
-                ShortVolume=("shortParQuantity", "sum"),
-                TotalVolume=("totalParQuantity", "sum")
-            ).reset_index()
+            daily = raw.groupby("tradeReportDate").agg(ShortVolume=("shortParQuantity", "sum"), TotalVolume=("totalParQuantity", "sum")).reset_index()
             daily = daily.rename(columns={"tradeReportDate": "Date"})
             daily = daily.dropna(subset=["Date"]).sort_values("Date")
             daily["TotalVolume"] = daily["TotalVolume"].replace(0, np.nan)
             daily["ShortRatio"] = (daily["ShortVolume"] / daily["TotalVolume"] * 100).round(2)
             daily["NonShortVolume"] = (daily["TotalVolume"] - daily["ShortVolume"]).clip(lower=0)
             daily = daily.dropna(subset=["ShortVolume"])
-            if len(daily) > 0:
-                return daily.tail(lookback_days).reset_index(drop=True)
-        except Exception:
-            pass
+            if len(daily) > 0: return daily.tail(lookback_days).reset_index(drop=True)
+        except Exception: pass
         return pd.DataFrame()
 
     df = _try_finra_api()
-    if not df.empty and "ShortVolume" in df.columns:
-        return df
+    if not df.empty and "ShortVolume" in df.columns: return df
     return pd.DataFrame()
 
 
-# =======================================================
-# NEW: JP Short Selling Ratio (from IRBank margin data)
-# =======================================================
 @st.cache_data(ttl=SCRAPE_TTL_SECONDS, show_spinner=False)
 def fetch_jp_short_selling_ratio(ticker: str, lookback_days: int = 30) -> pd.DataFrame:
-    """
-    For JP stocks, there is no FINRA-equivalent daily short volume per stock.
-    Instead, we compute a 'Margin Sell Ratio' from 東証 weekly margin balance data.
-    ShortRatio = MarginSell / (MarginSell + MarginBuy) * 100
-    Source: IRBank /code/margin
-    Returns: DataFrame[Date, ShortVolume(=MarginSell), TotalVolume(=total), NonShortVolume(=MarginBuy), ShortRatio]
-    """
     margin_df = fetch_jp_margin_data_robust(ticker)
-    if margin_df.empty:
-        return pd.DataFrame()
-    if "MarginBuy" not in margin_df.columns or "MarginSell" not in margin_df.columns:
-        return pd.DataFrame()
+    if margin_df.empty: return pd.DataFrame()
+    if "MarginBuy" not in margin_df.columns or "MarginSell" not in margin_df.columns: return pd.DataFrame()
     df = margin_df.copy()
     df["ShortVolume"] = df["MarginSell"]
     df["NonShortVolume"] = df["MarginBuy"]
@@ -839,22 +779,11 @@ def fetch_jp_short_selling_ratio(ticker: str, lookback_days: int = 30) -> pd.Dat
     df["TotalVolume"] = df["TotalVolume"].replace(0, np.nan)
     df["ShortRatio"] = (df["ShortVolume"] / df["TotalVolume"] * 100).round(2)
     df = df.dropna(subset=["ShortRatio"])
-    if len(df) > 0:
-        return df.tail(lookback_days).reset_index(drop=True)
+    if len(df) > 0: return df.tail(lookback_days).reset_index(drop=True)
     return pd.DataFrame()
 
 
-# =======================================================
-# NEW: Short Volume Chart Renderer (HNWI Dark Theme)
-# =======================================================
 def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False):
-    """
-    Renders FINRA-style short volume chart:
-    - Stacked bars: ShortVolume (red/gold) + NonShortVolume (grey)
-    - Line: ShortRatio (%) on right axis with data labels
-    - Dashed line at 50% baseline
-    - HNWI dark theme
-    """
     HNWI_BG = "#050505"
     HNWI_AX_BG = "#0b0c0e"
     TEXT_COLOR = "#F0F0F0"
@@ -863,33 +792,25 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
     NONSHORT_BAR_COLOR = "#555555"
     RATIO_LINE_COLOR = "#5B9BD5"
     BASELINE_COLOR = "#C5A059"
-
     dates = df["Date"]
     has_volumes = "TotalVolume" in df.columns and df["TotalVolume"].sum() > 0
     has_ratio = "ShortRatio" in df.columns and df["ShortRatio"].sum() > 0
-
     if not has_ratio and not has_volumes:
         st.warning("Short volume data has no usable values.")
         return
-
     fig, ax1 = plt.subplots(figsize=(12, 6))
     fig.patch.set_facecolor(HNWI_BG)
     ax1.set_facecolor(HNWI_AX_BG)
-
     bar_width = 0.7
     x_pos = np.arange(len(dates))
-
     if has_volumes:
         short_vals = df["ShortVolume"].fillna(0).values
         nonshort_vals = df.get("NonShortVolume", pd.Series(dtype=float)).fillna(0).values
-        if len(nonshort_vals) == 0:
-            nonshort_vals = np.zeros(len(short_vals))
-
+        if len(nonshort_vals) == 0: nonshort_vals = np.zeros(len(short_vals))
         short_label = "Margin Sell" if is_jp else "Short Volume"
         nonshort_label = "Margin Buy" if is_jp else "Non-Short Volume"
         ax1.bar(x_pos, short_vals, width=bar_width, color=SHORT_BAR_COLOR, alpha=0.85, label=short_label, zorder=3)
         ax1.bar(x_pos, nonshort_vals, width=bar_width, bottom=short_vals, color=NONSHORT_BAR_COLOR, alpha=0.5, label=nonshort_label, zorder=2)
-
         y_label = "Margin Balance (shares)" if is_jp else "Volume (shares)"
         ax1.set_ylabel(y_label, color=TEXT_COLOR, fontname='serif')
         max_vol = max(short_vals.max() + nonshort_vals.max(), 1)
@@ -897,7 +818,6 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
             ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f"{x/1_000_000:.1f}M"))
         else:
             ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: format(int(x), ',')))
-
     ax1.set_xticks(x_pos)
     date_labels = [d.strftime('%m-%d') for d in dates]
     ax1.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=7)
@@ -907,23 +827,17 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
     ax1.spines['left'].set_color('#333333')
     ax1.spines['bottom'].set_color('#333333')
     ax1.grid(color="#333333", linestyle=":", linewidth=0.5, alpha=0.3, axis='y')
-
     if has_ratio:
         ax2 = ax1.twinx()
         ax2.set_facecolor(HNWI_AX_BG)
         ratio_vals = df["ShortRatio"].fillna(0).values
-
         ratio_line_label = "Sell Ratio (%)" if is_jp else "Short Vol Ratio (%)"
         ax2.plot(x_pos, ratio_vals, color=RATIO_LINE_COLOR, linewidth=2.0, marker='o', markersize=4, zorder=10, label=ratio_line_label)
-
         for i, (xp, rv) in enumerate(zip(x_pos, ratio_vals)):
             if rv > 0:
-                ax2.annotate(f"{rv:.1f}%", (xp, rv), textcoords="offset points", xytext=(0, 10),
-                             ha='center', va='bottom', fontsize=7, color=RATIO_LINE_COLOR, fontweight='bold', zorder=11)
-
+                ax2.annotate(f"{rv:.1f}%", (xp, rv), textcoords="offset points", xytext=(0, 10), ha='center', va='bottom', fontsize=7, color=RATIO_LINE_COLOR, fontweight='bold', zorder=11)
         ax2.axhline(y=50.0, color=BASELINE_COLOR, linestyle='--', linewidth=1.5, alpha=0.8, zorder=1)
         ax2.text(len(x_pos) - 0.5, 50.5, "50%", color=BASELINE_COLOR, fontsize=9, fontweight='bold', va='bottom', ha='right', fontname='serif')
-
         y_min = max(min(ratio_vals) - 10, 0)
         y_max = min(max(ratio_vals) + 15, 100)
         ax2.set_ylim(y_min, y_max)
@@ -934,11 +848,9 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
         ax2.spines['left'].set_visible(False)
         ax2.spines['right'].set_color('#333333')
         ax2.spines['bottom'].set_color('#333333')
-
     title_prefix = "Margin Sell Ratio" if is_jp else "FINRA Short Volume & Ratio"
     title_text = f"{title_prefix}: {ticker}"
     ax1.set_title(title_text, color=TEXT_COLOR, fontweight='normal', fontname='serif', pad=15)
-
     lines1, labels1 = ax1.get_legend_handles_labels()
     if has_ratio:
         lines2, labels2 = ax2.get_legend_handles_labels()
@@ -947,20 +859,13 @@ def render_short_volume_chart(df: pd.DataFrame, ticker: str, is_jp: bool = False
     else:
         all_lines = lines1
         all_labels = labels1
-
     ax1.legend(all_lines, all_labels, loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False, fontsize=8)
-
-    ax1.text(0.98, 0.95, "OUT-STANDER", transform=ax1.transAxes,
-             fontsize=24, color='#3d3320', fontweight='bold',
-             fontname='serif', ha='right', va='top', zorder=0, alpha=0.9)
-
+    ax1.text(0.98, 0.95, "OUT-STANDER", transform=ax1.transAxes, fontsize=24, color='#3d3320', fontweight='bold', fontname='serif', ha='right', va='top', zorder=0, alpha=0.9)
     fig.tight_layout()
     st.pyplot(fig)
+    plt.close(fig)
 
 
-# =======================================================
-# FINAL SCORE (UPDATED WITH 14-DAY WARNING RULE)
-# =======================================================
 def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, int]:
     now = pd.Timestamp(end_date).normalize()
     tc_up = pd.Timestamp(tc_up_date).normalize()
@@ -983,26 +888,17 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
 
 
-# =======================================================
-# Render Graph Pack
-# =======================================================
 def draw_score_overlay(ax, score: int, label: str):
-    if score < 60:
-        score_color = "#3CB371"
-    elif score < 80:
-        score_color = "#ffc53d"
-    else:
-        score_color = "#ff4d4f"
+    if score < 60: score_color = "#3CB371"
+    elif score < 80: score_color = "#ffc53d"
+    else: score_color = "#ff4d4f"
     x_pos = 0.02
     y_pos = 0.86
-    ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes,
-            fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
+    ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes, fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
 
 
 def draw_logo_overlay(ax):
-    ax.text(0.95, 0.03, "OUT-STANDER", transform=ax.transAxes,
-            fontsize=24, color='#3d3320', fontweight='bold',
-            fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
+    ax.text(0.95, 0.03, "OUT-STANDER", transform=ax.transAxes, fontsize=24, color='#3d3320', fontweight='bold', fontname='serif', ha='right', va='bottom', zorder=0, alpha=0.9)
 
 
 def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days=252):
@@ -1010,7 +906,6 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     index100 = prices / base * 100.0
     dev = index100 - 100.0
     ret = np.log(prices / prices.shift(1)).dropna()
-
     HNWI_BG = "#050505"
     HNWI_AX_BG = "#0b0c0e"
     TEXT_COLOR = "#F0F0F0"
@@ -1021,8 +916,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
 
     def style_hnwi_ax(ax, title=None):
         ax.set_facecolor(HNWI_AX_BG)
-        if title:
-            ax.set_title(title, color=TEXT_COLOR, fontweight='normal', fontname='serif')
+        if title: ax.set_title(title, color=TEXT_COLOR, fontweight='normal', fontname='serif')
         ax.tick_params(colors=TICK_COLOR)
         ax.xaxis.label.set_color(TEXT_COLOR)
         ax.yaxis.label.set_color(TEXT_COLOR)
@@ -1037,17 +931,17 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Cumulative Return (Indexed)")
     ax.plot(index100.index, index100[ticker], label=f"{ticker}", color=HNWI_TICKER_COLOR, linewidth=1.5)
-    ax.plot(index100.index, index100[bench],  label=f"{bench}",  color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
+    ax.plot(index100.index, index100[bench], label=f"{bench}", color=HNWI_BENCH_COLOR, linewidth=1.2, alpha=0.7)
     ax.set_xlabel("Date")
     ax.set_ylabel("Index (Base=100)")
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
     X = dev[bench].dropna(); Y = dev[ticker].dropna()
     common = X.index.intersection(Y.index); X = X.loc[common]; Y = Y.loc[common]
     slope_dev, intercept_dev = np.polyfit(X.values, Y.values, 1)
     x_sorted = X.sort_values(); y_line = slope_dev * x_sorted + intercept_dev
-
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Deviation Scatter & Trend")
@@ -1056,6 +950,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_xlabel(f"{bench} Deviation (pp)")
     ax.set_ylabel(f"{ticker} Deviation (pp)")
     st.pyplot(fig)
+    plt.close(fig)
 
     vol_dev_t = dev[ticker].rolling(int(window)).std(ddof=1)
     vol_dev_b = dev[bench].rolling(int(window)).std(ddof=1)
@@ -1068,6 +963,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylabel("Std Deviation (pp)")
     ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
     st.pyplot(fig)
+    plt.close(fig)
 
     p = prices[ticker]; running_max = p.cummax(); dd = (p / running_max) - 1.0
     fig, ax = plt.subplots(figsize=(11, 4))
@@ -1079,12 +975,12 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_ylabel("Drawdown (%)")
     ax.set_ylim(top=0.5)
     st.pyplot(fig)
+    plt.close(fig)
 
     Xr = ret[bench].dropna(); Yr = ret[ticker].dropna()
     common_r = Xr.index.intersection(Yr.index); Xr = Xr.loc[common_r]; Yr = Yr.loc[common_r]
     slope_ret, intercept_ret = np.polyfit(Xr.values, Yr.values, 1)
     xr_sorted = Xr.sort_values(); yr_line = slope_ret * xr_sorted + intercept_ret
-
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title="Daily Returns Scatter")
@@ -1093,6 +989,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_xlabel(f"{bench} Daily Log Return")
     ax.set_ylabel(f"{ticker} Daily Log Return")
     st.pyplot(fig)
+    plt.close(fig)
 
     roll_vol = ret[ticker].rolling(int(window)).std(ddof=1) * np.sqrt(float(trading_days))
     fig, ax = plt.subplots(figsize=(11, 4))
@@ -1102,6 +999,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
     ax.set_xlabel("Date")
     ax.set_ylabel("Annualized Vol (%)")
     st.pyplot(fig)
+    plt.close(fig)
 
     if ticker.endswith(".T"):
         st.markdown("---")
@@ -1141,6 +1039,7 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             else:
                 ax1.legend(loc="upper left", facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, frameon=False)
             st.pyplot(fig)
+            plt.close(fig)
             st.caption("※Source: IRBank / Minkabu / Karauri / Yahoo / Kabutan (Auto-switch). Showing recent data only.")
             with st.expander("View Margin Data Details"):
                 st.dataframe(margin_df.sort_values("Date", ascending=False), use_container_width=True)
@@ -1148,9 +1047,6 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
             st.warning("Could not fetch Japanese margin data (All sources failed).")
 
 
-# -------------------------------------------------------
-# Streamlit app (ADMIN)
-# -------------------------------------------------------
 def main():
     st.set_page_config(page_title="Out-stander Admin", layout="wide")
     st.markdown(
@@ -1224,9 +1120,6 @@ def main():
 
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
-    # -----------------------------------------------------------
-    # MAIN CHART RENDER
-    # -----------------------------------------------------------
     fig, ax = plt.subplots(figsize=(12, 6.5))
     BG_COLOR = "#050505"
     fig.patch.set_facecolor(BG_COLOR)
@@ -1249,16 +1142,12 @@ def main():
     last_price = price_series.values[-1]
     last_model_val = bubble_res["price_fit"][-1]
     text_date_offset = last_date + timedelta(days=2)
-    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0",
-            fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
-    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR,
-            fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
+    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0", fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
+    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR, fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
     peak_val = price_series.max()
     peak_dt = price_series.idxmax()
-    ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}",
-            color="#888888", fontsize=7, ha='center', fontname='sans-serif')
-    ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes,
-            fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
+    ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", color="#888888", fontsize=7, ha='center', fontname='sans-serif')
+    ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes, fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_color('#333333')
@@ -1269,10 +1158,8 @@ def main():
     draw_score_overlay(ax, score, signal_label)
     draw_logo_overlay(ax)
     st.pyplot(fig)
+    plt.close(fig)
 
-    # -----------------------------------------------------------
-    # NEW: SHORT VOLUME ANALYSIS SECTION
-    # -----------------------------------------------------------
     ticker_clean = ticker.strip()
     is_jp = ticker_clean.endswith(".T")
     is_non_us = any(ticker_clean.endswith(sfx) for sfx in [".T", ".HK", ".L", ".DE", ".PA", ".AS", ".MI", ".SW"])
@@ -1326,9 +1213,6 @@ def main():
     else:
         st.info(f"Short volume analysis is currently supported for US stocks (FINRA) and JP stocks (.T). Ticker '{ticker_clean}' is not in a supported market.")
 
-    # -----------------------------------------------------------
-    # EXISTING SECTIONS BELOW
-    # -----------------------------------------------------------
     if signal_label == "HIGH":
         risk_label = "High"; risk_color = "#ff4d4f"
     elif signal_label == "CAUTION":
