@@ -661,37 +661,68 @@ def _parse_segment_facts_from_xbrl(xml_text: str) -> list[dict]:
 
 
 def _collect_segment_result(results: list, tag: str, ctx_ref: str, val: float, contexts: dict):
-    """Helper to add a segment fact to results list."""
+    """Helper to add a segment fact to results list.
+    
+    Only uses single-dimension contexts to avoid cross-sectional pollution.
+    """
     ctx = contexts[ctx_ref]
     if ctx["dur"] < 330:
         return
-    # Allow up to 2 dimensions (some companies use segment + sub-category)
-    if len(ctx["dims"]) > 2:
+    # Strict: only single-dimension contexts (avoids cross-dimensional intersections)
+    if len(ctx["dims"]) != 1:
         return
 
-    for dim, member in ctx["dims"]:
-        end_str = ctx["end"]
-        year = int(end_str[:4]) if end_str else 0
-        results.append({
-            "tag": tag,
-            "dimension": dim,
-            "member": member,
-            "end_date": end_str,
-            "year": year,
-            "value": val,
-        })
+    dim, member = ctx["dims"][0]
+    end_str = ctx["end"]
+    year = int(end_str[:4]) if end_str else 0
+    results.append({
+        "tag": tag,
+        "dimension": dim,
+        "member": member,
+        "end_date": end_str,
+        "year": year,
+        "value": val,
+    })
 
 
 def _classify_dimension(dim_str: str) -> str:
-    """Classify XBRL dimension axis as Business or Geography."""
+    """Classify XBRL dimension axis into Segment / Product / Geography / Skip.
+    
+    Returns:
+        "Segment"   - Official business segments (StatementBusinessSegmentsAxis)
+        "Product"   - Product/Service breakdown (ProductOrServiceAxis, etc.)
+        "Geography" - Geographic breakdown (StatementGeographicalAxis, etc.)
+        "Skip"      - Irrelevant axes (tax, hedging, debt, etc.)
+    """
     d = dim_str.lower()
+    
+    # --- Geography ---
     geo_kw = [
-        "geographical", "geoaxis", "statementgeographicalaxis", "geographicarea",
-        "entitywideinformation", "reportablegeographical", "country", "region",
+        "statementgeographicalaxis", "geographicalaxis",
+        "entitywideinformationrevenuefrommajorcustomer",  # sometimes used for geo
     ]
     if any(k in d for k in geo_kw):
         return "Geography"
-    return "Business"
+    
+    # --- Official Business Segments ---
+    seg_kw = [
+        "statementbusinesssegmentsaxis",
+        "segmentreportingaxis",
+    ]
+    if any(k in d for k in seg_kw):
+        return "Segment"
+    
+    # --- Product/Service breakdown ---
+    prod_kw = [
+        "productorserviceaxis",
+        "productsorservices",
+        "statementoperatingsegmentsaxis",
+    ]
+    if any(k in d for k in prod_kw):
+        return "Product"
+    
+    # --- Skip everything else (tax, hedging, debt, legal entity, etc.) ---
+    return "Skip"
 
 
 def _clean_xbrl_member(m: str) -> str:
@@ -706,14 +737,17 @@ def _clean_xbrl_member(m: str) -> str:
     return m.strip()
 
 
-def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Build revenue segment tables from individual 10-K XBRL filings."""
+def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+    """Build revenue segment tables from individual 10-K XBRL filings.
+    
+    Returns: (segment_pivot, product_pivot, geo_pivot, meta)
+    """
     meta = {}
 
     filings = _get_10k_filings_list(cik10)
     meta["filings_found"] = len(filings)
     if not filings:
-        return pd.DataFrame(), pd.DataFrame(), meta
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), meta
 
     all_facts = []
     fetched = 0
@@ -727,7 +761,6 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         facts = _parse_segment_facts_from_xbrl(xml)
         meta[f"filing_{fetched}_facts"] = len(facts)
         all_facts.extend(facts)
-        # Run diagnostic on first filing
         if fetched == 1:
             meta["diag"] = _diagnose_xbrl(xml)
 
@@ -736,11 +769,14 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     meta["fetch_debug"] = fetch_debug
 
     if not all_facts:
-        return pd.DataFrame(), pd.DataFrame(), meta
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), meta
 
     df = pd.DataFrame(all_facts)
     df["axis_type"] = df["dimension"].apply(_classify_dimension)
     df["member_clean"] = df["member"].apply(_clean_xbrl_member)
+
+    # Drop irrelevant axes
+    df = df[df["axis_type"] != "Skip"]
 
     # Exclude totals / eliminations / corporate
     exclude_kw = [
@@ -753,7 +789,7 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     df = df[mask]
 
     if df.empty:
-        return pd.DataFrame(), pd.DataFrame(), meta
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), meta
 
     # Deduplicate: for each year/axis_type/member, keep largest value
     df = df.sort_values("value", ascending=False).drop_duplicates(
@@ -764,24 +800,24 @@ def build_segment_table(cik10: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     df["value_m"] = df["value"].apply(_to_musd)
 
     meta["unique_dimensions"] = df["dimension"].unique().tolist()
-    meta["business_members"] = sorted(df[df["axis_type"] == "Business"]["member_clean"].unique().tolist())
+    meta["segment_members"] = sorted(df[df["axis_type"] == "Segment"]["member_clean"].unique().tolist())
+    meta["product_members"] = sorted(df[df["axis_type"] == "Product"]["member_clean"].unique().tolist())
     meta["geo_members"] = sorted(df[df["axis_type"] == "Geography"]["member_clean"].unique().tolist())
 
-    # Pivot: Business segments
-    biz = df[df["axis_type"] == "Business"]
-    biz_pivot = pd.DataFrame()
-    if not biz.empty:
-        biz_pivot = biz.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
-        biz_pivot = biz_pivot.sort_index()
+    def _make_pivot(sub_df: pd.DataFrame) -> pd.DataFrame:
+        if sub_df.empty:
+            return pd.DataFrame()
+        pivot = sub_df.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
+        # Drop columns that are >70% NaN (sparse/discontinued segments)
+        thresh = len(pivot) * 0.3
+        pivot = pivot.dropna(axis=1, thresh=int(max(thresh, 1)))
+        return pivot.sort_index()
 
-    # Pivot: Geography segments
-    geo = df[df["axis_type"] == "Geography"]
-    geo_pivot = pd.DataFrame()
-    if not geo.empty:
-        geo_pivot = geo.pivot_table(index="year", columns="member_clean", values="value_m", aggfunc="first")
-        geo_pivot = geo_pivot.sort_index()
+    seg_pivot = _make_pivot(df[df["axis_type"] == "Segment"])
+    prod_pivot = _make_pivot(df[df["axis_type"] == "Product"])
+    geo_pivot = _make_pivot(df[df["axis_type"] == "Geography"])
 
-    return biz_pivot, geo_pivot, meta
+    return seg_pivot, prod_pivot, geo_pivot, meta
 
 
 def plot_stacked_bar(df: pd.DataFrame, title: str):
@@ -789,16 +825,33 @@ def plot_stacked_bar(df: pd.DataFrame, title: str):
         st.info(f"{title}: Data not found.")
         return
 
+    n_cols = len(df.columns)
+    # Extended luxury palette for more segments
+    palette = [C_GOLD, C_SILVER, C_BLUE, C_BRONZE, C_SLATE,
+               "#8B4513", "#556B2F", "#8B008B", "#2F4F4F", "#B8860B",
+               "#4169E1", "#CD853F", "#6B8E23", "#9370DB", "#20B2AA"]
+    colors = palette[:n_cols] if n_cols <= len(palette) else palette * (n_cols // len(palette) + 1)
+
     fig, ax = plt.subplots(figsize=(12, 6))
     fig.patch.set_facecolor(HNWI_BG)
     style_hnwi_ax(ax, title=title)
 
-    df.plot(kind="bar", stacked=True, ax=ax, colormap=LUXURY_CMAP, width=0.7)
+    df.plot(kind="bar", stacked=True, ax=ax, color=colors[:n_cols], width=0.7, edgecolor='none')
 
     ax.set_ylabel("Revenue (Million USD)", color=TEXT_COLOR)
     ax.tick_params(colors=TICK_COLOR, axis='x', rotation=0)
     ax.tick_params(colors=TICK_COLOR, axis='y')
-    ax.legend(facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR, loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
+    
+    # Format y-axis with comma separator
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f'{x:,.0f}'))
+
+    # Legend: outside right, compact
+    ax.legend(
+        facecolor=HNWI_AX_BG, labelcolor=TEXT_COLOR,
+        loc="upper left", bbox_to_anchor=(1.0, 1.0),
+        frameon=False, fontsize=8,
+    )
+    fig.tight_layout()
     st.pyplot(fig)
 
 
@@ -2713,24 +2766,34 @@ def render(authed_email: str):
     with tab_seg:
         st.caption("Revenue Segments (from XBRL filings)")
         with st.spinner("Fetching & parsing XBRL filings for segment data..."):
-            biz_df, geo_df, seg_meta = build_segment_table(cik10)
+            seg_df, prod_df, geo_df, seg_meta = build_segment_table(cik10)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if not biz_df.empty:
-                biz_disp = biz_df[biz_df.index >= int(biz_df.index.max()) - n_years + 1]
-                plot_stacked_bar(biz_disp, "Revenue by Business")
-                st.dataframe(biz_disp.style.format("{:,.0f}"), use_container_width=True)
-            else:
-                st.info("No Business Segment info found.")
+        # --- 1. Official Segments (StatementBusinessSegmentsAxis) ---
+        st.markdown("### Reporting Segments")
+        if not seg_df.empty:
+            seg_disp = seg_df[seg_df.index >= int(seg_df.index.max()) - n_years + 1]
+            plot_stacked_bar(seg_disp, "Revenue by Reporting Segment")
+            st.dataframe(seg_disp.style.format("{:,.0f}"), use_container_width=True)
+        else:
+            st.info("No official reporting segment data found (StatementBusinessSegmentsAxis).")
 
-        with col2:
-            if not geo_df.empty:
-                geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
-                plot_stacked_bar(geo_disp, "Revenue by Geography")
-                st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
-            else:
-                st.info("No Geography Segment info found.")
+        # --- 2. Product/Service Breakdown ---
+        st.markdown("### Product / Service Breakdown")
+        if not prod_df.empty:
+            prod_disp = prod_df[prod_df.index >= int(prod_df.index.max()) - n_years + 1]
+            plot_stacked_bar(prod_disp, "Revenue by Product / Service")
+            st.dataframe(prod_disp.style.format("{:,.0f}"), use_container_width=True)
+        else:
+            st.info("No product/service breakdown found (ProductOrServiceAxis).")
+
+        # --- 3. Geography ---
+        st.markdown("### Geography")
+        if not geo_df.empty:
+            geo_disp = geo_df[geo_df.index >= int(geo_df.index.max()) - n_years + 1]
+            plot_stacked_bar(geo_disp, "Revenue by Geography")
+            st.dataframe(geo_disp.style.format("{:,.0f}"), use_container_width=True)
+        else:
+            st.info("No geography segment data found.")
 
         # Debug info
         with st.expander("🔍 Segment Debug Info"):
@@ -2738,11 +2801,13 @@ def render(authed_email: str):
             st.write(f"**XBRL instances fetched:** {seg_meta.get('filings_fetched', 0)}")
             st.write(f"**Segment revenue facts extracted:** {seg_meta.get('total_facts', 0)}")
             if "unique_dimensions" in seg_meta:
-                st.write(f"**Dimensions:** {seg_meta['unique_dimensions']}")
-            if "business_members" in seg_meta:
-                st.write(f"**Business segments:** {seg_meta['business_members']}")
+                st.write(f"**Dimensions used:** {seg_meta['unique_dimensions']}")
+            if "segment_members" in seg_meta:
+                st.write(f"**Reporting segments:** {seg_meta['segment_members']}")
+            if "product_members" in seg_meta:
+                st.write(f"**Product/Service:** {seg_meta['product_members']}")
             if "geo_members" in seg_meta:
-                st.write(f"**Geography segments:** {seg_meta['geo_members']}")
+                st.write(f"**Geography:** {seg_meta['geo_members']}")
             if "diag" in seg_meta:
                 st.write("---")
                 st.write("**XBRL Diagnostic (Filing 1):**")
@@ -2750,18 +2815,9 @@ def render(authed_email: str):
                 st.write(f"- Total contexts: {diag.get('total_contexts', 0)}")
                 st.write(f"- Dimensional contexts: {diag.get('dim_ctx_count', 0)}")
                 st.write(f"- Unique dimensions: {diag.get('unique_dimensions', [])}")
-                st.write(f"- Revenue strings in XML: {diag.get('revenue_strings_in_xml', [])}")
                 st.write(f"- Revenue tags with contextRef: {diag.get('revenue_tags_with_contextref', [])}")
-                snippet = diag.get("revenue_context_snippet", "")
-                if snippet:
-                    st.code(snippet, language=None)
                 st.write(f"- Revenue facts in dim ctx (XBRL): {diag.get('revenue_facts_in_dim_ctx', [])}")
                 st.write(f"- Revenue facts in dim ctx (iXBRL): {diag.get('ix_revenue_in_dim_ctx', [])}")
-                st.write(f"- ANY facts in dim ctx (sample): {diag.get('any_facts_in_dim_ctx', [])}")
-                if diag.get("dim_ctx_samples"):
-                    st.write("- Dim context samples:")
-                    for s in diag["dim_ctx_samples"]:
-                        st.code(f"id={s['id']}\ndims={s['dims']}")
             if "fetch_debug" in seg_meta:
                 st.write("---")
                 st.write("**Fetch log (per filing):**")
