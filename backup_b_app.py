@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from scipy.optimize import curve_fit
 from datetime import date, timedelta
 import streamlit as st
@@ -12,8 +13,18 @@ import hashlib
 import base64
 
 # =======================================================
+# FONT SETUP (Luxury / Serif Style)
+# =======================================================
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times New Roman', 'DejaVu Serif', 'Georgia', 'serif']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['axes.labelsize'] = 10
+plt.rcParams['xtick.labelsize'] = 9
+plt.rcParams['ytick.labelsize'] = 9
+
+# =======================================================
 # AUTH GATE: Admin-style auth (OS_TOKEN_SECRET_ADMIN + ADMIN_EMAILS)
-# This is a frozen backup of app.py with admin authentication.
 # =======================================================
 
 def _b64url_decode(s: str) -> bytes:
@@ -71,8 +82,8 @@ if ADMIN_EMAILS:
 # =======================================================
 # Cache settings
 # =======================================================
-PRICE_TTL_SECONDS = 15 * 60         # yfinance cache
-FIT_TTL_SECONDS = 24 * 60 * 60      # fit cache
+PRICE_TTL_SECONDS = 15 * 60
+FIT_TTL_SECONDS = 24 * 60 * 60
 
 
 # =======================================================
@@ -169,7 +180,7 @@ def fit_lppl_bubble(price_series: pd.Series):
     tc_val = float(params[4])
     last_idx = N - 1
     future_units = tc_val - last_idx
-    
+
     last_date = price_series.index[-1]
     tc_date = last_date + timedelta(days=future_units)
 
@@ -247,7 +258,7 @@ def fit_lppl_negative_bubble(
     tc_val = float(params_down[4])
     last_idx = N_down - 1
     future_units = tc_val - last_idx
-    
+
     last_date = down_series.index[-1]
     tc_bottom_date = last_date + timedelta(days=future_units)
 
@@ -393,15 +404,41 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
         return ("SAFE", int(round(_clamp(s, 0, 59))))
 
     past_warning = WARNING_BUFFER - gap
-    
+
     s = _lin_map(
         x=past_warning,
-        x0=0, 
+        x0=0,
         x1=UP_PAST_FAR_DAYS,
         y0=60,
         y1=79,
     )
     return ("CAUTION", int(round(_clamp(s, 60, 79))))
+
+
+# =======================================================
+# Chart overlay helpers (from admin)
+# =======================================================
+def draw_score_overlay(ax, score: int, label: str):
+    if score < 60:
+        score_color = "#3CB371"
+    elif score < 80:
+        score_color = "#ffc53d"
+    else:
+        score_color = "#ff4d4f"
+    ax.text(
+        0.02, 0.78, str(score),
+        transform=ax.transAxes, fontsize=36, color=score_color,
+        fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20,
+    )
+
+
+def draw_logo_overlay(ax):
+    ax.text(
+        0.95, 0.03, "OUT-STANDER",
+        transform=ax.transAxes, fontsize=24, color='#3d3320',
+        fontweight='bold', fontname='serif', ha='right', va='bottom',
+        zorder=0, alpha=0.9,
+    )
 
 
 # -------------------------------------------------------
@@ -413,41 +450,105 @@ def main():
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap');
         .stApp {
-            background-color: #0b0c0e !important;
+            background-color: #050505 !important;
             color: #ffffff !important;
         }
         div[data-testid="stMarkdownContainer"] p, label {
             color: #ffffff !important;
+            font-family: 'Times New Roman', serif;
         }
         input.st-ai, input.st-ah, div[data-baseweb="input"] {
-            background-color: #1a1c1f !important;
+            background-color: #111111 !important;
             color: #ffffff !important;
-            border-color: #444 !important;
+            border-color: #333 !important;
         }
         input { color: #ffffff !important; }
         input::placeholder { color: rgba(255,255,255,0.45) !important; }
         div[data-baseweb="input"] svg { fill: #ffffff !important; }
         div[data-testid="stFormSubmitButton"] button {
-            background-color: #222428 !important;
-            color: #ffffff !important;
-            border: 1px solid #555 !important;
+            background-color: #1a1a1a !important;
+            color: #d4af37 !important;
+            border: 1px solid #333 !important;
+            font-family: 'Times New Roman', serif;
         }
         div[data-testid="stFormSubmitButton"] button:hover {
-            background-color: #444 !important;
-            border-color: #888 !important;
-            color: #ffffff !important;
+            background-color: #d4af37 !important;
+            border-color: #d4af37 !important;
+            color: #000000 !important;
         }
         [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
-
         .custom-error {
             background-color: #141518;
             border: 1px solid #2a2c30;
-            border-radius: 12px;
+            border-radius: 0px;
             padding: 14px 18px;
             color: #ffffff;
             font-size: 0.95rem;
             margin-top: 12px;
+        }
+        .brand-header {
+            font-family: 'Playfair Display', 'Times New Roman', serif;
+            font-size: 1.4rem;
+            font-weight: 400;
+            color: #C5A059;
+            letter-spacing: 0.15em;
+            padding: 18px 0 8px 0;
+            border-bottom: 1px solid #1a1a1a;
+            margin-bottom: 16px;
+        }
+        .info-card {
+            background-color: #0b0c0e;
+            border: 1px solid #1a1c1f;
+            border-radius: 0px;
+            padding: 16px 20px;
+            margin-top: 8px;
+        }
+        .info-card .card-label {
+            font-size: 0.75rem;
+            color: #666;
+            font-family: 'Times New Roman', serif;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .info-card .card-value {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: #f0f0f0;
+            font-family: 'Times New Roman', serif;
+            line-height: 1.2;
+        }
+        .info-card .card-sub {
+            font-size: 0.8rem;
+            color: #555;
+            font-family: 'Times New Roman', serif;
+            margin-top: 2px;
+        }
+        .score-legend {
+            background-color: #0b0c0e;
+            border: 1px solid #1a1c1f;
+            border-radius: 0px;
+            padding: 10px 20px;
+            margin-top: 8px;
+            display: flex;
+            gap: 28px;
+            align-items: center;
+        }
+        .score-legend .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Times New Roman', serif;
+            font-size: 0.82rem;
+        }
+        .score-legend .legend-range {
+            font-weight: 700;
+        }
+        .score-legend .legend-label {
+            font-weight: 400;
+            color: #777;
         }
         </style>
         """,
@@ -456,19 +557,14 @@ def main():
 
     def show_error_black(msg: str):
         st.markdown(
-            f"""
-            <div class="custom-error">
-                {msg}
-            </div>
-            """,
+            f"""<div class="custom-error">{msg}</div>""",
             unsafe_allow_html=True,
         )
 
-    if os.path.exists("banner.png"):
-        st.image("banner.png", use_container_width=True)
-    else:
-        st.title("Out-stander")
+    # ---- Minimal brand header (replaces banner) ----
+    st.markdown('<div class="brand-header">OUT-STANDER</div>', unsafe_allow_html=True)
 
+    # ---- Input form ----
     with st.form("input_form"):
         ticker = st.text_input(
             "Ticker",
@@ -496,10 +592,7 @@ def main():
 
     try:
         price_series = fetch_price_series_cached(ticker.strip(), start_date, end_date)
-    except ValueError as e:
-        if str(e) == "INVALID_TICKER_OR_NO_DATA":
-            show_error_black("Invalid ticker symbol or no price data.")
-            st.stop()
+    except ValueError:
         show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
     except Exception:
@@ -510,6 +603,7 @@ def main():
         show_error_black("Invalid ticker symbol or no price data.")
         st.stop()
 
+    # ---- fit caches ----
     key = series_cache_key(price_series)
     idx_int = price_series.index.astype("int64").to_numpy()
     vals = price_series.to_numpy(dtype="float64")
@@ -540,109 +634,208 @@ def main():
 
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0b0c0e")
-    ax.set_facecolor("#0b0c0e")
+    # =======================================================
+    # CHART (Admin-style HNWI design)
+    # =======================================================
+    BG_COLOR = "#050505"
+    GOLD_COLOR = "#C5A059"
 
-    ax.plot(price_series.index, price_series.values, color="gray", label=ticker.strip())
-    ax.plot(price_series.index, bubble_res["price_fit"], color="orange", label="Up model")
+    fig, ax = plt.subplots(figsize=(12, 6.5))
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
 
-    ax.axvline(bubble_res["tc_date"], color="red", linestyle="--",
-               label=f"Turn (up) {pd.Timestamp(bubble_res['tc_date']).date()}")
-    ax.axvline(peak_date, color="white", linestyle=":",
-               label=f"Peak {pd.Timestamp(peak_date).date()}")
+    # Price line
+    ax.plot(price_series.index, price_series.values,
+            color="#F0F0F0", linewidth=0.8, alpha=0.9, zorder=5)
 
+    # Up model (gold)
+    ax.plot(price_series.index, bubble_res["price_fit"],
+            color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
+
+    # Turn (up) vertical line
+    ax.axvline(bubble_res["tc_date"], color="#ff4d4f",
+               linestyle="--", linewidth=1.2, alpha=0.8)
+
+    # Peak vertical line
+    ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
+
+    # Negative bubble (if detected)
     if neg_res.get("ok"):
         down = neg_res["down_series"]
-        ax.plot(down.index, down.values, color="cyan", label="Down")
-        ax.plot(down.index, neg_res["price_fit_down"], "--", color="green", label="Down model")
-        ax.axvline(neg_res["tc_date"], color="green", linestyle="--",
-                   label=f"Turn (down) {pd.Timestamp(neg_res['tc_date']).date()}")
+        ax.plot(down.index, down.values,
+                color="cyan", linewidth=0.8, alpha=0.7)
+        ax.plot(down.index, neg_res["price_fit_down"],
+                "--", color="#008b8b", linewidth=1.5, alpha=0.8)
+        ax.axvline(neg_res["tc_date"], color="#00ff00",
+                   linestyle="--", linewidth=1.2, alpha=0.8)
 
-    ax.set_xlabel("Date", color="white")
-    ax.set_ylabel("Price", color="white")
-    ax.tick_params(colors="white")
-    ax.grid(color="#333333")
-    ax.legend(facecolor="#0b0c0e", labelcolor="white")
+    # Right margin (15% for label readability)
+    last_date = price_series.index[-1]
+    total_days = (last_date - price_series.index[0]).days
+    margin_days = int(total_days * 0.15)
+    margin_limit_date = last_date + timedelta(days=margin_days)
+    ax.set_xlim(right=margin_limit_date)
+
+    # Right-side labels (instead of legend box)
+    last_price = price_series.values[-1]
+    last_model_val = bubble_res["price_fit"][-1]
+    text_date_offset = last_date + timedelta(days=2)
+    ax.text(text_date_offset, last_price, f" \u2190 {ticker.strip()}",
+            color="#F0F0F0", fontsize=10, fontweight='bold',
+            fontname='serif', va='center', zorder=10)
+    ax.text(text_date_offset, last_model_val, " \u2190 Model",
+            color=GOLD_COLOR, fontsize=10, fontweight='bold',
+            fontname='serif', va='center', zorder=10)
+
+    # Peak annotation (inside chart, avoid top overflow)
+    peak_val = price_series.max()
+    peak_dt = price_series.idxmax()
+    y_min_data = price_series.min()
+    y_max_data = peak_val
+    y_range = y_max_data - y_min_data
+    ax.set_ylim(y_min_data - y_range * 0.03, y_max_data + y_range * 0.12)
+    ax.text(peak_dt, peak_val + y_range * 0.04,
+            f"Peak\n{peak_dt.strftime('%Y-%m-%d')}",
+            color="#888888", fontsize=7, ha='center', fontname='sans-serif')
+
+    # Ticker name (top left)
+    ax.text(0.02, 0.92, ticker.strip(),
+            transform=ax.transAxes, fontsize=28, color="#F0F0F0",
+            fontweight='normal', fontname='serif')
+
+    # Axes styling
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('#333333')
+    ax.spines['bottom'].set_color('#333333')
+    ax.grid(color="#333333", linestyle=":", linewidth=0.5, alpha=0.3)
+    ax.tick_params(axis='x', colors='#888888', labelsize=8)
+    ax.tick_params(axis='y', colors='#888888', labelsize=8)
+
+    # Score overlay + Logo watermark
+    draw_score_overlay(ax, score, signal_label)
+    draw_logo_overlay(ax)
 
     st.pyplot(fig)
+    plt.close(fig)
 
-    if signal_label == "HIGH":
-        risk_label = "High"
-        risk_color = "#ff4d4f"
-    elif signal_label == "CAUTION":
-        risk_label = "Caution"
-        risk_color = "#ffc53d"
+    # =======================================================
+    # CARD GROUP (Below chart)
+    # =======================================================
+
+    # ---- Row 1: Score Legend (horizontal) ----
+    score_legend_html = """
+    <div class="score-legend">
+        <div class="legend-item">
+            <span class="legend-range" style="color: #ff4d4f;">80 – 100</span>
+            <span class="legend-label">Risk</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-range" style="color: #ffc53d;">60 – 79</span>
+            <span class="legend-label">Caution</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-range" style="color: #3CB371;">0 – 59</span>
+            <span class="legend-label">Stable</span>
+        </div>
+    </div>
+    """
+    st.markdown(score_legend_html, unsafe_allow_html=True)
+
+    # ---- Row 2: Info cards (5 columns) ----
+    if score < 60:
+        display_label = "Stable"
+        label_color = "#3CB371"
+    elif score < 80:
+        display_label = "Caution"
+        label_color = "#ffc53d"
     else:
-        risk_label = "Safe"
-        risk_color = "#52c41a"
+        display_label = "Risk"
+        label_color = "#ff4d4f"
 
-    col_score, col_gain = st.columns(2)
+    tc_up_str = pd.Timestamp(bubble_res["tc_date"]).strftime("%Y-%m-%d")
+    peak_date_str = pd.Timestamp(peak_date).strftime("%Y-%m-%d")
+    days_to_turn_up = (pd.Timestamp(bubble_res["tc_date"]).normalize() - pd.Timestamp(end_date).normalize()).days
+
+    if neg_res.get("ok"):
+        tc_down_str = pd.Timestamp(neg_res["tc_date"]).strftime("%Y-%m-%d")
+        days_to_turn_down = (pd.Timestamp(neg_res["tc_date"]).normalize() - pd.Timestamp(end_date).normalize()).days
+    else:
+        tc_down_str = "N/A"
+        days_to_turn_down = None
+
+    def _days_display(d):
+        if d is None:
+            return ""
+        if d > 0:
+            return f"{d}d ahead"
+        elif d == 0:
+            return "Today"
+        else:
+            return f"{abs(d)}d ago"
+
+    col_score, col_peak, col_gain, col_turn_up, col_turn_down = st.columns(5)
 
     with col_score:
-        score_card_html = f"""
-        <div style="
-            background-color: #141518;
-            border: 1px solid #2a2c30;
-            border-radius: 12px;
-            padding: 18px 20px 16px 20px;
-            margin-top: 8px;
-        ">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Score
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Score</div>
+                <div class="card-value" style="color: {label_color};">{score}</div>
+                <div class="card-sub" style="color: {label_color};">{display_label}</div>
             </div>
-            <div style="display: flex; align-items: baseline; gap: 12px;">
-                <div style="font-size: 40px; font-weight: 700; color: #f5f5f5;">
-                    {score}
-                </div>
-                <div style="
-                    padding: 2px 10px;
-                    border-radius: 999px;
-                    background-color: {risk_color}33;
-                    color: {risk_color};
-                    font-size: 0.85rem;
-                    font-weight: 600;
-                ">
-                    {risk_label}
-                </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_peak:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Peak</div>
+                <div class="card-value">{peak_date_str}</div>
+                <div class="card-sub">{peak_price:,.2f}</div>
             </div>
-        </div>
-        """
-        st.markdown(score_card_html, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
     with col_gain:
-        gain_card_html = f"""
-        <div style="
-            background-color: #141518;
-            border: 1px solid #2a2c30;
-            border-radius: 12px;
-            padding: 18px 20px 16px 20px;
-            margin-top: 8px;
-        ">
-            <div style="font-size: 0.85rem; color: #a0a2a8; margin-bottom: 6px;">
-                Gain
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Gain (Start → Peak)</div>
+                <div class="card-value">{gain:.2f}x</div>
+                <div class="card-sub" style="color: #3CB371;">{gain_pct:+.1f}%</div>
             </div>
-            <div style="font-size: 36px; font-weight: 700; color: #f5f5f5; line-height: 1.1;">
-                {gain:.2f}x
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_turn_up:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Turn (Up)</div>
+                <div class="card-value" style="color: #ff4d4f;">{tc_up_str}</div>
+                <div class="card-sub">{_days_display(days_to_turn_up)}</div>
             </div>
-            <div style="font-size: 0.9rem; color: #a0a2a8; margin-top: 4px;">
-                Start → Peak
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_turn_down:
+        down_color = "#00ff00" if tc_down_str != "N/A" else "#555"
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Turn (Down)</div>
+                <div class="card-value" style="color: {down_color};">{tc_down_str}</div>
+                <div class="card-sub">{_days_display(days_to_turn_down)}</div>
             </div>
-            <div style="
-                margin-top: 6px;
-                display: inline-block;
-                padding: 2px 10px;
-                border-radius: 999px;
-                background-color: #102915;
-                color: #52c41a;
-                font-size: 0.85rem;
-                font-weight: 500;
-            ">
-                {gain_pct:+.1f}%
-            </div>
-        </div>
-        """
-        st.markdown(gain_card_html, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
