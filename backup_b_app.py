@@ -837,7 +837,7 @@ def main():
         )
 
     # ---- Info cards: Row 2 (Turn Up / Turn Down / empty) - 3 columns for balance ----
-    col_turn_up, col_turn_down, col_status = st.columns(3)
+    col_turn_up, col_turn_down, col_temp = st.columns(3)
 
     with col_turn_up:
         st.markdown(
@@ -871,7 +871,7 @@ def main():
             unsafe_allow_html=True,
         )
 
-    with col_status:
+    with col_temp:
         fit_r2 = float(bubble_res.get("r2", 0.0))
         fit_m = float(bubble_res["params"][3]) if len(bubble_res.get("params", [])) > 3 else 1.0
         if fit_r2 > 0.70 and fit_m < 0.70:
@@ -883,7 +883,7 @@ def main():
         st.markdown(
             f"""
             <div class="info-card">
-                <div class="card-label">Status</div>
+                <div class="card-label">Temperature</div>
                 <div class="card-value">{heat_label}</div>
                 <div class="card-sub">&nbsp;</div>
             </div>
