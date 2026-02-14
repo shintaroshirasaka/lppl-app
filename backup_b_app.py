@@ -830,7 +830,7 @@ def main():
             <div class="info-card">
                 <div class="card-label">Gain (Start → Peak)</div>
                 <div class="card-value">{gain:.2f}x</div>
-                <div class="card-sub" style="color: {COLOR_STABLE};">{gain_pct:+.1f}%</div>
+                <div class="card-sub">{gain_pct:+.1f}%</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -859,7 +859,7 @@ def main():
         else:
             down_display = "None"
             down_color = COLOR_TEXT
-            down_sub = ""
+            down_sub = "&nbsp;"
         st.markdown(
             f"""
             <div class="info-card">
@@ -885,7 +885,7 @@ def main():
             <div class="info-card">
                 <div class="card-label">Status</div>
                 <div class="card-value">{heat_label}</div>
-                <div class="card-sub"></div>
+                <div class="card-sub">&nbsp;</div>
             </div>
             """,
             unsafe_allow_html=True,
