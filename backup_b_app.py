@@ -435,6 +435,7 @@ def compute_signal_and_score(tc_up_date: pd.Timestamp,
 # Chart overlay helpers
 # =======================================================
 def draw_score_overlay(ax, score: int):
+    """Score number on chart - uses exact same hex as card colors."""
     if score < 60:
         score_color = COLOR_STABLE
     elif score < 80:
@@ -445,12 +446,13 @@ def draw_score_overlay(ax, score: int):
         0.02, 0.78, str(score),
         transform=ax.transAxes, fontsize=36, color=score_color,
         fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20,
+        alpha=0.95,
     )
 
 
 def draw_logo_overlay(ax):
     ax.text(
-        0.95, 0.03, "OUT-STANDER",
+        0.95, 0.05, "OUT-STANDER",
         transform=ax.transAxes, fontsize=24, color='#3d3320',
         fontweight='bold', fontname='serif', ha='right', va='bottom',
         zorder=0, alpha=0.9,
@@ -475,7 +477,7 @@ def main():
             color: #ffffff !important;
             font-family: 'Times New Roman', serif;
         }}
-        /* Fix: Force dark background on ALL text input fields */
+        /* Force dark background on ALL text input fields */
         input[type="text"], input[aria-autocomplete] {{
             background-color: #111111 !important;
             color: #ffffff !important;
@@ -557,8 +559,8 @@ def main():
             border: 1px solid {COLOR_CARD_BORDER};
             border-radius: 0px;
             padding: 16px 24px;
-            margin-top: 12px;
-            margin-bottom: 4px;
+            margin-top: 16px;
+            margin-bottom: 12px;
             display: flex;
             gap: 36px;
             align-items: center;
@@ -682,7 +684,7 @@ def main():
     ax.axvline(bubble_res["tc_date"], color=COLOR_TURN_UP,
                linestyle="--", linewidth=1.2, alpha=0.8)
 
-    # Peak vertical line (line only, no text - fix #1)
+    # Peak vertical line (line only, no text)
     ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
 
     # Negative bubble (if detected)
@@ -713,12 +715,12 @@ def main():
             color=COLOR_GOLD, fontsize=10, fontweight='bold',
             fontname='serif', va='center', zorder=10)
 
-    # Y-axis range (sufficient headroom without Peak text)
+    # Y-axis range
     peak_val = price_series.max()
     y_min_data = price_series.min()
     y_max_data = peak_val
     y_range = y_max_data - y_min_data
-    ax.set_ylim(y_min_data - y_range * 0.03, y_max_data + y_range * 0.08)
+    ax.set_ylim(y_min_data - y_range * 0.05, y_max_data + y_range * 0.08)
 
     # Ticker name (top left)
     ax.text(0.02, 0.92, ticker.strip(),
@@ -745,7 +747,7 @@ def main():
     # CARD GROUP (Below chart)
     # =======================================================
 
-    # ---- Score Legend (horizontal, larger font - fix #4) ----
+    # ---- Score Legend (horizontal, larger font) ----
     score_legend_html = f"""
     <div class="score-legend">
         <div class="legend-item">
@@ -783,7 +785,7 @@ def main():
         tc_down_str = pd.Timestamp(neg_res["tc_date"]).strftime("%Y-%m-%d")
         days_to_turn_down = (pd.Timestamp(neg_res["tc_date"]).normalize() - pd.Timestamp(end_date).normalize()).days
     else:
-        tc_down_str = "N/A"
+        tc_down_str = None
         days_to_turn_down = None
 
     def _days_display(d):
@@ -834,8 +836,8 @@ def main():
             unsafe_allow_html=True,
         )
 
-    # ---- Info cards: Row 2 (Turn Up / Turn Down) - 2 columns ----
-    col_turn_up, col_turn_down = st.columns(2)
+    # ---- Info cards: Row 2 (Turn Up / Turn Down / empty) - 3 columns for balance ----
+    col_turn_up, col_turn_down, col_empty = st.columns(3)
 
     with col_turn_up:
         st.markdown(
@@ -850,17 +852,27 @@ def main():
         )
 
     with col_turn_down:
-        down_color = COLOR_TURN_DOWN if tc_down_str != "N/A" else "#555"
+        if tc_down_str is not None:
+            down_display = tc_down_str
+            down_color = COLOR_TURN_DOWN
+            down_sub = _days_display(days_to_turn_down)
+        else:
+            down_display = "None"
+            down_color = "#555"
+            down_sub = ""
         st.markdown(
             f"""
             <div class="info-card">
                 <div class="card-label">Turn (Down)</div>
-                <div class="card-value" style="color: {down_color};">{tc_down_str}</div>
-                <div class="card-sub">{_days_display(days_to_turn_down)}</div>
+                <div class="card-value" style="color: {down_color};">{down_display}</div>
+                <div class="card-sub">{down_sub}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+    with col_empty:
+        st.markdown("", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
