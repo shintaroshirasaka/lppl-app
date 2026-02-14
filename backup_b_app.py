@@ -466,9 +466,15 @@ def main():
     st.set_page_config(page_title="Out-stander", layout="wide")
 
     st.markdown(
+        '<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap" rel="stylesheet">',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap');
         .stApp {{
             background-color: {COLOR_BG} !important;
             color: #ffffff !important;
@@ -668,7 +674,7 @@ def main():
     # =======================================================
     # CHART (Admin-style HNWI design)
     # =======================================================
-    fig, ax = plt.subplots(figsize=(12, 6.5))
+    fig, ax = plt.subplots(figsize=(12, 6.5), dpi=72)
     fig.patch.set_facecolor(COLOR_BG)
     ax.set_facecolor(COLOR_BG)
 
@@ -740,6 +746,7 @@ def main():
     draw_score_overlay(ax, score)
     draw_logo_overlay(ax)
 
+    fig.tight_layout(pad=1.0)
     st.pyplot(fig)
     plt.close(fig)
 
