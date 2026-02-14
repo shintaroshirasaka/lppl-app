@@ -837,7 +837,7 @@ def main():
         )
 
     # ---- Info cards: Row 2 (Turn Up / Turn Down / empty) - 3 columns for balance ----
-    col_turn_up, col_turn_down, col_empty = st.columns(3)
+    col_turn_up, col_turn_down, col_status = st.columns(3)
 
     with col_turn_up:
         st.markdown(
@@ -871,8 +871,25 @@ def main():
             unsafe_allow_html=True,
         )
 
-    with col_empty:
-        st.markdown("", unsafe_allow_html=True)
+    with col_status:
+        fit_r2 = float(bubble_res.get("r2", 0.0))
+        fit_m = float(bubble_res["params"][3]) if len(bubble_res.get("params", [])) > 3 else 1.0
+        if fit_r2 > 0.70 and fit_m < 0.70:
+            heat_label = "Overheated"
+            heat_color = COLOR_RISK
+        else:
+            heat_label = "Normal"
+            heat_color = COLOR_STABLE
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Status</div>
+                <div class="card-value" style="color: {heat_color};">{heat_label}</div>
+                <div class="card-sub">R²={fit_r2:.2f} / m={fit_m:.2f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 if __name__ == "__main__":
