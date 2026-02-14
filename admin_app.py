@@ -85,6 +85,22 @@ SCRAPE_TTL_SECONDS = 60 * 60
 
 
 # =======================================================
+# COLOR PALETTE (Luxury / Muted tones)
+# =======================================================
+COLOR_RISK = "#C5504F"
+COLOR_CAUTION = "#C5A059"
+COLOR_STABLE = "#7B9971"
+COLOR_TURN_UP = "#C5504F"
+COLOR_TURN_DOWN = "#5A9E6F"
+COLOR_GOLD = "#C5A059"
+COLOR_BG = "#050505"
+COLOR_CARD_BG = "#0b0c0e"
+COLOR_CARD_BORDER = "#1a1c1f"
+COLOR_TEXT = "#F0F0F0"
+COLOR_TEXT_DIM = "#666"
+
+
+# =======================================================
 # FINAL SCORE SETTINGS (calendar-day distance)
 # =======================================================
 UP_FUTURE_NEAR_DAYS = 30
@@ -889,9 +905,9 @@ def compute_signal_and_score(tc_up_date, end_date, down_tc_date) -> tuple[str, i
 
 
 def draw_score_overlay(ax, score: int, label: str):
-    if score < 60: score_color = "#3CB371"
-    elif score < 80: score_color = "#ffc53d"
-    else: score_color = "#ff4d4f"
+    if score < 60: score_color = COLOR_STABLE
+    elif score < 80: score_color = COLOR_CAUTION
+    else: score_color = COLOR_RISK
     x_pos = 0.02
     y_pos = 0.86
     ax.text(x_pos, y_pos - 0.08, str(score), transform=ax.transAxes, fontsize=36, color=score_color, fontweight='bold', ha='left', va='bottom', fontname='serif', zorder=20)
@@ -1050,19 +1066,74 @@ def render_graph_pack_from_prices(prices, ticker, bench, window=20, trading_days
 def main():
     st.set_page_config(page_title="Out-stander Admin", layout="wide")
     st.markdown(
-        """
+        f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&display=swap');
-        .stApp { background-color: #050505 !important; color: #ffffff !important; }
-        div[data-testid="stMarkdownContainer"] p, label { color: #ffffff !important; font-family: 'Times New Roman', serif; }
-        input.st-ai, input.st-ah, div[data-baseweb="input"] { background-color: #111111 !important; color: #ffffff !important; border-color: #333 !important; }
-        input { color: #ffffff !important; }
-        input::placeholder { color: rgba(255,255,255,0.45) !important; }
-        div[data-baseweb="input"] svg { fill: #ffffff !important; }
-        div[data-testid="stFormSubmitButton"] button { background-color: #1a1a1a !important; color: #d4af37 !important; border: 1px solid #333 !important; font-family: 'Times New Roman', serif; }
-        div[data-testid="stFormSubmitButton"] button:hover { background-color: #d4af37 !important; border-color: #d4af37 !important; color: #000000 !important; }
-        [data-testid="stHeader"] { background: rgba(0,0,0,0) !important; }
-        .custom-error { background-color: #141518; border: 1px solid #2a2c30; border-radius: 0px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }
+        .stApp {{ background-color: {COLOR_BG} !important; color: #ffffff !important; }}
+        div[data-testid="stMarkdownContainer"] p, label {{ color: #ffffff !important; font-family: 'Times New Roman', serif; }}
+        input.st-ai, input.st-ah, div[data-baseweb="input"] {{ background-color: #111111 !important; color: #ffffff !important; border-color: #333 !important; }}
+        input {{ color: #ffffff !important; }}
+        input::placeholder {{ color: rgba(255,255,255,0.45) !important; }}
+        div[data-baseweb="input"] svg {{ fill: #ffffff !important; }}
+        div[data-testid="stFormSubmitButton"] button {{ background-color: #1a1a1a !important; color: {COLOR_GOLD} !important; border: 1px solid #333 !important; font-family: 'Times New Roman', serif; }}
+        div[data-testid="stFormSubmitButton"] button:hover {{ background-color: {COLOR_GOLD} !important; border-color: {COLOR_GOLD} !important; color: #000000 !important; }}
+        [data-testid="stHeader"] {{ background: rgba(0,0,0,0) !important; }}
+        .custom-error {{ background-color: #141518; border: 1px solid #2a2c30; border-radius: 0px; padding: 14px 18px; color: #ffffff; font-size: 0.95rem; margin-top: 12px; }}
+        .info-card {{
+            background-color: {COLOR_CARD_BG};
+            border: 1px solid {COLOR_CARD_BORDER};
+            border-radius: 0px;
+            padding: 16px 20px;
+            margin-top: 8px;
+        }}
+        .info-card .card-label {{
+            font-size: 0.75rem;
+            color: {COLOR_TEXT_DIM};
+            font-family: 'Times New Roman', serif;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }}
+        .info-card .card-value {{
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: {COLOR_TEXT};
+            font-family: 'Times New Roman', serif;
+            line-height: 1.2;
+        }}
+        .info-card .card-sub {{
+            font-size: 0.8rem;
+            color: #555;
+            font-family: 'Times New Roman', serif;
+            margin-top: 2px;
+        }}
+        .score-legend {{
+            background-color: {COLOR_CARD_BG};
+            border: 1px solid {COLOR_CARD_BORDER};
+            border-radius: 0px;
+            padding: 16px 24px;
+            margin-top: 16px;
+            margin-bottom: 12px;
+            display: flex;
+            gap: 36px;
+            align-items: center;
+        }}
+        .score-legend .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'Times New Roman', serif;
+            font-size: 1.0rem;
+        }}
+        .score-legend .legend-range {{
+            font-weight: 700;
+            font-size: 1.05rem;
+        }}
+        .score-legend .legend-label {{
+            font-weight: 400;
+            color: #999;
+            font-size: 1.0rem;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -1121,19 +1192,18 @@ def main():
     signal_label, score = compute_signal_and_score(tc_up_date, end_ts, down_tc_date)
 
     fig, ax = plt.subplots(figsize=(12, 6.5))
-    BG_COLOR = "#050505"
+    BG_COLOR = COLOR_BG
     fig.patch.set_facecolor(BG_COLOR)
     ax.set_facecolor(BG_COLOR)
-    ax.plot(price_series.index, price_series.values, color="#F0F0F0", linewidth=0.8, alpha=0.9, zorder=5)
-    GOLD_COLOR = "#C5A059"
-    ax.plot(price_series.index, bubble_res["price_fit"], color=GOLD_COLOR, linewidth=2.0, alpha=1.0, zorder=6)
-    ax.axvline(bubble_res["tc_date"], color="#ff4d4f", linestyle="--", linewidth=1.2, alpha=0.8)
+    ax.plot(price_series.index, price_series.values, color=COLOR_TEXT, linewidth=0.8, alpha=0.9, zorder=5)
+    ax.plot(price_series.index, bubble_res["price_fit"], color=COLOR_GOLD, linewidth=2.0, alpha=1.0, zorder=6)
+    ax.axvline(bubble_res["tc_date"], color=COLOR_TURN_UP, linestyle="--", linewidth=1.2, alpha=0.8)
     ax.axvline(peak_date, color="white", linestyle=":", linewidth=0.5, alpha=0.4)
     if neg_res.get("ok"):
         down = neg_res["down_series"]
         ax.plot(down.index, down.values, color="cyan", linewidth=0.8, alpha=0.7)
         ax.plot(down.index, neg_res["price_fit_down"], "--", color="#008b8b", linewidth=1.5, alpha=0.8)
-        ax.axvline(neg_res["tc_date"], color="#00ff00", linestyle="--", linewidth=1.2, alpha=0.8)
+        ax.axvline(neg_res["tc_date"], color=COLOR_TURN_DOWN, linestyle="--", linewidth=1.2, alpha=0.8)
     last_date = price_series.index[-1]
     total_days = (last_date - price_series.index[0]).days
     margin_days = int(total_days * 0.15)
@@ -1142,12 +1212,12 @@ def main():
     last_price = price_series.values[-1]
     last_model_val = bubble_res["price_fit"][-1]
     text_date_offset = last_date + timedelta(days=2)
-    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color="#F0F0F0", fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
-    ax.text(text_date_offset, last_model_val, f" ← Model", color=GOLD_COLOR, fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
+    ax.text(text_date_offset, last_price, f" ← {ticker.strip()}", color=COLOR_TEXT, fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
+    ax.text(text_date_offset, last_model_val, f" ← Model", color=COLOR_GOLD, fontsize=10, fontweight='bold', fontname='serif', va='center', zorder=10)
     peak_val = price_series.max()
     peak_dt = price_series.idxmax()
     ax.text(peak_dt, peak_val * 1.05, f"Peak\n{peak_dt.strftime('%Y-%m-%d')}", color="#888888", fontsize=7, ha='center', fontname='sans-serif')
-    ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes, fontsize=28, color="#F0F0F0", fontweight='normal', fontname='serif')
+    ax.text(0.02, 0.92, ticker.strip(), transform=ax.transAxes, fontsize=28, color=COLOR_TEXT, fontweight='normal', fontname='serif')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_color('#333333')
@@ -1160,6 +1230,156 @@ def main():
     st.pyplot(fig)
     plt.close(fig)
 
+    # =======================================================
+    # SCORE LEGEND + INFO CARDS (Same as backup_b_app.py)
+    # =======================================================
+    score_legend_html = f"""
+    <div class="score-legend">
+        <div class="legend-item">
+            <span class="legend-range" style="color: {COLOR_RISK};">80 – 100</span>
+            <span class="legend-label">Risk</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-range" style="color: {COLOR_CAUTION};">60 – 79</span>
+            <span class="legend-label">Caution</span>
+        </div>
+        <div class="legend-item">
+            <span class="legend-range" style="color: {COLOR_STABLE};">0 – 59</span>
+            <span class="legend-label">Stable</span>
+        </div>
+    </div>
+    """
+    st.markdown(score_legend_html, unsafe_allow_html=True)
+
+    # Score display label/color
+    if score < 60:
+        display_label = "Stable"
+        label_color = COLOR_STABLE
+    elif score < 80:
+        display_label = "Caution"
+        label_color = COLOR_CAUTION
+    else:
+        display_label = "Risk"
+        label_color = COLOR_RISK
+
+    tc_up_str = pd.Timestamp(bubble_res["tc_date"]).strftime("%Y-%m-%d")
+    peak_date_str = pd.Timestamp(peak_date).strftime("%Y-%m-%d")
+    days_to_turn_up = (pd.Timestamp(bubble_res["tc_date"]).normalize() - pd.Timestamp(end_date).normalize()).days
+
+    if neg_res.get("ok"):
+        tc_down_str = pd.Timestamp(neg_res["tc_date"]).strftime("%Y-%m-%d")
+        days_to_turn_down = (pd.Timestamp(neg_res["tc_date"]).normalize() - pd.Timestamp(end_date).normalize()).days
+    else:
+        tc_down_str = None
+        days_to_turn_down = None
+
+    def _days_display(d):
+        if d is None:
+            return ""
+        if d > 0:
+            return f"{d}d ahead"
+        elif d == 0:
+            return "Today"
+        else:
+            return f"{abs(d)}d ago"
+
+    # Row 1: Score / Peak / Gain
+    col_score, col_peak, col_gain = st.columns(3)
+
+    with col_score:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Score</div>
+                <div class="card-value" style="color: {label_color};">{score}</div>
+                <div class="card-sub" style="color: {label_color};">{display_label}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_peak:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Peak</div>
+                <div class="card-value">{peak_date_str}</div>
+                <div class="card-sub">{peak_price:,.2f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_gain:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Gain (Start → Peak)</div>
+                <div class="card-value">{gain:.2f}x</div>
+                <div class="card-sub">{gain_pct:+.1f}%</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Row 2: Turn Up / Turn Down / Temperature
+    col_turn_up, col_turn_down, col_temp = st.columns(3)
+
+    with col_turn_up:
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Turn (Up)</div>
+                <div class="card-value">{tc_up_str}</div>
+                <div class="card-sub">{_days_display(days_to_turn_up)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_turn_down:
+        if tc_down_str is not None:
+            down_display = tc_down_str
+            down_color = COLOR_TEXT
+            down_sub = _days_display(days_to_turn_down)
+        else:
+            down_display = "None"
+            down_color = COLOR_TEXT
+            down_sub = "&nbsp;"
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Turn (Down)</div>
+                <div class="card-value" style="color: {down_color};">{down_display}</div>
+                <div class="card-sub">{down_sub}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_temp:
+        fit_r2 = float(bubble_res.get("r2", 0.0))
+        fit_m = float(bubble_res["params"][3]) if len(bubble_res.get("params", [])) > 3 else 1.0
+        if fit_r2 > 0.70 and fit_m < 0.70:
+            heat_label = "Overheated"
+            heat_color = COLOR_RISK
+        else:
+            heat_label = "Normal"
+            heat_color = COLOR_STABLE
+        st.markdown(
+            f"""
+            <div class="info-card">
+                <div class="card-label">Temperature</div>
+                <div class="card-value">{heat_label}</div>
+                <div class="card-sub">&nbsp;</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # =======================================================
+    # SHORT VOLUME ANALYSIS (unchanged from original)
+    # =======================================================
     ticker_clean = ticker.strip()
     is_jp = ticker_clean.endswith(".T")
     is_non_us = any(ticker_clean.endswith(sfx) for sfx in [".T", ".HK", ".L", ".DE", ".PA", ".AS", ".MI", ".SW"])
@@ -1214,11 +1434,11 @@ def main():
         st.info(f"Short volume analysis is currently supported for US stocks (FINRA) and JP stocks (.T). Ticker '{ticker_clean}' is not in a supported market.")
 
     if signal_label == "HIGH":
-        risk_label = "High"; risk_color = "#ff4d4f"
+        risk_label = "High"; risk_color = COLOR_RISK
     elif signal_label == "CAUTION":
-        risk_label = "Caution"; risk_color = "#ffc53d"
+        risk_label = "Caution"; risk_color = COLOR_CAUTION
     else:
-        risk_label = "Safe"; risk_color = "#3CB371"
+        risk_label = "Safe"; risk_color = COLOR_STABLE
 
     st.markdown("---")
     pdict = bubble_res.get("param_dict", {})
