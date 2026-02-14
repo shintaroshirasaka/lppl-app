@@ -844,7 +844,7 @@ def main():
             f"""
             <div class="info-card">
                 <div class="card-label">Turn (Up)</div>
-                <div class="card-value" style="color: {COLOR_TURN_UP};">{tc_up_str}</div>
+                <div class="card-value">{tc_up_str}</div>
                 <div class="card-sub">{_days_display(days_to_turn_up)}</div>
             </div>
             """,
@@ -854,11 +854,11 @@ def main():
     with col_turn_down:
         if tc_down_str is not None:
             down_display = tc_down_str
-            down_color = COLOR_TURN_DOWN
+            down_color = COLOR_TEXT
             down_sub = _days_display(days_to_turn_down)
         else:
             down_display = "None"
-            down_color = "#555"
+            down_color = COLOR_TEXT
             down_sub = ""
         st.markdown(
             f"""
@@ -884,8 +884,8 @@ def main():
             f"""
             <div class="info-card">
                 <div class="card-label">Status</div>
-                <div class="card-value" style="color: {heat_color};">{heat_label}</div>
-                <div class="card-sub">R²={fit_r2:.2f} / m={fit_m:.2f}</div>
+                <div class="card-value">{heat_label}</div>
+                <div class="card-sub"></div>
             </div>
             """,
             unsafe_allow_html=True,
